@@ -776,7 +776,7 @@ nav {
     </section>
 
     <section aria-labelledby="stats-mix-title" class="sec">
-      <div class="sec-hd"><h2 class="sec-title" id="stats-mix-title">Activity mix</h2></div>
+      <div class="sec-hd"><h2 class="sec-title" id="stats-mix-title">Activity mix</h2><span class="sec-meta" id="statsMixMeta"></span></div>
       <div class="card" style="padding:16px"><div id="statsMixOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div></div></div></div>
     </section>
 
@@ -1362,7 +1362,7 @@ function renderDowChart(dowSignal) {
   if (!dowSignal || !Object.keys(dowSignal).length) return '';
   const max = Math.max(...Object.values(dowSignal));
   const BAR_H = 68; // px available for bars
-  let h = '<div class="dow-chart">';
+  let h = '<div class="dow-chart" style="padding-top:12px">';
   for (let d = 0; d < 7; d++) {
     const norm = dowSignal[d] ?? dowSignal[String(d)] ?? 0;
     const pct  = Math.round(norm * 100);
@@ -2161,6 +2161,8 @@ async function loadStats() {
   const mix = await mixPromise;
   if (clubId !== CLUB) return;
   if (mix && mix.total > 0) {
+    const metaMix = document.getElementById('statsMixMeta');
+    if (metaMix) metaMix.textContent = now.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: TZ }) + ' · ' + mix.total + ' sampled';
     const sorted = Object.entries(mix.counts).sort((a,b) => b[1]-a[1]);
     let mh = '';
     for (const [type, count] of sorted) {
