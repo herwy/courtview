@@ -2558,6 +2558,7 @@ async function switchClub(id) {
   // Reload availability + heatmap; then pre-load all other tabs in background
   await Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]);
   loadStats(); loadCourtPopularity();
+  setTimeout(() => { if (!clubLoaded) loadClubInfo(); }, 200);
   setTimeout(() => { if (!compareLoaded) loadCompare(); }, 300);
   setTimeout(() => { if (!revLoaded) loadRevenue(); }, 2000);
 }
@@ -2594,6 +2595,9 @@ function warmOtherClubs() {
         `/api/activity-summary?club_id=${id}&start=${moStart}&end=${moEnd}`,
         `/api/coach-stats?club_id=${id}&start=${moStart}&end=${moEnd}`,
         `/api/revenue-summary?club_id=${id}&start=${moStart}&end=${moEnd}`,
+        `/api/club-info?club_id=${id}`,
+        `/api/court-popularity?club_id=${id}`,
+        `/api/membership-members?club_id=${id}`,
       ].forEach(url => apiFetch(url).catch(() => {}));
     }, delay);
   });
@@ -2607,6 +2611,7 @@ setupNotifyPanel();
 setupClubSelector();
 Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]).then(() => {
   loadStats(); loadCourtPopularity();
+  setTimeout(() => { if (!clubLoaded) loadClubInfo(); }, 200);
   setTimeout(() => { if (!compareLoaded) loadCompare(); }, 500);
   setTimeout(() => { if (!revLoaded) loadRevenue(); }, 3000);
   // Warm server-side cache for all other clubs so switching is instant
