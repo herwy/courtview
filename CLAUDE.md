@@ -96,9 +96,11 @@ Rationale: endpoints discovered via Android APK (com.padelmates). Version 8.5.9 
 
 ## Upstream API
 
-`https://fastapi-production-fargate.padelmates.io` - unauthenticated iOS app API.
+`https://fastapi-production-fargate.padelmates.io` - unauthenticated Android/iOS app API (endpoints discovered via Android APK).
 
 Allowed proxy paths are whitelisted in `ALLOWED_PATHS` in courtview.py.
+
+All Padelmates requests are made server-side by Flask. The browser never contacts Padelmates directly — Padelmates only ever sees the RPi's IP and the Android OkHttp headers above, not the browser's IP or UA.
 
 **Security findings (2026-05-21):** See `.claude/docs/padelmates-disclosure-2026-05-21.md`. Key facts:
 - `/club/follower/crud` exposes 15,308+ user records (name, email, phone) per club with no auth. NOT proxied.
@@ -113,4 +115,5 @@ Allowed proxy paths are whitelisted in `ALLOWED_PATHS` in courtview.py.
 - The SQLite cache (`*.db`) and `access.log` are RPi runtime files - never commit them.
 - Web assets in `/root/labs/web/` are shared with the nightwatch dashboard (separate repo: doxxnet-labs). Do not edit them from here; CourtView only consumes them.
 - No nightwatch session concept here - the Flask server is killable and restartable at any time.
-- `cv-deploy` installs gunicorn if not present (`pip3 install gunicorn`) and starts via gunicorn.
+- Gunicorn is the process manager; Flask is still the app. Gunicorn replaced `app.run()`, not Flask. All routing, proxy logic, and header injection happen inside Flask.
+- `cv-deploy` installs gunicorn if not present and starts it. Gunicorn + watchdog also start automatically on RPi reboot via `@reboot` crontab entries (sleep 15s / 18s to let networking come up).
