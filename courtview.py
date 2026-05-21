@@ -60,6 +60,15 @@ ALLOWED_PATHS = {
 # Path that uses the SQLite availability cache
 CACHED_PATH = "/player/player_booking/all_courts_slot_prices"
 
+# Clubs and court counts for server-side heatmap fetching
+HEATMAP_CLUBS = [
+    {"id": "5111764d9bb14be3adbdb8e133e8bd80", "courts": 11},  # Racketeer
+    {"id": "47d2eb0db7194a9dbd29783c3a2a82ad", "courts": 7},   # Padium Canary Wharf
+    {"id": "788fa2c66535421aabc60fd27f941c42",  "courts": 12},  # Rocket Padel Ilford
+]
+HEATMAP_HOURS      = list(range(7, 23))   # 07:00-22:00
+HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h
+
 # Runtime paths on RPi
 TOKEN_PATH      = "/root/.courtview_token"
 DB_PATH         = "/root/projects/courtview/courtview_cache.db"
@@ -366,17 +375,28 @@ def _set_cookie(response, token: str) -> None:
 # ---------------------------------------------------------------------------
 
 def init_db() -> None:
-    """Create the cache database and table if they do not exist."""
+    """Create the cache database and tables if they do not exist."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute(
         """CREATE TABLE IF NOT EXISTS availability (
-               club_id       TEXT,
+               club_id        TEXT,
                start_datetime TEXT,
                end_datetime   TEXT,
                payload        TEXT,
                fetched_at     INTEGER,
                PRIMARY KEY (club_id, start_datetime, end_datetime)
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS heatmap_cache (
+               club_id    TEXT,
+               dow        INTEGER,
+               hour       INTEGER,
+               avg_occ    REAL,
+               samples    INTEGER,
+               fetched_at INTEGER,
+               PRIMARY KEY (club_id, dow, hour)
            )"""
     )
     conn.commit()
@@ -520,6 +540,44 @@ def static_asset(filename):
         ".svg": "image/svg+xml", ".woff2": "font/woff2",
     }
     resp = Response(data, status=200, content_type=content_types.get(ext.lower(), "application/octet-stream"))
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/heatmap", methods=["GET"])
+def api_heatmap():
+    """Return pre-built DOW occupancy matrix from SQLite. Served from server-side cache."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    if not club_id:
+        return jsonify({"error": "club_id required"}), 400
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT dow, hour, avg_occ, samples, fetched_at FROM heatmap_cache WHERE club_id=?",
+            (club_id,),
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    if not rows:
+        return jsonify({"club_id": club_id, "fetched_at": None, "buckets": {}}), 200
+
+    buckets: dict = {}
+    fetched_at = 0
+    for dow, hour, avg_occ, samples, fa in rows:
+        buckets.setdefault(str(dow), {})[str(hour)] = round(avg_occ, 4)
+        if fa > fetched_at:
+            fetched_at = fa
+
+    resp = Response(
+        json.dumps({"club_id": club_id, "fetched_at": fetched_at, "buckets": buckets}),
+        status=200, content_type="application/json",
+    )
     if via_query:
         _set_cookie(resp, via_query)
     return resp
@@ -693,6 +751,83 @@ def access_data():
 
 
 # ---------------------------------------------------------------------------
+# Heatmap: server-side get_booked_hours aggregation
+# ---------------------------------------------------------------------------
+
+def _heatmap_is_stale(club_id: str) -> bool:
+    """Return True if heatmap data for this club is absent or older than HEATMAP_STALE_SECS."""
+    cutoff = int(_now()) - HEATMAP_STALE_SECS
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute(
+            "SELECT MIN(fetched_at) FROM heatmap_cache WHERE club_id=?", (club_id,)
+        ).fetchone()
+        conn.close()
+        oldest = row[0] if row and row[0] is not None else 0
+        return oldest < cutoff
+    except sqlite3.Error:
+        return True
+
+
+def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
+    """Fetch past 7 days x 16 hours of get_booked_hours, aggregate by DOW, store in SQLite."""
+    from datetime import datetime as _dt, timedelta as _td
+    print(f"[heatmap] fetching for club {club_id} ({n_courts} courts)")
+
+    buckets: dict = {}  # {(dow, hour): [occupancy_values]}
+    for d in range(7):
+        for hr in HEATMAP_HOURS:
+            buckets[(d, hr)] = []
+
+    for day_offset in range(1, 8):
+        date = _dt.utcnow().date() - _td(days=day_offset)
+        dow  = (date.weekday())  # Mon=0 already matches our scheme
+
+        for hr in HEATMAP_HOURS:
+            start_ms = int(_dt(date.year, date.month, date.day, hr, 0).timestamp() * 1000)
+            end_ms   = start_ms + 3599000  # 59:59 into the hour
+            url      = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start_ms}&end_datetime={end_ms}"
+            try:
+                r    = cffi_requests.get(url, headers=APP_HEADERS, timeout=10)
+                data = r.json()
+                occ  = min(1.0, (data.get("total_booked_hours") or 0) / n_courts)
+                buckets[(dow, hr)].append(occ)
+            except Exception as exc:
+                print(f"[heatmap] error club={club_id} day-{day_offset} hr={hr}: {exc}")
+            time.sleep(random.uniform(0.10, 0.18))
+
+    now_ts = int(_now())
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        for (dow, hr), values in buckets.items():
+            if not values:
+                continue
+            avg_occ = sum(values) / len(values)
+            conn.execute(
+                "INSERT OR REPLACE INTO heatmap_cache (club_id, dow, hour, avg_occ, samples, fetched_at) VALUES (?,?,?,?,?,?)",
+                (club_id, dow, hr, avg_occ, len(values), now_ts),
+            )
+        conn.commit()
+        conn.close()
+        print(f"[heatmap] stored for club {club_id}")
+    except sqlite3.Error as exc:
+        print(f"[heatmap] db write error: {exc}")
+
+
+def _heatmap_refresh_loop() -> None:
+    """On startup refresh any stale clubs, then refresh all clubs every 24h."""
+    # Staggered startup: refresh each club that needs it
+    for club in HEATMAP_CLUBS:
+        if _heatmap_is_stale(club["id"]):
+            _fetch_heatmap_for_club(club["id"], club["courts"])
+    # Daily refresh loop
+    while True:
+        time.sleep(HEATMAP_STALE_SECS)
+        for club in HEATMAP_CLUBS:
+            _fetch_heatmap_for_club(club["id"], club["courts"])
+
+
+# ---------------------------------------------------------------------------
 # Background cache refresh thread
 # ---------------------------------------------------------------------------
 
@@ -781,6 +916,10 @@ if __name__ == "__main__":
 
     refresh_thread = threading.Thread(target=_refresh_loop, daemon=True)
     refresh_thread.start()
-    print("[startup] refresh thread started (6h cycle)")
+    print("[startup] availability refresh thread started (6h cycle)")
+
+    heatmap_thread = threading.Thread(target=_heatmap_refresh_loop, daemon=True)
+    heatmap_thread.start()
+    print(f"[startup] heatmap refresh thread started ({len(HEATMAP_CLUBS)} clubs, 24h cycle)")
 
     app.run(host="0.0.0.0", port=8766, debug=False, threaded=True, use_reloader=False)

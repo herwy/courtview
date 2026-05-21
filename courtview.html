@@ -1070,12 +1070,9 @@ function renderB2B(courts, dur) {
   return h;
 }
 
-/* HEATMAP · real occupancy from get_booked_hours, past 7 days */
-
-let realHeatCache = {}; // { clubId: { dow: { hr: { sum, count } } } }
+/* HEATMAP · served from server-side SQLite cache via /api/heatmap */
 
 function hmColor(occupancy) {
-  // occupancy: 0 = empty, 1 = fully booked
   if (occupancy < 0.25) return 'rgba(16,185,129,0.55)';
   if (occupancy < 0.50) return 'rgba(113,112,255,0.38)';
   if (occupancy < 0.75) return 'rgba(245,158,11,0.38)';
@@ -1083,9 +1080,10 @@ function hmColor(occupancy) {
   return 'rgba(239,68,68,0.18)';
 }
 
-function renderRealHeatmap(buckets) {
-  const hasData = Object.values(buckets).some(d => Object.values(d).some(b => b.count > 0));
-  if (!hasData) return '<div class="empty">No occupancy data yet.</div>';
+function renderRealHeatmap(rawBuckets) {
+  // rawBuckets: { "0": { "7": 0.45, "8": 0.62, ... }, ... } (strings from JSON)
+  if (!rawBuckets || !Object.keys(rawBuckets).length)
+    return '<div class="empty">Occupancy data building — check back shortly.</div>';
 
   let h = '<div class="hm-scroll"><table class="hm-table" role="grid" aria-label="Real occupancy past 7 days"><thead><tr>';
   h += '<th class="rl" scope="col"></th>';
@@ -1095,16 +1093,11 @@ function renderRealHeatmap(buckets) {
   for (const hr of HM_HRS) {
     h += `<tr><th class="rl" scope="row">${hr}:00</th>`;
     for (let d = 0; d < 7; d++) {
-      const b = buckets[d][hr];
-      const occ = b.count > 0 ? b.sum / b.count : null;
+      const occ = rawBuckets[d]?.[hr] ?? rawBuckets[String(d)]?.[String(hr)] ?? null;
       const col = occ !== null ? hmColor(occ) : 'rgba(255,255,255,0.025)';
       const pct = occ !== null ? Math.round(occ * 100) : null;
-      const lbl = occ !== null
-        ? `${WEEK_DAYS[d]} ${hr}:00 - ${pct}% booked`
-        : `${WEEK_DAYS[d]} ${hr}:00 - no data`;
-      h += `<td><div class="hm-cell" style="background:${col}"
-        tabindex="0" role="gridcell"
-        title="${lbl}" aria-label="${lbl}"></div></td>`;
+      const lbl = occ !== null ? `${WEEK_DAYS[d]} ${hr}:00 - ${pct}% booked` : `${WEEK_DAYS[d]} ${hr}:00 - no data`;
+      h += `<td><div class="hm-cell" style="background:${col}" tabindex="0" role="gridcell" title="${lbl}" aria-label="${lbl}"></div></td>`;
     }
     h += '</tr>';
   }
@@ -1113,50 +1106,17 @@ function renderRealHeatmap(buckets) {
 }
 
 async function loadRealHeatmap() {
-  const clubId   = CLUB;
-  const nCourts  = clubInfo.courts || 11;
-  const hmOut    = document.getElementById('hmOut');
-
-  if (realHeatCache[clubId]) {
-    hmOut.innerHTML = renderRealHeatmap(realHeatCache[clubId]);
-    return;
+  const clubId = CLUB;
+  const hmOut  = document.getElementById('hmOut');
+  try {
+    const r = await apiFetch(`${API}/api/heatmap?club_id=${clubId}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if (CLUB === clubId) hmOut.innerHTML = renderRealHeatmap(d.buckets || {});
+  } catch(e) {
+    if (CLUB === clubId)
+      hmOut.innerHTML = `<div class="empty">Occupancy data building in background.</div>`;
   }
-
-  // Init buckets: dow 0=Mon..6=Sun, each hour
-  const buckets = {};
-  for (let d = 0; d < 7; d++) {
-    buckets[d] = {};
-    for (const hr of HM_HRS) buckets[d][hr] = { sum: 0, count: 0 };
-  }
-
-  // Fetch past 7 days × 16 hours = 112 calls, staggered
-  for (let offset = 1; offset <= 7; offset++) {
-    const date = new Date();
-    date.setDate(date.getDate() - offset);
-    const dow = (date.getDay() + 6) % 7; // Sun=0 → Mon=0
-
-    for (const hr of HM_HRS) {
-      if (CLUB !== clubId) return; // club switched mid-fetch — abort
-
-      const dayBase = new Date(date);
-      dayBase.setHours(0, 0, 0, 0);
-      const start = dayBase.getTime() + hr * 3600000;
-      const end   = start + 3599000;
-
-      try {
-        const r  = await apiFetch(`${API}/home/activity/get_booked_hours?club_id=${clubId}&start_datetime=${start}&end_datetime=${end}`);
-        const dj = await r.json();
-        const occ = Math.min(1, (dj.total_booked_hours || 0) / nCourts);
-        buckets[dow][hr].sum   += occ;
-        buckets[dow][hr].count += 1;
-      } catch { /* skip on error */ }
-
-      await sleep(jitter(100, 180));
-    }
-  }
-
-  realHeatCache[clubId] = buckets;
-  if (CLUB === clubId) hmOut.innerHTML = renderRealHeatmap(buckets);
 }
 
 /* RECOMMENDATIONS · still based on next 7 days only */
