@@ -307,7 +307,6 @@ nav {
   cursor: default; transition: all 140ms ease;
 }
 .b2b:hover { background: rgba(255,255,255,0.035); border-color: rgba(255,255,255,0.12); }
-.b2b.best { border-color: rgba(113,112,255,0.32); background: rgba(113,112,255,0.055); }
 .b2b-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
 .b2b-time { font-size: 15px; font-weight: 600; letter-spacing: -0.2px; font-variant-numeric: tabular-nums; }
 .b2b-price { font-size: 14px; font-weight: 600; color: var(--text-2); font-variant-numeric: tabular-nums; text-align: right; }
@@ -325,7 +324,6 @@ nav {
 .tag-op { background: var(--op-bg); border-color: var(--op-bd); color: var(--op-tx); }
 .tag-st { background: var(--st-bg); border-color: var(--st-bd); color: var(--st-tx); }
 .tag-pk { background: var(--pk-bg); border-color: var(--pk-bd); color: var(--pk-tx); }
-.tag-best { background: rgba(113,112,255,0.12); border-color: rgba(113,112,255,0.3); color: var(--accent-v); }
 .tag-sc { background: rgba(255,255,255,0.04); border-color: var(--border); color: var(--text-4); }
 
 /* BOTTOM GRID */
@@ -1039,10 +1037,9 @@ function renderB2B(courts, dur) {
   if (!results.length) return '<div class="empty">No combinations found for this duration on this date. Try a different day.</div>';
 
   let h = '<div class="b2b-grid">';
-  results.forEach(({chain, price, sameCourt, startMs, endMs}, idx) => {
-    const best = idx === 0;
+  results.forEach(({chain, price, sameCourt, startMs, endMs}) => {
     const tiers = [...new Set(chain.map(s => tier(s.price / (s.dur/60))))];
-    h += `<div class="b2b${best?' best':''}">`;
+    h += `<div class="b2b">`;
     h += `<div class="b2b-top">
       <div class="b2b-time">${localHM(startMs)} - ${localHM(endMs)}</div>
       <div class="b2b-price">£${price}<div class="b2b-pp">£${Math.round(price/4)}pp</div></div>
@@ -1061,7 +1058,6 @@ function renderB2B(courts, dur) {
     });
     h += '</div>';
     h += '<div class="tags">';
-    if (best)       h += `<span class="tag tag-best">Best value</span>`;
     if (sameCourt)  h += `<span class="tag tag-sc">Same court</span>`;
     tiers.forEach(t => h += `<span class="tag tag-${t}">${tierLabel(t)}</span>`);
     h += '</div></div>';
