@@ -1112,78 +1112,109 @@ async function loadRealHeatmap() {
     const r = await fetch(`/api/heatmap?club_id=${clubId}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
-    if (CLUB === clubId) hmOut.innerHTML = renderRealHeatmap(d.buckets || {});
+    if (CLUB === clubId) {
+      hmOut.innerHTML = renderRealHeatmap(d.buckets || {});
+      activeHmBuckets = d.buckets || null;
+      updateRecs();
+    }
   } catch(e) {
     if (CLUB === clubId)
       hmOut.innerHTML = `<div class="empty">Occupancy data building in background.</div>`;
   }
 }
 
-/* RECOMMENDATIONS · still based on next 7 days only */
-function buildRecs(cache) {
-  const cands = [];
+let activeHmBuckets = null; // set when heatmap loads, used by recs
+
+/* RECOMMENDATIONS · historical occupancy (heatmap) + upcoming price */
+
+function buildRecs() {
+  if (!activeHmBuckets) return [];
   const todayStr = isoDate(new Date());
   const nowHour  = new Date().getHours();
-  const next7 = [];
+  const prefix   = `${CLUB}/`;
+  const cands    = [];
+
+  // Build lookup: dow+hour → upcoming slots (next 7 days)
+  const upcoming = {}; // { "dow:hr": [{date, avgP, dateLabel}] }
   for (let i = 0; i < 7; i++) {
     const d = new Date(); d.setDate(d.getDate() + i);
-    next7.push(isoDate(d));
-  }
-
-  for (const day of next7) {
-    const courts = (cache[day] || []).filter(c => c.sport_type === 'PADEL');
+    const dateStr = isoDate(d);
+    const dow = (d.getDay() + 6) % 7;
+    const courts = (monthCache[prefix + dateStr] || []).filter(c => c.sport_type === 'PADEL');
     if (!courts.length) continue;
-    const total = courts.length;
-
     for (const hr of HM_HRS) {
-      if (day === todayStr && hr <= nowHour) continue;
-      let avail = 0;
+      if (dateStr === todayStr && hr <= nowHour) continue;
       const prices = [];
       for (const court of courts) {
-        let courtHas = false;
         for (const sl of (court.available_slots || [])) {
           if (localHour(sl.start_datetime) === hr) {
-            courtHas = true;
             const q = p60(sl);
             if (q > 0) prices.push(q);
           }
         }
-        if (courtHas) avail++;
       }
-      if (!total) continue;
-      const ratio = avail / total;
-      if (ratio < 0.15) continue;
-      const avgP = prices.length ? Math.round(prices.reduce((a,b)=>a+b,0)/prices.length) : 80;
-      const t = tier(avgP);
-      const score = ratio * 0.6 + (1 - avgP/100) * 0.4;
-      const d = new Date(day+'T12:00:00');
-      cands.push({
-        day, hr, ratio, avgP, t, score,
-        dayLong: d.toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'short',timeZone:TZ})
+      if (!prices.length) continue;
+      const avgP = Math.round(prices.reduce((a,b)=>a+b,0)/prices.length);
+      const key = `${dow}:${hr}`;
+      if (!upcoming[key]) upcoming[key] = [];
+      upcoming[key].push({
+        date: dateStr,
+        avgP,
+        dateLabel: d.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',timeZone:TZ})
       });
     }
   }
-  return cands.sort((a,b) => b.score - a.score).slice(0,4);
+
+  // Score each DOW+hour that has upcoming slots AND heatmap data
+  for (const [key, slots] of Object.entries(upcoming)) {
+    const [dow, hr] = key.split(':').map(Number);
+    const histOcc = activeHmBuckets[String(dow)]?.[String(hr)] ?? activeHmBuckets[dow]?.[hr] ?? null;
+    if (histOcc === null) continue;
+
+    const avgP = Math.round(slots.reduce((s,x)=>s+x.avgP,0)/slots.length);
+    const t    = tier(avgP);
+    const nextSlot = slots[0]; // earliest upcoming slot
+
+    // Score: 50% quiet history, 30% price cheapness, 20% slots available this week
+    const score = (1 - histOcc) * 0.5 + (1 - Math.min(avgP,100)/100) * 0.3 + Math.min(slots.length/3,1) * 0.2;
+
+    const dowName = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][dow];
+    cands.push({ dow, hr, histOcc, avgP, t, score, slots, nextSlot, dowName });
+  }
+
+  // Deduplicate: one result per DOW (keep best hour per day)
+  const byDow = new Map();
+  for (const c of cands.sort((a,b)=>b.score-a.score)) {
+    if (!byDow.has(c.dow)) byDow.set(c.dow, c);
+  }
+  return [...byDow.values()].sort((a,b)=>b.score-a.score).slice(0,4);
 }
 
 function renderRecs(recs) {
-  if (!recs.length) return '<div class="empty">Not enough data yet.</div>';
+  if (!recs || !recs.length) return '<div class="empty">Loading recommendations...</div>';
   const ranks = ['Best pick','2nd','3rd','4th'];
   let h = '<div class="rec-list">';
   recs.forEach((r,i) => {
-    const sc = Math.round(r.score * 100);
+    const sc  = Math.round(r.score * 100);
+    const occ = Math.round(r.histOcc * 100);
+    const occCol = r.histOcc < 0.25 ? 'var(--op-tx)' : r.histOcc < 0.50 ? 'var(--accent-v)' : r.histOcc < 0.75 ? 'var(--pk-tx)' : 'var(--text-2)';
     h += `<div class="rec">
       <div class="rec-rank">${ranks[i]}</div>
-      <div class="rec-time">${r.hr}:00</div>
-      <div class="rec-day">${esc(r.dayLong)}</div>
-      <div class="rec-row"><span class="rec-k">Courts free</span><span class="rec-v" style="color:${r.ratio>0.6?'var(--op-tx)':'var(--text-2)'}">${Math.round(r.ratio*100)}%</span></div>
+      <div class="rec-time">${r.dowName}</div>
+      <div class="rec-day">${r.hr}:00</div>
+      <div class="rec-row"><span class="rec-k">Typically booked</span><span class="rec-v" style="color:${occCol}">${occ}%</span></div>
       <div class="rec-row"><span class="rec-k">Avg 60 min</span><span class="rec-v" style="color:${tierColor(r.t)}">£${r.avgP}</span></div>
-      <div class="rec-row"><span class="rec-k">Price tier</span><span class="rec-v">${tierLabel(r.t)}</span></div>
+      <div class="rec-row"><span class="rec-k">Next slot</span><span class="rec-v">${esc(r.nextSlot.dateLabel)}</span></div>
       <div class="score-bar"><div class="score-fill" style="width:${sc}%"></div></div>
     </div>`;
   });
   h += '</div>';
   return h;
+}
+
+function updateRecs() {
+  const recs = buildRecs();
+  document.getElementById('recOut').innerHTML = renderRecs(recs);
 }
 
 /* DATE TABS · availability */
@@ -1262,7 +1293,7 @@ async function loadMonth() {
   for (const k of Object.keys(monthCache)) {
     if (k.startsWith(prefix)) clubMonth[k.slice(prefix.length)] = monthCache[k];
   }
-  document.getElementById('recOut').innerHTML = renderRecs(buildRecs(clubMonth));
+  updateRecs();
 }
 
 /* DURATION PICKER */
@@ -1829,6 +1860,7 @@ async function switchClub(id) {
   if (!next) return;
   CLUB = id;
   clubInfo = next;
+  activeHmBuckets = null;
   localStorage.setItem('cv-club-id', id);
   setClubLabel();
   renderClubDrop();
