@@ -1022,6 +1022,72 @@ def api_day_activities():
     return resp
 
 
+@app.route("/api/revenue-summary", methods=["GET"])
+def api_revenue_summary():
+    """Fetch /club/statistics/financial/v2 for a given time window."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+
+    club_id   = request.args.get("club_id", "")
+    start     = request.args.get("start", "")
+    end       = request.args.get("end", "")
+    if not club_id or not start or not end:
+        return jsonify({"error": "club_id, start and end required"}), 400
+
+    try:
+        url = (
+            f"{TARGET}/club/statistics/financial/v2"
+            f"?club_ids={club_id}&start_time={start}&end_time={end}"
+        )
+        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+        payload = r.content
+        ct = r.headers.get("content-type", "application/json")
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    resp = Response(payload, status=r.status_code, content_type=ct)
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/payment-history", methods=["GET"])
+def api_payment_history():
+    """Paginate /club/statistics/online_payment_history server-side."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+
+    club_id = request.args.get("club_id", "")
+    start   = request.args.get("start", "")
+    end     = request.args.get("end", "")
+    limit   = min(int(request.args.get("limit", "50")), 100)
+    skip    = int(request.args.get("skip", "0"))
+    if not club_id or not start or not end:
+        return jsonify({"error": "club_id, start and end required"}), 400
+
+    try:
+        url = (
+            f"{TARGET}/club/statistics/online_payment_history"
+            f"?club_id={club_id}&start_datetime={start}&end_datetime={end}"
+            f"&limit={limit}&skip={skip}"
+        )
+        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+        items = r.json() if r.status_code == 200 else []
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    resp = Response(
+        json.dumps({"payments": items, "skip": skip, "limit": limit, "has_more": len(items) == limit}),
+        status=200,
+        content_type="application/json",
+    )
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
 @app.route("/api/<path:p>", methods=["GET", "POST", "OPTIONS"])
 def proxy(p):
     if request.method == "OPTIONS":

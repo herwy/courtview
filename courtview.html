@@ -159,6 +159,38 @@ nav {
 .stat-trend.up { color: var(--op-tx); }
 .stat-trend.down { color: #ef4444; }
 
+/* REVENUE TAB */
+.rev-month-nav { display:flex; align-items:center; gap:12px; margin-bottom:24px; }
+.rev-month-btn { background:rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:6px; color:var(--text-2); font-size:20px; line-height:1; padding:2px 10px; cursor:pointer; transition:background 140ms; }
+.rev-month-btn:hover { background:rgba(255,255,255,0.08); }
+.rev-month-lbl { font-size:14px; font-weight:600; color:var(--text-1); min-width:110px; text-align:center; }
+.rev-cards { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:0; }
+.rev-card { flex:1; min-width:130px; background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:8px; padding:14px 16px; }
+.rev-card-v { font-size:20px; font-weight:600; letter-spacing:-0.5px; margin-bottom:4px; font-variant-numeric:tabular-nums; }
+.rev-card-l { font-size:11px; font-weight:500; color:var(--text-4); }
+.rev-card-t { font-size:10px; font-weight:500; margin-top:4px; }
+.rev-card-t.up { color:var(--op-tx); }
+.rev-card-t.down { color:#ef4444; }
+.rev-dow-row { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+.rev-dow-day { font-size:11px; font-weight:500; color:var(--text-3); width:28px; flex:none; }
+.rev-dow-bar-track { flex:1; height:8px; background:rgba(255,255,255,0.05); border-radius:4px; overflow:hidden; }
+.rev-dow-bar-fill { height:100%; background:rgba(113,112,255,0.5); border-radius:4px; transition:width 300ms ease; }
+.rev-dow-val { font-size:11px; font-weight:500; color:var(--text-3); font-variant-numeric:tabular-nums; width:72px; text-align:right; flex:none; }
+.rev-sub-row { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border-s); font-size:13px; }
+.rev-sub-row:last-child { border-bottom:0; }
+.rev-sub-name { color:var(--text-2); }
+.rev-sub-val { font-weight:600; font-variant-numeric:tabular-nums; color:var(--text-1); }
+.pay-table { width:100%; border-collapse:collapse; font-size:12px; }
+.pay-table th { padding:8px 12px; text-align:left; font-size:10px; font-weight:600; letter-spacing:0.05em; text-transform:uppercase; color:var(--text-4); border-bottom:1px solid var(--border); white-space:nowrap; }
+.pay-table td { padding:10px 12px; border-bottom:1px solid var(--border-s); color:var(--text-2); vertical-align:top; }
+.pay-table tr:last-child td { border-bottom:0; }
+.pay-table tr:hover td { background:rgba(255,255,255,0.015); }
+.pay-table td.pay-amt { font-weight:600; color:var(--text-1); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.pay-table td.pay-status-ok { color:var(--op-tx); font-size:11px; }
+.pay-table td.pay-status-fail { color:#ef4444; font-size:11px; }
+.pay-receipt { color:var(--accent-v); text-decoration:none; font-size:11px; }
+.pay-receipt:hover { text-decoration:underline; }
+
 /* SECTION */
 .sec { margin-bottom: 36px; }
 .sec-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; gap: 12px; flex-wrap: wrap; }
@@ -601,7 +633,8 @@ nav {
     <button class="tnav-btn" role="tab" id="tab-book-btn"    aria-selected="true"  aria-controls="tab-book"    data-tab="book">Availability</button>
     <button class="tnav-btn" role="tab" id="tab-club-btn"    aria-selected="false" aria-controls="tab-club"    data-tab="club" tabindex="-1">Club Info</button>
     <button class="tnav-btn" role="tab" id="tab-compare-btn" aria-selected="false" aria-controls="tab-compare" data-tab="compare" tabindex="-1">Compare</button>
-    <button class="tnav-btn" role="tab" id="tab-stats-btn"   aria-selected="false" aria-controls="tab-stats"   data-tab="stats" tabindex="-1">Stats</button>
+    <button class="tnav-btn" role="tab" id="tab-stats-btn"    aria-selected="false" aria-controls="tab-stats"    data-tab="stats"   tabindex="-1">Stats</button>
+    <button class="tnav-btn" role="tab" id="tab-revenue-btn"  aria-selected="false" aria-controls="tab-revenue"  data-tab="revenue" tabindex="-1">Revenue</button>
   </div>
 </div>
 
@@ -749,26 +782,6 @@ nav {
       </div>
     </div>
 
-    <div class="stats" role="region" aria-label="Financial overview">
-      <div class="stat">
-        <div class="stat-v" id="statRev">-</div>
-        <div class="stat-l">Online revenue · 30d</div>
-        <div class="stat-trend" id="statTrend"></div>
-      </div>
-      <div class="stat">
-        <div class="stat-v" id="statMembers">-</div>
-        <div class="stat-l">Active members</div>
-      </div>
-      <div class="stat">
-        <div class="stat-v" id="statPlans">-</div>
-        <div class="stat-l">Plans on sale</div>
-      </div>
-      <div class="stat">
-        <div class="stat-v" id="statAvg">-</div>
-        <div class="stat-l">Avg plan price</div>
-      </div>
-    </div>
-
     <section aria-labelledby="memrank-title">
       <div class="sec-hd">
         <h2 class="sec-title" id="memrank-title">Membership · ranked by members</h2>
@@ -790,6 +803,52 @@ nav {
       </div>
       <div class="card">
         <div id="cpOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading court popularity...</div></div>
+      </div>
+    </section>
+  </div>
+
+  <div id="tab-revenue" role="tabpanel" aria-labelledby="tab-revenue-btn" hidden>
+    <div class="disclaimer" role="note">
+      <svg class="disclaimer-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M8 1l7 13H1L8 1z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+        <path d="M8 6v4M8 12.5v0.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+      </svg>
+      <div class="disclaimer-body">
+        <strong>Research data.</strong> Exposed via unauthenticated API endpoints. Not intended to be public.
+      </div>
+    </div>
+
+    <div class="rev-month-nav">
+      <button class="rev-month-btn" id="revPrev" aria-label="Previous month">&#8249;</button>
+      <span class="rev-month-lbl" id="revMonthLbl"></span>
+      <button class="rev-month-btn" id="revNext" aria-label="Next month">&#8250;</button>
+    </div>
+
+    <section aria-labelledby="rev-summary-title" class="sec">
+      <div class="sec-hd"><h2 class="sec-title" id="rev-summary-title">Revenue summary</h2></div>
+      <div id="revSummaryOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div></div>
+    </section>
+
+    <section aria-labelledby="rev-dow-title" class="sec">
+      <div class="sec-hd"><h2 class="sec-title" id="rev-dow-title">Revenue by day of week</h2></div>
+      <div class="card" style="padding:16px"><div id="revDowOut"></div></div>
+    </section>
+
+    <section aria-labelledby="rev-sub-title" class="sec">
+      <div class="sec-hd"><h2 class="sec-title" id="rev-sub-title">Subscription revenue by plan</h2></div>
+      <div class="card" style="padding:16px"><div id="revSubOut"></div></div>
+    </section>
+
+    <section aria-labelledby="rev-pay-title" class="sec">
+      <div class="sec-hd">
+        <h2 class="sec-title" id="rev-pay-title">Payment history</h2>
+        <span class="sec-meta" id="revPayMeta"></span>
+      </div>
+      <div class="stats-table-wrap">
+        <div id="revPayOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div></div>
+      </div>
+      <div style="text-align:center;padding:12px 0" id="revLoadMoreWrap" hidden>
+        <button class="dbtn" id="revLoadMore">Load more</button>
       </div>
     </section>
   </div>
@@ -2050,34 +2109,15 @@ async function loadStats() {
   if (statsLoaded) return;
   statsLoaded = true;
   try {
-    const fin = await fetchFinancialStats().catch(() => null);
     const members = membershipCache[CLUB] || await fetchMembership().catch(() => []);
-    renderStats(fin, members);
+    renderStats(members);
   } catch (e) {
     document.getElementById('memRankOut').innerHTML = `<div class="empty">Could not load stats: ${esc(e.message)}</div>`;
     statsLoaded = false;
   }
 }
 
-function renderStats(fin, members) {
-  // KPI row
-  // actual field names from the API response
-  const onlineRev = fin?.total_online_payment ?? fin?.online_revenue ?? fin?.total_revenue ?? null;
-  const trendRaw  = fin?.bookings_total_price_percentage ?? fin?.trend_pct ?? null;
-  // API returns e.g. "-7.9%" as a string — parse to number
-  const trend = trendRaw != null ? parseFloat(String(trendRaw).replace('%','')) : null;
-
-  document.getElementById('statRev').textContent = onlineRev != null ? fmtGBP(onlineRev) : '-';
-
-  const trendEl = document.getElementById('statTrend');
-  if (trend != null) {
-    const sign = trend >= 0 ? '+' : '';
-    trendEl.textContent = `${sign}${trend.toFixed(1)}% vs prior`;
-    trendEl.className = 'stat-trend ' + (trend >= 0 ? 'up' : 'down');
-  } else {
-    trendEl.textContent = '';
-  }
-
+function renderStats(members) {
   const plansOnSale = (members || []).filter(p => !p.hidden && (p.price||0) > 0);
   const totalMembers = plansOnSale.reduce((s,p) => s + (p.total_members || p.member_count || 0), 0);
   const avgPrice = plansOnSale.length
@@ -2144,6 +2184,191 @@ async function loadCourtPopularity() {
   }
 }
 
+/* REVENUE TAB */
+let revMonth = new Date();
+revMonth.setDate(1);
+let revLoaded = false;
+let revPaySkip = 0;
+let revPayHasMore = false;
+
+function revMonthBounds(d) {
+  const start = new Date(d.getFullYear(), d.getMonth(), 1);
+  const end   = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
+  return { start: start.getTime(), end: end.getTime() };
+}
+
+function fmtRevPct(raw) {
+  if (!raw || raw === 'N/A') return null;
+  const n = parseFloat(String(raw).replace('%', ''));
+  if (isNaN(n)) return null;
+  return n;
+}
+
+async function loadRevenue(resetPay = true) {
+  revLoaded = true;
+  const clubId = CLUB;
+  const { start, end } = revMonthBounds(revMonth);
+
+  document.getElementById('revMonthLbl').textContent =
+    revMonth.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  document.getElementById('revNext').disabled = revMonth.getMonth() === new Date().getMonth()
+    && revMonth.getFullYear() === new Date().getFullYear();
+
+  if (resetPay) {
+    revPaySkip = 0;
+    document.getElementById('revPayOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+    document.getElementById('revLoadMoreWrap').hidden = true;
+    document.getElementById('revSummaryOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+    document.getElementById('revDowOut').innerHTML = '';
+    document.getElementById('revSubOut').innerHTML = '';
+  }
+
+  const [sumData, payData] = await Promise.all([
+    fetch(`/api/revenue-summary?club_id=${clubId}&start=${start}&end=${end}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`/api/payment-history?club_id=${clubId}&start=${start}&end=${end}&limit=50&skip=${revPaySkip}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+  ]);
+
+  if (clubId !== CLUB) return;
+
+  // Summary cards
+  if (sumData) {
+    const cats = [
+      { key: 'total_combined_payments',              pct: 'total_combined_payments_diff_percentage',              label: 'Total revenue' },
+      { key: 'total_combined_booking_payments',      pct: 'total_combined_booking_payments_diff_percentage',      label: 'Court bookings' },
+      { key: 'total_combined_training_payments',     pct: 'total_combined_training_payments_diff_percentage',     label: 'Training' },
+      { key: 'total_combined_tournament_payments',   pct: 'total_combined_tournament_payments_diff_percentage',   label: 'Tournaments' },
+      { key: 'total_combined_subscription_payments', pct: 'total_combined_subscription_payments_diff_percentage', label: 'Subscriptions' },
+      { key: 'total_combined_match_payments',        pct: 'total_combined_match_payments_diff_percentage',        label: 'Open matches' },
+    ];
+    let h = '<div class="rev-cards">';
+    for (const cat of cats) {
+      const val = sumData[cat.key];
+      const pct = fmtRevPct(sumData[cat.pct]);
+      const pctHtml = pct != null
+        ? `<div class="rev-card-t ${pct >= 0 ? 'up' : 'down'}">${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% vs prior</div>`
+        : '';
+      h += `<div class="rev-card">
+        <div class="rev-card-v">${val != null ? fmtGBP(val) : '-'}</div>
+        <div class="rev-card-l">${esc(cat.label)}</div>
+        ${pctHtml}
+      </div>`;
+    }
+    h += '</div>';
+    document.getElementById('revSummaryOut').innerHTML = h;
+
+    // Day-of-week bars
+    const dow = sumData.revenue_data || [];
+    if (dow.length) {
+      const max = Math.max(...dow.map(d => parseFloat(d.y) || 0));
+      let dh = '';
+      for (const d of dow) {
+        const val = parseFloat(d.y) || 0;
+        const pct = max > 0 ? (val / max * 100).toFixed(1) : 0;
+        dh += `<div class="rev-dow-row">
+          <div class="rev-dow-day">${esc(String(d.x).slice(0,3))}</div>
+          <div class="rev-dow-bar-track"><div class="rev-dow-bar-fill" style="width:${pct}%"></div></div>
+          <div class="rev-dow-val">${fmtGBP(val)}</div>
+        </div>`;
+      }
+      document.getElementById('revDowOut').innerHTML = dh;
+    }
+
+    // Subscription breakdown
+    const subs = sumData.membership_subscription || [];
+    if (subs.length) {
+      let sh = '';
+      for (const s of subs) {
+        sh += `<div class="rev-sub-row">
+          <span class="rev-sub-name">${esc(String(s.x))}</span>
+          <span class="rev-sub-val">${fmtGBP(parseFloat(s.y) || 0)}</span>
+        </div>`;
+      }
+      document.getElementById('revSubOut').innerHTML = sh;
+    }
+  } else {
+    document.getElementById('revSummaryOut').innerHTML = '<div class="empty">Revenue data unavailable.</div>';
+  }
+
+  // Payment history
+  renderPayments(payData, resetPay);
+}
+
+function renderPayments(data, reset) {
+  if (!data) {
+    document.getElementById('revPayOut').innerHTML = '<div class="empty">Payment history unavailable.</div>';
+    return;
+  }
+  const payments = data.payments || [];
+  revPayHasMore = data.has_more;
+  revPaySkip += payments.length;
+
+  const metaEl = document.getElementById('revPayMeta');
+  if (metaEl) metaEl.textContent = payments.length || !reset ? `${revPaySkip} loaded` : '';
+
+  if (reset) {
+    if (!payments.length) {
+      document.getElementById('revPayOut').innerHTML = '<div class="empty">No payments this period.</div>';
+      document.getElementById('revLoadMoreWrap').hidden = true;
+      return;
+    }
+    let h = `<table class="pay-table"><thead><tr>
+      <th>Date</th><th>Player</th><th>Email</th><th>Phone</th>
+      <th>Description</th><th>Amount</th><th>Status</th><th>Receipt</th>
+    </tr></thead><tbody id="revPayBody">`;
+    h += payments.map(payRow).join('');
+    h += '</tbody></table>';
+    document.getElementById('revPayOut').innerHTML = h;
+  } else {
+    const tbody = document.getElementById('revPayBody');
+    if (tbody) tbody.insertAdjacentHTML('beforeend', payments.map(payRow).join(''));
+  }
+
+  document.getElementById('revLoadMoreWrap').hidden = !revPayHasMore;
+  if (metaEl) metaEl.textContent = `${revPaySkip} loaded`;
+}
+
+function payRow(p) {
+  const ok = p.status === 'PAYMENT_SUCCESS';
+  const date = p.createdAt ? p.createdAt.split(' ')[0] : '';
+  const receipt = p.receiptUrl
+    ? `<a class="pay-receipt" href="${esc(p.receiptUrl)}" target="_blank" rel="noopener">PDF</a>`
+    : '';
+  return `<tr>
+    <td style="white-space:nowrap;color:var(--text-3)">${esc(date)}</td>
+    <td>${esc(p.player_name || '')}</td>
+    <td style="color:var(--text-3)">${esc(p.player_email || '')}</td>
+    <td style="color:var(--text-3);white-space:nowrap">${esc(p.player_phone || '')}</td>
+    <td style="color:var(--text-3);max-width:220px">${esc(p.description || '')}</td>
+    <td class="pay-amt">${esc(p.amount || '')}</td>
+    <td class="${ok ? 'pay-status-ok' : 'pay-status-fail'}">${ok ? 'Paid' : esc(p.status || '')}</td>
+    <td>${receipt}</td>
+  </tr>`;
+}
+
+function setupRevenue() {
+  document.getElementById('revPrev').addEventListener('click', () => {
+    revMonth = new Date(revMonth.getFullYear(), revMonth.getMonth() - 1, 1);
+    revLoaded = false;
+    loadRevenue();
+  });
+  document.getElementById('revNext').addEventListener('click', () => {
+    const now = new Date();
+    if (revMonth.getFullYear() === now.getFullYear() && revMonth.getMonth() === now.getMonth()) return;
+    revMonth = new Date(revMonth.getFullYear(), revMonth.getMonth() + 1, 1);
+    revLoaded = false;
+    loadRevenue();
+  });
+  document.getElementById('revLoadMore').addEventListener('click', async () => {
+    const clubId = CLUB;
+    const { start, end } = revMonthBounds(revMonth);
+    const data = await fetch(`/api/payment-history?club_id=${clubId}&start=${start}&end=${end}&limit=50&skip=${revPaySkip}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null);
+    if (clubId === CLUB) renderPayments(data, false);
+  });
+}
+
 /* TAB SWITCHING */
 function setupTabs() {
   const tabs = [...document.querySelectorAll('.tnav-btn')];
@@ -2162,6 +2387,7 @@ function setupTabs() {
     if (tabName === 'club')    loadClubInfo();
     if (tabName === 'compare') loadCompare();
     if (tabName === 'stats')   { loadStats(); loadCourtPopularity(); }
+    if (tabName === 'revenue') { if (!revLoaded) loadRevenue(); }
   }
 
   tabs.forEach((t) => {
@@ -2262,6 +2488,7 @@ function setupClubSelector() {
 
 /* INIT */
 setupTabs();
+setupRevenue();
 buildDateTabs();
 setupNotifyPanel();
 setupClubSelector();
