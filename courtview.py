@@ -500,13 +500,8 @@ def get_cached(club_id: str, start: str, end: str) -> str | None:
         conn.close()
         if not row:
             return None
-        # Treat legacy empty-list payloads as a cache miss
-        try:
-            parsed = json.loads(row[0])
-            if isinstance(parsed, list) and len(parsed) == 0:
-                return None
-        except (ValueError, TypeError):
-            pass
+        if row[0].strip() == "[]":
+            return None
         return row[0]
     except sqlite3.Error:
         return None
