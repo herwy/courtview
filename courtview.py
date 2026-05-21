@@ -1015,10 +1015,21 @@ def _refresh_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Module-level startup (runs at import time so gunicorn picks it up)
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+_STARTUP_DONE = False
+
+
+def _startup() -> None:
+    """Initialise DB, load assets, open access log, start refresh threads.
+    Called once at module import time so gunicorn (which never runs __main__) picks it up.
+    Safe to call multiple times: init_db is idempotent; thread start is guarded by a module flag."""
+    global _STARTUP_DONE, _ACCESS_FD
+    if _STARTUP_DONE:
+        return
+    _STARTUP_DONE = True
+
     print(f"[startup] courtview on 0.0.0.0:8766")
     print(f"[startup] TLS profile : none (raw URLSession headers)")
     print(f"[startup] User-Agent  : {IOS_UA}")
@@ -1031,7 +1042,6 @@ if __name__ == "__main__":
     # Open access log file and pre-load recent entries into memory
     try:
         _ACCESS_FD = open(ACCESS_LOG_PATH, "a", buffering=1)
-        # Load last 500 entries into the deque so /access/data works after restart
         try:
             with open(ACCESS_LOG_PATH, "r") as _fh:
                 _lines = _fh.readlines()
@@ -1040,7 +1050,6 @@ if __name__ == "__main__":
                     _ACCESS_LOG.append(json.loads(_line.strip()))
                 except (json.JSONDecodeError, ValueError):
                     pass
-            # Reverse so newest-first matches appendleft behaviour
             _tmp = list(_ACCESS_LOG)
             _ACCESS_LOG.clear()
             for _e in reversed(_tmp):
@@ -1059,4 +1068,15 @@ if __name__ == "__main__":
     heatmap_thread.start()
     print(f"[startup] heatmap refresh thread started ({len(HEATMAP_CLUBS)} clubs, 24h cycle)")
 
+
+_startup()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    # gunicorn runs courtview:app and triggers _startup() at import.
+    # This block is the dev fallback (python3 courtview.py).
     app.run(host="0.0.0.0", port=8766, debug=False, threaded=True, use_reloader=False)
