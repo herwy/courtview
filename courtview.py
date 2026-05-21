@@ -498,7 +498,16 @@ def get_cached(club_id: str, start: str, end: str) -> str | None:
             (club_id, start, end, cutoff),
         ).fetchone()
         conn.close()
-        return row[0] if row else None
+        if not row:
+            return None
+        # Treat legacy empty-list payloads as a cache miss
+        try:
+            parsed = json.loads(row[0])
+            if isinstance(parsed, list) and len(parsed) == 0:
+                return None
+        except (ValueError, TypeError):
+            pass
+        return row[0]
     except sqlite3.Error:
         return None
 
@@ -507,6 +516,13 @@ def store_cached(club_id: str, start: str, end: str, payload: str) -> None:
     """Insert or replace a cache entry."""
     if not club_id:
         return
+    # Don't cache empty-list v1 responses - they pre-date the v2 switch and are useless
+    try:
+        parsed = json.loads(payload)
+        if isinstance(parsed, list) and len(parsed) == 0:
+            return
+    except (ValueError, TypeError):
+        pass
     try:
         conn = _db_connect()
         conn.execute(
