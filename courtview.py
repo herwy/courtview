@@ -780,7 +780,7 @@ def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
             buckets[(d, hr)] = []
 
     for day_offset in range(1, 8):
-        date = _dt.utcnow().date() - _td(days=day_offset)
+        date = _dt.now().date() - _td(days=day_offset)
         dow  = (date.weekday())  # Mon=0 already matches our scheme
 
         for hr in HEATMAP_HOURS:
