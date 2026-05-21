@@ -29,7 +29,7 @@ The grep count must be > 0 AND pgrep must show gunicorn/courtview.py running bef
 |------|---------|
 | `/root/projects/courtview/courtview.py` | WSGI app (served via gunicorn, port 8766) |
 | `/root/projects/courtview/courtview.html` | Dashboard HTML |
-| `/root/projects/courtview/courtview_cache.db` | SQLite cache: availability (28-day TTL), heatmap matrices, court popularity |
+| `/root/projects/courtview/courtview_cache.db` | SQLite cache: availability (28-day TTL), heatmap, court popularity, membership_members (6h TTL), club_info (10-min TTL) |
 | `/root/projects/courtview/access.log` | JSONL access log |
 | `/root/projects/courtview/courtview.log` | gunicorn stdout/stderr |
 | `/root/projects/courtview/watchdog.sh` | Crash recovery watchdog (loops every 60s) |
