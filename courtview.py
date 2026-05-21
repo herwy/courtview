@@ -373,6 +373,16 @@ def _read_token() -> str:
         return _token_cache["value"] or ""
 
 
+def _constant_time_eq(a: str, b: str) -> bool:
+    """Constant-time string comparison to resist timing attacks."""
+    if len(a) != len(b):
+        return False
+    result = 0
+    for x, y in zip(a, b):
+        result |= ord(x) ^ ord(y)
+    return result == 0
+
+
 def _check_token(req) -> bool:
     """Return True if the request carries a valid courtview token."""
     expected = _read_token()
@@ -381,13 +391,7 @@ def _check_token(req) -> bool:
     query_token  = req.args.get("token", "")
     cookie_token = req.cookies.get(COOKIE_NAME, "")
     provided = query_token or cookie_token
-    # Constant-time comparison to resist timing attacks
-    if len(provided) != len(expected):
-        return False
-    result = 0
-    for a, b in zip(provided, expected):
-        result |= ord(a) ^ ord(b)
-    return result == 0
+    return _constant_time_eq(provided, expected)
 
 
 def _set_cookie(response, token: str) -> None:
@@ -398,6 +402,7 @@ def _set_cookie(response, token: str) -> None:
         max_age=COOKIE_MAX_AGE,
         path="/",
         httponly=True,
+        secure=True,
         samesite="Strict",
     )
 
@@ -616,13 +621,7 @@ def _gate() -> tuple[bool, str]:
     if not expected or not provided:
         _record_auth_fail(ip)
         return False, ""
-    if len(provided) != len(expected):
-        _record_auth_fail(ip)
-        return False, ""
-    result = 0
-    for a, b in zip(provided, expected):
-        result |= ord(a) ^ ord(b)
-    if result != 0:
+    if not _constant_time_eq(provided, expected):
         _record_auth_fail(ip)
         print(f"[auth] fail from {html.escape(ip)}")
         return False, ""
@@ -1327,16 +1326,17 @@ def api_coach_bios():
 
 @app.route("/api/<path:p>", methods=["GET", "POST", "OPTIONS"])
 def proxy(p):
-    if request.method == "OPTIONS":
-        resp = Response(status=204)
-        resp.headers["Access-Control-Allow-Origin"]  = "*"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        return resp
-
     passed, via_query = _gate()
     if not passed:
         return _forbidden()
+
+    if request.method == "OPTIONS":
+        resp = Response(status=204)
+        # Reflect the request Origin rather than wildcard - this is a private single-user dashboard
+        resp.headers["Access-Control-Allow-Origin"]  = request.headers.get("Origin", "")
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        return resp
 
     full_path = "/" + p
     if full_path not in ALLOWED_PATHS:
@@ -1428,7 +1428,7 @@ def access_page():
     if via_query:
         resp = Response(status=302)
         resp.headers["Location"] = "/access"
-        resp.set_cookie(COOKIE_NAME, via_query, max_age=COOKIE_MAX_AGE, path="/", httponly=True, samesite="Strict")
+        resp.set_cookie(COOKIE_NAME, via_query, max_age=COOKIE_MAX_AGE, path="/", httponly=True, secure=True, samesite="Strict")
         return resp
     body = _ACCESS_HTML_BYTES or b"<p>access.html not loaded</p>"
     return Response(body, status=200, content_type="text/html; charset=utf-8")
