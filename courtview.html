@@ -171,6 +171,15 @@ nav {
 .rev-card-t { font-size:10px; font-weight:500; margin-top:4px; }
 .rev-card-t.up { color:var(--op-tx); }
 .rev-card-t.down { color:#ef4444; }
+.dow-chart { display:flex; gap:6px; align-items:flex-end; height:80px; }
+.dow-col { display:flex; flex-direction:column; align-items:center; gap:5px; flex:1; }
+.dow-bar-wrap { flex:1; width:100%; display:flex; align-items:flex-end; }
+.dow-bar { width:100%; border-radius:3px 3px 0 0; transition:height 300ms ease; min-height:3px; }
+.dow-bar.dow-peak { background:rgba(113,112,255,0.7); }
+.dow-bar.dow-low  { background:rgba(113,112,255,0.2); }
+.dow-bar.dow-mid  { background:rgba(113,112,255,0.45); }
+.dow-label { font-size:10px; font-weight:500; color:var(--text-4); }
+.dow-pct   { font-size:9px; color:var(--text-4); font-variant-numeric:tabular-nums; }
 .rev-dow-row { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
 .rev-dow-day { font-size:11px; font-weight:500; color:var(--text-3); width:28px; flex:none; }
 .rev-dow-bar-track { flex:1; height:8px; background:rgba(255,255,255,0.05); border-radius:4px; overflow:hidden; }
@@ -755,6 +764,11 @@ nav {
         <strong>Research data.</strong> This information is exposed via an unauthenticated API endpoint. It is not intended to be public. Treat as illustrative only.
       </div>
     </div>
+
+    <section aria-labelledby="stats-dow-title" class="sec">
+      <div class="sec-hd"><h2 class="sec-title" id="stats-dow-title">Typical demand by day</h2><span class="sec-meta">30-day rolling occupancy</span></div>
+      <div class="card" style="padding:16px 20px"><div id="statsDowOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div></div></div></div>
+    </section>
 
     <section aria-labelledby="stats-kpi-title" class="sec">
       <div class="sec-hd"><h2 class="sec-title" id="stats-kpi-title">This month</h2><span class="sec-meta" id="statsMonthLbl"></span></div>
@@ -1344,6 +1358,28 @@ function renderRealHeatmap(rawBuckets) {
   return h;
 }
 
+function renderDowChart(dowSignal) {
+  if (!dowSignal || !Object.keys(dowSignal).length) return '';
+  const max = Math.max(...Object.values(dowSignal));
+  const BAR_H = 68; // px available for bars
+  let h = '<div class="dow-chart">';
+  for (let d = 0; d < 7; d++) {
+    const norm = dowSignal[d] ?? dowSignal[String(d)] ?? 0;
+    const pct  = Math.round(norm * 100);
+    const barH = Math.max(3, Math.round((norm / max) * BAR_H));
+    const cls  = norm >= 0.85 ? 'dow-peak' : norm <= 0.65 ? 'dow-low' : 'dow-mid';
+    h += `<div class="dow-col">
+      <div class="dow-pct">${pct}%</div>
+      <div class="dow-bar-wrap" style="height:${BAR_H}px">
+        <div class="dow-bar ${cls}" style="height:${barH}px" title="${WEEK_DAYS[d]}: ${pct}% typical occupancy"></div>
+      </div>
+      <div class="dow-label">${WEEK_DAYS[d]}</div>
+    </div>`;
+  }
+  h += '</div>';
+  return h;
+}
+
 async function loadRealHeatmap() {
   const clubId = CLUB;
   const hmOut  = document.getElementById('hmOut');
@@ -1357,6 +1393,8 @@ async function loadRealHeatmap() {
       activeHourSignal = d.hour_signal  || null;
       activeDowSignal  = d.dow_signal   || null;
       updateRecs();
+      const dowOut = document.getElementById('statsDowOut');
+      if (dowOut) dowOut.innerHTML = renderDowChart(d.dow_signal) || '<div class="empty">No occupancy data yet.</div>';
     }
   } catch(e) {
     if (CLUB === clubId)
