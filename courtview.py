@@ -464,6 +464,13 @@ def init_db() -> None:
                    fetched_at INTEGER
                )"""
         )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS club_info_cache (
+                   club_id    TEXT PRIMARY KEY,
+                   payload    TEXT,
+                   fetched_at INTEGER
+               )"""
+        )
         conn.commit()
     finally:
         conn.close()
@@ -897,6 +904,23 @@ def api_club_info():
     if not club_id:
         return jsonify({"error": "club_id required"}), 400
 
+    force_refresh = request.args.get("refresh") == "1"
+    if not force_refresh:
+        try:
+            conn = _db_connect()
+            row = conn.execute(
+                "SELECT payload FROM club_info_cache WHERE club_id=? AND fetched_at>?",
+                (club_id, int(_now()) - 600),
+            ).fetchone()
+            conn.close()
+            if row:
+                resp = Response(row[0], status=200, content_type="application/json")
+                if via_query:
+                    _set_cookie(resp, via_query)
+                return resp
+        except sqlite3.Error:
+            pass
+
     results: dict = {"profile": None, "memberships": None, "credits": None}
     targets = [
         ("profile",     f"/club/?club_id={club_id}"),
@@ -918,7 +942,19 @@ def api_club_info():
     for t in threads:
         t.join(timeout=20)
 
-    resp = Response(json.dumps(results), status=200, content_type="application/json")
+    payload = json.dumps(results)
+    try:
+        conn = _db_connect()
+        conn.execute(
+            "INSERT OR REPLACE INTO club_info_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
+            (club_id, payload, int(_now())),
+        )
+        conn.commit()
+        conn.close()
+    except sqlite3.Error:
+        pass
+
+    resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
