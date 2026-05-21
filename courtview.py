@@ -731,90 +731,117 @@ def api_membership_members():
         except sqlite3.Error:
             pass
 
-    # Fetch the list of membership plans for this club
-    try:
-        plans_r = cffi_requests.get(
-            f"{TARGET}/club/membership/?club_id={club_id}",
-            headers=APP_HEADERS,
-            timeout=15,
-        )
-        if plans_r.status_code != 200:
-            resp = Response(empty_resp, status=200, content_type="application/json")
-            if via_query:
-                _set_cookie(resp, via_query)
-            return resp
-        plans_raw = plans_r.json()
-        # Upstream returns either a list directly or {"memberships": [...]}
-        if isinstance(plans_raw, list):
-            plans = plans_raw
-        elif isinstance(plans_raw, dict):
-            plans = plans_raw.get("memberships") or []
-            if not isinstance(plans, list):
-                plans = []
-        else:
-            plans = []
-        if not plans:
-            resp = Response(empty_resp, status=200, content_type="application/json")
-            if via_query:
-                _set_cookie(resp, via_query)
-            return resp
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 502
-
-    counts: dict = {}
-    members_by_plan: dict = {}
-    for plan in plans:
-        pid = plan.get("_id") or plan.get("id")
-        if not pid:
-            continue
-        pid = str(pid)
-        time.sleep(random.uniform(0.15, 0.30))
-        count = 0
-        names: list = []
+    # H-02: per-club fan-out lock - only one thread fetches at a time per club
+    with _MEMBERSHIP_FETCH_MUTEX:
+        lock = _MEMBERSHIP_FETCH_LOCKS.setdefault(club_id, threading.Lock())
+    if not lock.acquire(blocking=False):
+        # Another thread is fetching for this club; serve stale cache if available
         try:
-            r = cffi_requests.get(
-                f"{TARGET}/club/membership/member?membership_id={pid}",
+            conn = _db_connect()
+            row = conn.execute(
+                "SELECT payload FROM membership_members_cache WHERE club_id=?",
+                (club_id,),
+            ).fetchone()
+            conn.close()
+            if row:
+                resp = Response(row[0], status=200, content_type="application/json")
+                if via_query:
+                    _set_cookie(resp, via_query)
+                return resp
+        except sqlite3.Error:
+            pass
+        resp = Response(empty_resp, status=200, content_type="application/json")
+        if via_query:
+            _set_cookie(resp, via_query)
+        return resp
+
+    try:
+        # Fetch the list of membership plans for this club
+        try:
+            plans_r = cffi_requests.get(
+                f"{TARGET}/club/membership/?club_id={club_id}",
                 headers=APP_HEADERS,
                 timeout=15,
             )
-            if r.status_code == 200:
-                parsed = r.json()
-                raw_list: list = []
-                if isinstance(parsed, list):
-                    raw_list = parsed
-                elif isinstance(parsed, dict):
-                    for key in ("members", "results", "data", "items"):
-                        val = parsed.get(key)
-                        if isinstance(val, list):
-                            raw_list = val
-                            break
-                count = len(raw_list)
-                names = sorted(
-                    [{"name": m.get("name", ""), "email": m.get("email", "")}
-                     for m in raw_list if m.get("name")],
-                    key=lambda x: x["name"].lower(),
-                )
-        except Exception:
+            if plans_r.status_code != 200:
+                resp = Response(empty_resp, status=200, content_type="application/json")
+                if via_query:
+                    _set_cookie(resp, via_query)
+                return resp
+            plans_raw = plans_r.json()
+            # Upstream returns either a list directly or {"memberships": [...]}
+            if isinstance(plans_raw, list):
+                plans = plans_raw
+            elif isinstance(plans_raw, dict):
+                plans = plans_raw.get("memberships") or []
+                if not isinstance(plans, list):
+                    plans = []
+            else:
+                plans = []
+            if not plans:
+                resp = Response(empty_resp, status=200, content_type="application/json")
+                if via_query:
+                    _set_cookie(resp, via_query)
+                return resp
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 502
+
+        counts: dict = {}
+        members_by_plan: dict = {}
+        for plan in plans:
+            pid = plan.get("_id") or plan.get("id")
+            if not pid:
+                continue
+            pid = str(pid)
+            time.sleep(random.uniform(0.15, 0.30))
             count = 0
-        counts[pid] = count
-        members_by_plan[pid] = names
+            names: list = []
+            try:
+                r = cffi_requests.get(
+                    f"{TARGET}/club/membership/member?membership_id={pid}",
+                    headers=APP_HEADERS,
+                    timeout=15,
+                )
+                if r.status_code == 200:
+                    parsed = r.json()
+                    raw_list: list = []
+                    if isinstance(parsed, list):
+                        raw_list = parsed
+                    elif isinstance(parsed, dict):
+                        for key in ("members", "results", "data", "items"):
+                            val = parsed.get(key)
+                            if isinstance(val, list):
+                                raw_list = val
+                                break
+                    count = len(raw_list)
+                    names = sorted(
+                        [{"name": m.get("name", ""), "email": m.get("email", "")}
+                         for m in raw_list if m.get("name")],
+                        key=lambda x: x["name"].lower(),
+                    )
+            except Exception:
+                count = 0
+            counts[pid] = count
+            members_by_plan[pid] = names
 
-    payload = json.dumps({"club_id": club_id, "counts": counts, "members": members_by_plan})
-    try:
-        conn = _db_connect()
-        conn.execute(
-            "INSERT OR REPLACE INTO membership_members_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
-            (club_id, payload, int(_now())),
-        )
-        conn.commit()
-        conn.close()
-    except sqlite3.Error:
-        pass
+        payload = json.dumps({"club_id": club_id, "counts": counts, "members": members_by_plan})
+        try:
+            conn = _db_connect()
+            conn.execute(
+                "INSERT OR REPLACE INTO membership_members_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
+                (club_id, payload, int(_now())),
+            )
+            conn.commit()
+            conn.close()
+        except sqlite3.Error:
+            pass
 
-    resp = Response(payload, status=200, content_type="application/json")
-    if via_query:
-        _set_cookie(resp, via_query)
-    return resp
+        resp = Response(payload, status=200, content_type="application/json")
+        if via_query:
+            _set_cookie(resp, via_query)
+        return resp
+    finally:
+        lock.release()
 
 
 @app.route("/api/<path:p>", methods=["GET", "POST", "OPTIONS"])
@@ -1109,12 +1136,18 @@ def _heatmap_refresh_loop() -> None:
     # Staggered startup: refresh each club that needs it
     for club in HEATMAP_CLUBS:
         if _heatmap_is_stale(club["id"]):
-            _fetch_heatmap_for_club(club["id"], club["courts"])
+            try:
+                _fetch_heatmap_for_club(club["id"], club["courts"])
+            except Exception as exc:
+                print(f"[heatmap] startup refresh failed for club {club['id']}: {exc}")
     # Daily refresh loop
     while True:
         time.sleep(HEATMAP_STALE_SECS)
         for club in HEATMAP_CLUBS:
-            _fetch_heatmap_for_club(club["id"], club["courts"])
+            try:
+                _fetch_heatmap_for_club(club["id"], club["courts"])
+            except Exception as exc:
+                print(f"[heatmap] daily refresh failed for club {club['id']}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -1183,9 +1216,10 @@ def _startup() -> None:
     Called once at module import time so gunicorn (which never runs __main__) picks it up.
     Safe to call multiple times: init_db is idempotent; thread start is guarded by a module flag."""
     global _STARTUP_DONE, _ACCESS_FD
-    if _STARTUP_DONE:
-        return
-    _STARTUP_DONE = True
+    with _STARTUP_LOCK:
+        if _STARTUP_DONE:
+            return
+        _STARTUP_DONE = True
 
     print(f"[startup] courtview on 0.0.0.0:8766")
     print(f"[startup] UA profile  : Android OkHttp (from APK analysis)")
