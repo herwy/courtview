@@ -707,8 +707,17 @@ def api_membership_members():
             if via_query:
                 _set_cookie(resp, via_query)
             return resp
-        plans = plans_r.json()
-        if not isinstance(plans, list):
+        plans_raw = plans_r.json()
+        # Upstream returns either a list directly or {"memberships": [...]}
+        if isinstance(plans_raw, list):
+            plans = plans_raw
+        elif isinstance(plans_raw, dict):
+            plans = plans_raw.get("memberships") or []
+            if not isinstance(plans, list):
+                plans = []
+        else:
+            plans = []
+        if not plans:
             resp = Response(empty_resp, status=200, content_type="application/json")
             if via_query:
                 _set_cookie(resp, via_query)
