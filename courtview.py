@@ -886,6 +886,44 @@ def api_membership_members():
         lock.release()
 
 
+@app.route("/api/club-info", methods=["GET"])
+def api_club_info():
+    """Concurrent fan-out for the Club Info tab: profile + memberships + credits in one call."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+
+    club_id = request.args.get("club_id", "")
+    if not club_id:
+        return jsonify({"error": "club_id required"}), 400
+
+    results: dict = {"profile": None, "memberships": None, "credits": None}
+    targets = [
+        ("profile",     f"/club/?club_id={club_id}"),
+        ("memberships", f"/club/membership/?club_id={club_id}"),
+        ("credits",     f"/club/creditpackage/?club_id={club_id}"),
+    ]
+
+    def _fetch(key: str, path: str) -> None:
+        try:
+            r = cffi_requests.get(TARGET + path, headers=APP_HEADERS, timeout=15)
+            if r.status_code == 200:
+                results[key] = r.json()
+        except Exception:
+            results[key] = None
+
+    threads = [threading.Thread(target=_fetch, args=(k, p), daemon=True) for k, p in targets]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+
+    resp = Response(json.dumps(results), status=200, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
 @app.route("/api/<path:p>", methods=["GET", "POST", "OPTIONS"])
 def proxy(p):
     if request.method == "OPTIONS":
