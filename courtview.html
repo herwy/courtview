@@ -2175,9 +2175,7 @@ async function loadStats() {
     ch += '</tr></thead><tbody>';
     for (const c of coaches) {
       const cr = coachRates[c.coach_id];
-      const rpp = cr?.avg_rate != null
-        ? `${fmtGBP(cr.avg_rate)}<span style="color:var(--text-4);font-size:10px"> ×${cr.sample}</span>`
-        : '-';
+      const rpp = cr?.avg_rate != null ? fmtGBP(cr.avg_rate) : '-';
       ch += `<tr>
         <td>${esc(c.coach_name)}</td>
         <td class="num">${c.total_sessions}</td>
