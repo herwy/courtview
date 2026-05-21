@@ -936,6 +936,21 @@ function normaliseV2(v2) {
       slot.interval_prices.push({ duration: s.duration, price: s.price });
     }
   }
+  // Seed byCourt from reservedBookings.courts for courts absent from allSlots (e.g. fully-booked days)
+  for (const bk of (v2.reservedBookings || [])) {
+    for (const c of (bk.courts || [])) {
+      if (!c.court_id || c.court_name === 'PICKLEBALL') continue;
+      if (!byCourt.has(c.court_id)) {
+        byCourt.set(c.court_id, {
+          court_id: c.court_id,
+          court_name: c.court_name || c.court_id,
+          sport_type: c.sport_type || 'PADEL',
+          slotsByStart: new Map(),
+        });
+      }
+    }
+  }
+
   // Build per-court bookedByCell map: cell index -> booker name
   const courtBookings = new Map(); // courtId -> Map<cellIdx, name>
   for (const bk of (v2.reservedBookings || [])) {
