@@ -2577,6 +2577,28 @@ function setupClubSelector() {
   });
 }
 
+/* CACHE WARMING — fire-and-forget server-side cache fills for non-active clubs */
+function warmOtherClubs() {
+  const now = new Date();
+  const moStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const moEnd   = now.getTime();
+  const today   = dayStart(new Date());
+  const todayEnd = dayEnd(new Date());
+  const others = COMPARE_CLUBS.filter(c => c.id !== CLUB);
+  others.forEach((club, idx) => {
+    const delay = idx * 1500; // stagger 1.5s apart to avoid hammering RPi
+    setTimeout(() => {
+      const id = club.id;
+      [
+        `/api/booked-hours?club_id=${id}&start=${moStart}&end=${moEnd}`,
+        `/api/activity-summary?club_id=${id}&start=${moStart}&end=${moEnd}`,
+        `/api/coach-stats?club_id=${id}&start=${moStart}&end=${moEnd}`,
+        `/api/revenue-summary?club_id=${id}&start=${moStart}&end=${moEnd}`,
+      ].forEach(url => apiFetch(url).catch(() => {}));
+    }, delay);
+  });
+}
+
 /* INIT */
 setupTabs();
 setupRevenue();
@@ -2587,6 +2609,8 @@ Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]).then(() => {
   loadStats(); loadCourtPopularity();
   setTimeout(() => { if (!compareLoaded) loadCompare(); }, 500);
   setTimeout(() => { if (!revLoaded) loadRevenue(); }, 3000);
+  // Warm server-side cache for all other clubs so switching is instant
+  setTimeout(() => warmOtherClubs(), 6000);
 });
 setInterval(pollWatches, NOTIFY_POLL_MS);
 </script>
