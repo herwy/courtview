@@ -336,10 +336,10 @@ nav {
 .hm-table td { padding: 0; }
 .hm-cell {
   width: 100%; height: 28px; border-radius: 3px;
-  cursor: pointer; transition: filter 140ms ease;
+  cursor: default; transition: filter 140ms ease;
+  -webkit-tap-highlight-color: transparent;
 }
-.hm-cell:hover { filter: brightness(1.4); }
-.hm-cell:focus { outline: 2px solid var(--accent-v); outline-offset: 1px; }
+.hm-cell:hover { filter: brightness(1.25); }
 
 /* RECOMMENDATIONS */
 .rec-list { display: flex; flex-direction: column; gap: 6px; }
@@ -1177,7 +1177,7 @@ function renderRealHeatmap(rawBuckets) {
       const col = occ !== null ? hmColor(occ) : 'rgba(255,255,255,0.025)';
       const pct = occ !== null ? Math.round(occ * 100) : null;
       const lbl = occ !== null ? `${WEEK_DAYS[d]} ${hr}:00 - ${pct}% booked` : `${WEEK_DAYS[d]} ${hr}:00 - no data`;
-      h += `<td><div class="hm-cell" style="background:${col}" tabindex="0" role="gridcell" title="${lbl}" aria-label="${lbl}"></div></td>`;
+      h += `<td><div class="hm-cell" style="background:${col}" title="${lbl}" aria-label="${lbl}"></div></td>`;
     }
     h += '</tr>';
   }
