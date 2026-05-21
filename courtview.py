@@ -504,27 +504,29 @@ def _stats_key(endpoint: str, club_id: str, start: str, end: str) -> str:
 
 def get_stats_cached(key: str) -> str | None:
     cutoff = int(_now()) - STATS_CACHE_TTL
+    conn = _db_connect()
     try:
-        conn = _db_connect()
         row = conn.execute(
             "SELECT payload FROM stats_cache WHERE cache_key=? AND fetched_at>?", (key, cutoff)
         ).fetchone()
-        conn.close()
         return row[0] if row else None
     except sqlite3.Error:
         return None
+    finally:
+        conn.close()
 
 def set_stats_cached(key: str, payload: str) -> None:
+    conn = _db_connect()
     try:
-        conn = _db_connect()
         conn.execute(
             "INSERT OR REPLACE INTO stats_cache (cache_key, payload, fetched_at) VALUES (?,?,?)",
             (key, payload, int(_now()))
         )
         conn.commit()
-        conn.close()
     except sqlite3.Error:
         pass
+    finally:
+        conn.close()
 
 
 def _cache_key(req_args: dict) -> tuple:
@@ -541,13 +543,12 @@ def get_cached(club_id: str, start: str, end: str) -> str | None:
     if not club_id:
         return None
     cutoff = int(_now()) - CACHE_TTL
+    conn = _db_connect()
     try:
-        conn = _db_connect()
         row = conn.execute(
             "SELECT payload FROM availability WHERE club_id=? AND start_datetime=? AND end_datetime=? AND fetched_at>?",
             (club_id, start, end, cutoff),
         ).fetchone()
-        conn.close()
         if not row:
             return None
         if row[0].strip() == "[]":
@@ -555,6 +556,8 @@ def get_cached(club_id: str, start: str, end: str) -> str | None:
         return row[0]
     except sqlite3.Error:
         return None
+    finally:
+        conn.close()
 
 
 def store_cached(club_id: str, start: str, end: str, payload: str) -> None:
@@ -568,16 +571,17 @@ def store_cached(club_id: str, start: str, end: str, payload: str) -> None:
             return
     except (ValueError, TypeError):
         pass
+    conn = _db_connect()
     try:
-        conn = _db_connect()
         conn.execute(
             "INSERT OR REPLACE INTO availability (club_id, start_datetime, end_datetime, payload, fetched_at) VALUES (?,?,?,?,?)",
             (club_id, start, end, payload, int(_now())),
         )
         conn.commit()
-        conn.close()
     except sqlite3.Error as exc:
         print(f"[cache] store error: {exc}")
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -773,24 +777,39 @@ def api_month():
 
     cutoff = int(_now()) - CACHE_TTL
     today  = datetime.now(_LONDON_TZ).date()
-    days: dict = {}
+
+    # Build all 28 (date_str, start_ms, end_ms) tuples up front
+    date_params: list = []
+    for i in range(28):
+        d        = today + timedelta(days=i)
+        start_ms = int(datetime(d.year, d.month, d.day, 0, 0, 0,
+                                tzinfo=_LONDON_TZ).timestamp() * 1000)
+        end_ms   = int(datetime(d.year, d.month, d.day, 23, 59, 59, 999000,
+                                tzinfo=_LONDON_TZ).timestamp() * 1000)
+        date_params.append((str(d), str(start_ms), str(end_ms)))
+
+    days: dict = {dp[0]: None for dp in date_params}
+    conn = _db_connect()
     try:
-        conn = _db_connect()
-        for i in range(28):
-            d        = today + timedelta(days=i)
-            start_ms = int(datetime(d.year, d.month, d.day, 0, 0, 0,
-                                    tzinfo=_LONDON_TZ).timestamp() * 1000)
-            end_ms   = int(datetime(d.year, d.month, d.day, 23, 59, 59, 999000,
-                                    tzinfo=_LONDON_TZ).timestamp() * 1000)
-            row = conn.execute(
-                "SELECT payload FROM availability"
-                " WHERE club_id=? AND start_datetime=? AND end_datetime=? AND fetched_at>?",
-                (club_id, str(start_ms), str(end_ms), cutoff),
-            ).fetchone()
-            days[str(d)] = json.loads(row[0]) if row else None
-        conn.close()
+        # Single batched query: fetch all 28 days in one round-trip
+        placeholders = ",".join(["(?,?)"] * len(date_params))
+        flat_pairs   = [v for dp in date_params for v in (dp[1], dp[2])]
+        rows = conn.execute(
+            f"SELECT start_datetime, end_datetime, payload FROM availability"
+            f" WHERE club_id=? AND fetched_at>?"
+            f" AND (start_datetime, end_datetime) IN ({placeholders})",
+            [club_id, cutoff] + flat_pairs,
+        ).fetchall()
+        # Build reverse lookup: (start_ms, end_ms) -> date_str
+        pair_to_date = {(dp[1], dp[2]): dp[0] for dp in date_params}
+        for start_dt, end_dt, payload_str in rows:
+            date_str = pair_to_date.get((start_dt, end_dt))
+            if date_str:
+                days[date_str] = json.loads(payload_str)
     except sqlite3.Error as exc:
         return jsonify({"error": str(exc)}), 500
+    finally:
+        conn.close()
 
     resp = Response(
         json.dumps({"club_id": club_id, "days": days}),
@@ -1039,14 +1058,30 @@ def api_booked_hours():
             resp = Response(cached, status=200, content_type="application/json")
             if via_query: _set_cookie(resp, via_query)
             return resp
-    try:
-        url = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start}&end_datetime={end}"
-        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
-        payload = r.content.decode("utf-8", errors="replace")
-        if ck and r.status_code == 200:
-            set_stats_cached(ck, payload)
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 502
+        # Stampede guard: only one thread fetches per key; others wait and re-check cache
+        with _STATS_FETCH_MUTEX:
+            lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
+        with lock:
+            cached = get_stats_cached(ck)  # re-check after acquiring
+            if cached:
+                resp = Response(cached, status=200, content_type="application/json")
+                if via_query: _set_cookie(resp, via_query)
+                return resp
+            try:
+                url = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start}&end_datetime={end}"
+                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+                payload = r.content.decode("utf-8", errors="replace")
+                if r.status_code == 200:
+                    set_stats_cached(ck, payload)
+            except Exception as exc:
+                return jsonify({"error": str(exc)}), 502
+    else:
+        try:
+            url = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start}&end_datetime={end}"
+            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+            payload = r.content.decode("utf-8", errors="replace")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 502
     if r.status_code != 200:
         return jsonify({"error": "upstream error"}), 502
     resp = Response(payload, status=200, content_type="application/json")
@@ -1073,11 +1108,37 @@ def api_activity_summary():
             resp = Response(cached, status=200, content_type="application/json")
             if via_query: _set_cookie(resp, via_query)
             return resp
+        # Stampede guard: only one thread fetches per key
+        with _STATS_FETCH_MUTEX:
+            lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
+        with lock:
+            cached = get_stats_cached(ck)
+            if cached:
+                resp = Response(cached, status=200, content_type="application/json")
+                if via_query: _set_cookie(resp, via_query)
+                return resp
+            # Still a miss under lock - this thread does the fetch
+            payload = _do_fetch_activity_summary(club_id, start, end, ck)
+            if isinstance(payload, tuple):
+                return payload  # error response
+    else:
+        payload = _do_fetch_activity_summary(club_id, start, end, "")
+        if isinstance(payload, tuple):
+            return payload
 
+    resp = Response(payload, status=200, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
+    """Fetch and aggregate activity summary from upstream. Returns payload str or error tuple."""
     PAGE_SIZE = 100
     counts: dict = {}
     total = 0
     coach_rates: dict = {}
+
     def _fetch_mix():
         url = (f"{TARGET}/home/activity/filtered_activities"
                f"?club_id={club_id}&start={start}&end={end}&limit={PAGE_SIZE}")
@@ -1116,9 +1177,8 @@ def api_activity_summary():
                     except (TypeError, ValueError):
                         pass
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 502
+        return (jsonify({"error": str(exc)}), 502)
 
-    # Summarise per-coach: avg rate, sample size
     coach_rate_summary = {
         cid: {
             "avg_rate": round(sum(d["rates"]) / len(d["rates"]), 2) if d["rates"] else None,
@@ -1130,10 +1190,7 @@ def api_activity_summary():
     payload = json.dumps({"total": total, "counts": counts, "coach_rates": coach_rate_summary})
     if ck:
         set_stats_cached(ck, payload)
-    resp = Response(payload, status=200, content_type="application/json")
-    if via_query:
-        _set_cookie(resp, via_query)
-    return resp
+    return payload
 
 
 @app.route("/api/day-activities", methods=["GET"])
@@ -1201,17 +1258,35 @@ def api_revenue_summary():
             resp = Response(cached, status=200, content_type="application/json")
             if via_query: _set_cookie(resp, via_query)
             return resp
-    try:
-        url = (
-            f"{TARGET}/club/statistics/financial/v2"
-            f"?club_ids={club_id}&start_time={start}&end_time={end}"
-        )
-        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
-        payload = r.content.decode("utf-8", errors="replace")
-        if ck and r.status_code == 200:
-            set_stats_cached(ck, payload)
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 502
+        with _STATS_FETCH_MUTEX:
+            lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
+        with lock:
+            cached = get_stats_cached(ck)
+            if cached:
+                resp = Response(cached, status=200, content_type="application/json")
+                if via_query: _set_cookie(resp, via_query)
+                return resp
+            try:
+                url = (
+                    f"{TARGET}/club/statistics/financial/v2"
+                    f"?club_ids={club_id}&start_time={start}&end_time={end}"
+                )
+                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+                payload = r.content.decode("utf-8", errors="replace")
+                if r.status_code == 200:
+                    set_stats_cached(ck, payload)
+            except Exception as exc:
+                return jsonify({"error": str(exc)}), 502
+    else:
+        try:
+            url = (
+                f"{TARGET}/club/statistics/financial/v2"
+                f"?club_ids={club_id}&start_time={start}&end_time={end}"
+            )
+            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+            payload = r.content.decode("utf-8", errors="replace")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 502
 
     if r.status_code != 200:
         return jsonify({"error": "upstream error"}), 502
@@ -1278,14 +1353,29 @@ def api_coach_stats():
             resp = Response(cached, status=200, content_type="application/json")
             if via_query: _set_cookie(resp, via_query)
             return resp
-    try:
-        url = f"{TARGET}/club/statistics/coach?club_ids={club_id}&start_time={start}&end_time={end}"
-        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
-        payload = r.content.decode("utf-8", errors="replace")
-        if ck and r.status_code == 200:
-            set_stats_cached(ck, payload)
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 502
+        with _STATS_FETCH_MUTEX:
+            lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
+        with lock:
+            cached = get_stats_cached(ck)
+            if cached:
+                resp = Response(cached, status=200, content_type="application/json")
+                if via_query: _set_cookie(resp, via_query)
+                return resp
+            try:
+                url = f"{TARGET}/club/statistics/coach?club_ids={club_id}&start_time={start}&end_time={end}"
+                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+                payload = r.content.decode("utf-8", errors="replace")
+                if r.status_code == 200:
+                    set_stats_cached(ck, payload)
+            except Exception as exc:
+                return jsonify({"error": str(exc)}), 502
+    else:
+        try:
+            url = f"{TARGET}/club/statistics/coach?club_ids={club_id}&start_time={start}&end_time={end}"
+            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+            payload = r.content.decode("utf-8", errors="replace")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 502
     if r.status_code != 200:
         return jsonify({"error": "upstream error"}), 502
     resp = Response(payload, status=200, content_type="application/json")
@@ -1312,29 +1402,39 @@ def api_coach_bios():
         if via_query: _set_cookie(resp, via_query)
         return resp
 
-    names = [n.strip() for n in names_raw.split(",") if n.strip()]
+    # Stampede guard: only one thread fetches per key
+    with _STATS_FETCH_MUTEX:
+        lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
+    with lock:
+        cached = get_stats_cached(ck)
+        if cached:
+            resp = Response(cached, status=200, content_type="application/json")
+            if via_query: _set_cookie(resp, via_query)
+            return resp
 
-    def fetch_bio(name: str) -> dict:
-        try:
-            url = f"{TARGET}/club/global_search?club_id={club_id}&query={name}&limit=5"
-            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=10)
-            if r.status_code != 200:
-                return {}
-            coaches = r.json().get("coaches", [])
-            for c in coaches:
-                if c.get("name", "").lower().startswith(name.split()[0].lower()):
-                    return {c["_id"]: {"name": c.get("name", ""), "info": c.get("info", ""), "photo_url": c.get("photo_url", "")}}
-        except Exception:
-            pass
-        return {}
+        names = [n.strip() for n in names_raw.split(",") if n.strip()]
 
-    bios: dict = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
-        for result in ex.map(fetch_bio, names):
-            bios.update(result)
+        def fetch_bio(name: str) -> dict:
+            try:
+                url = f"{TARGET}/club/global_search?club_id={club_id}&query={name}&limit=5"
+                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=10)
+                if r.status_code != 200:
+                    return {}
+                coaches = r.json().get("coaches", [])
+                for c in coaches:
+                    if c.get("name", "").lower().startswith(name.split()[0].lower()):
+                        return {c["_id"]: {"name": c.get("name", ""), "info": c.get("info", ""), "photo_url": c.get("photo_url", "")}}
+            except Exception:
+                pass
+            return {}
 
-    payload = json.dumps(bios)
-    set_stats_cached(ck, payload)
+        bios: dict = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+            for result in ex.map(fetch_bio, names):
+                bios.update(result)
+        payload = json.dumps(bios)
+        set_stats_cached(ck, payload)
+
     resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
@@ -1697,6 +1797,19 @@ def _refresh_loop() -> None:
         elapsed = round(_now() - t0, 1)
         print(f"[refresh] {refreshed} entries refreshed in {elapsed}s")
 
+        # Periodically evict stale stats_cache entries (no TTL enforced at write time)
+        stats_cutoff = int(_now()) - STATS_CACHE_TTL
+        try:
+            conn = _db_connect()
+            try:
+                conn.execute("DELETE FROM stats_cache WHERE fetched_at < ?", (stats_cutoff,))
+                conn.commit()
+                print("[refresh] stats_cache stale entries evicted")
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            print(f"[refresh] stats_cache cleanup error: {exc}")
+
 
 # ---------------------------------------------------------------------------
 # Module-level startup (runs at import time so gunicorn picks it up)
@@ -1707,6 +1820,10 @@ _STARTUP_DONE = False
 
 _MEMBERSHIP_FETCH_LOCKS: dict = {}
 _MEMBERSHIP_FETCH_MUTEX = threading.Lock()
+
+# Per-key stampede guard for stats cache (same pattern as membership)
+_STATS_FETCH_LOCKS: dict = {}
+_STATS_FETCH_MUTEX = threading.Lock()
 
 
 def _startup() -> None:
