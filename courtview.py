@@ -1013,7 +1013,7 @@ def api_activity_summary():
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
 
-    PAGE_SIZE = 200
+    PAGE_SIZE = 100
     counts: dict = {}
     total = 0
     skip = 0
