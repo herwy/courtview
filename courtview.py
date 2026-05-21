@@ -405,64 +405,66 @@ def _set_cookie(response, token: str) -> None:
 def init_db() -> None:
     """Create the cache database and tables if they do not exist."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS availability (
-               club_id        TEXT,
-               start_datetime TEXT,
-               end_datetime   TEXT,
-               payload        TEXT,
-               fetched_at     INTEGER,
-               PRIMARY KEY (club_id, start_datetime, end_datetime)
-           )"""
-    )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS heatmap_cache (
-               club_id    TEXT,
-               dow        INTEGER,
-               hour       INTEGER,
-               avg_occ    REAL,
-               samples    INTEGER,
-               fetched_at INTEGER,
-               PRIMARY KEY (club_id, dow, hour)
-           )"""
-    )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS heatmap_hour_signal (
-               club_id    TEXT,
-               hour       INTEGER,
-               norm       REAL,
-               fetched_at INTEGER,
-               PRIMARY KEY (club_id, hour)
-           )"""
-    )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS heatmap_dow_signal (
-               club_id    TEXT,
-               dow        INTEGER,
-               norm       REAL,
-               fetched_at INTEGER,
-               PRIMARY KEY (club_id, dow)
-           )"""
-    )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS court_popularity (
-               club_id    TEXT,
-               court_name TEXT,
-               count      INTEGER,
-               fetched_at INTEGER,
-               PRIMARY KEY (club_id, court_name)
-           )"""
-    )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS membership_members_cache (
-               club_id    TEXT PRIMARY KEY,
-               payload    TEXT,
-               fetched_at INTEGER
-           )"""
-    )
-    conn.commit()
-    conn.close()
+    conn = _db_connect()
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS availability (
+                   club_id        TEXT,
+                   start_datetime TEXT,
+                   end_datetime   TEXT,
+                   payload        TEXT,
+                   fetched_at     INTEGER,
+                   PRIMARY KEY (club_id, start_datetime, end_datetime)
+               )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS heatmap_cache (
+                   club_id    TEXT,
+                   dow        INTEGER,
+                   hour       INTEGER,
+                   avg_occ    REAL,
+                   samples    INTEGER,
+                   fetched_at INTEGER,
+                   PRIMARY KEY (club_id, dow, hour)
+               )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS heatmap_hour_signal (
+                   club_id    TEXT,
+                   hour       INTEGER,
+                   norm       REAL,
+                   fetched_at INTEGER,
+                   PRIMARY KEY (club_id, hour)
+               )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS heatmap_dow_signal (
+                   club_id    TEXT,
+                   dow        INTEGER,
+                   norm       REAL,
+                   fetched_at INTEGER,
+                   PRIMARY KEY (club_id, dow)
+               )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS court_popularity (
+                   club_id    TEXT,
+                   court_name TEXT,
+                   count      INTEGER,
+                   fetched_at INTEGER,
+                   PRIMARY KEY (club_id, court_name)
+               )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS membership_members_cache (
+                   club_id    TEXT PRIMARY KEY,
+                   payload    TEXT,
+                   fetched_at INTEGER
+               )"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _cache_key(req_args: dict) -> tuple:
@@ -480,7 +482,7 @@ def get_cached(club_id: str, start: str, end: str) -> str | None:
         return None
     cutoff = int(_now()) - CACHE_TTL
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _db_connect()
         row = conn.execute(
             "SELECT payload FROM availability WHERE club_id=? AND start_datetime=? AND end_datetime=? AND fetched_at>?",
             (club_id, start, end, cutoff),
@@ -496,7 +498,7 @@ def store_cached(club_id: str, start: str, end: str, payload: str) -> None:
     if not club_id:
         return
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _db_connect()
         conn.execute(
             "INSERT OR REPLACE INTO availability (club_id, start_datetime, end_datetime, payload, fetched_at) VALUES (?,?,?,?,?)",
             (club_id, start, end, payload, int(_now())),
@@ -617,12 +619,20 @@ def api_heatmap():
     if not club_id:
         return jsonify({"error": "club_id required"}), 400
     try:
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute(
-            "SELECT dow, hour, avg_occ, samples, fetched_at FROM heatmap_cache WHERE club_id=?",
-            (club_id,),
-        ).fetchall()
-        conn.close()
+        conn = _db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT dow, hour, avg_occ, samples, fetched_at FROM heatmap_cache WHERE club_id=?",
+                (club_id,),
+            ).fetchall()
+            hour_rows = conn.execute(
+                "SELECT hour, norm FROM heatmap_hour_signal WHERE club_id=?", (club_id,)
+            ).fetchall()
+            dow_rows = conn.execute(
+                "SELECT dow, norm FROM heatmap_dow_signal WHERE club_id=?", (club_id,)
+            ).fetchall()
+        finally:
+            conn.close()
     except sqlite3.Error as exc:
         return jsonify({"error": str(exc)}), 500
 
@@ -635,19 +645,6 @@ def api_heatmap():
         buckets.setdefault(str(dow), {})[str(hour)] = round(avg_occ, 4)
         if fa > fetched_at:
             fetched_at = fa
-
-    # Load raw signals
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        hour_rows = conn.execute(
-            "SELECT hour, norm FROM heatmap_hour_signal WHERE club_id=?", (club_id,)
-        ).fetchall()
-        dow_rows = conn.execute(
-            "SELECT dow, norm FROM heatmap_dow_signal WHERE club_id=?", (club_id,)
-        ).fetchall()
-        conn.close()
-    except sqlite3.Error:
-        hour_rows, dow_rows = [], []
 
     hour_signal = {str(h): round(n, 4) for h, n in hour_rows}
     dow_signal  = {str(d): round(n, 4) for d, n in dow_rows}
@@ -672,7 +669,7 @@ def api_court_popularity():
     if not club_id:
         return jsonify({"error": "club_id required"}), 400
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _db_connect()
         rows = conn.execute(
             "SELECT court_name, count, fetched_at FROM court_popularity WHERE club_id=? ORDER BY count DESC",
             (club_id,),
@@ -720,7 +717,7 @@ def api_membership_members():
     # Serve from cache if fresh (6h TTL)
     if not force_refresh:
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = _db_connect()
             row = conn.execute(
                 "SELECT payload FROM membership_members_cache WHERE club_id=? AND fetched_at>?",
                 (club_id, int(_now()) - 6 * 3600),
@@ -804,7 +801,7 @@ def api_membership_members():
 
     payload = json.dumps({"club_id": club_id, "counts": counts, "members": members_by_plan})
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _db_connect()
         conn.execute(
             "INSERT OR REPLACE INTO membership_members_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
             (club_id, payload, int(_now())),
@@ -994,7 +991,7 @@ def _heatmap_is_stale(club_id: str) -> bool:
     """Return True if heatmap data for this club is absent or older than HEATMAP_STALE_SECS."""
     cutoff = int(_now()) - HEATMAP_STALE_SECS
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _db_connect()
         row = conn.execute(
             "SELECT MIN(fetched_at) FROM heatmap_cache WHERE club_id=?", (club_id,)
         ).fetchone()
@@ -1066,8 +1063,8 @@ def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
 
     # --- Build DOW x hour occupancy matrix (product of normalised signals) ---
     now_ts = int(_now())
+    conn = _db_connect()
     try:
-        conn = sqlite3.connect(DB_PATH)
         # Product matrix
         for dow in range(7):
             dow_w = dow_counts.get(dow, 0.0) / max_dow
@@ -1100,10 +1097,11 @@ def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
                 (club_id, name, count, now_ts),
             )
         conn.commit()
-        conn.close()
         print(f"[heatmap] stored 30-day operational data for club {club_id} ({len(court_rows)} courts)")
     except sqlite3.Error as exc:
         print(f"[heatmap] db write error: {exc}")
+    finally:
+        conn.close()
 
 
 def _heatmap_refresh_loop() -> None:
@@ -1129,7 +1127,7 @@ def _refresh_loop() -> None:
         time.sleep(6 * 3600)
         cutoff = int(_now()) - CACHE_TTL
         try:
-            conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            conn = _db_connect()
             rows = conn.execute(
                 "SELECT club_id, start_datetime, end_datetime FROM availability WHERE fetched_at > ?",
                 (cutoff,),
@@ -1147,12 +1145,12 @@ def _refresh_loop() -> None:
         refreshed = 0
         for club_id, start, end in rows:
             try:
-                qs = f"?club_id={club_id}"
+                params = [("club_id", club_id)]
                 if start:
-                    qs += f"&start_datetime={start}"
+                    params.append(("start_datetime", start))
                 if end:
-                    qs += f"&end_datetime={end}"
-                url = TARGET + CACHED_PATH + qs
+                    params.append(("end_datetime", end))
+                url = TARGET + CACHED_PATH + "?" + urlencode(params)
                 r = cffi_requests.get(
                     url,
                     headers=APP_HEADERS,
