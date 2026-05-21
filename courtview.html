@@ -839,6 +839,7 @@ let compareHour = new Date().getHours() < 22 ? Math.max(new Date().getHours() + 
 let compareCache = {};
 let membershipCache = {};
 let todayReservedCount = 0;
+let activitiesCache = {}; // cacheKey -> Map<courtId:cellIdx, activity>
 
 /* CACHE KEY — scopes monthCache entries by club */
 const cacheKey = (clubId, dateKey) => `${clubId}/${dateKey}`;
@@ -890,6 +891,31 @@ async function fetchDay(date, clubId = CLUB) {
     todayReservedCount = Array.isArray(data.reservedBookings) ? data.reservedBookings.length : 0;
   }
   return normaliseV2(data);
+}
+
+/* Fetch all bookings for a day and build a map: "courtId:cellIdx" -> activity object */
+async function fetchDayActivities(date, clubId = CLUB) {
+  const start = dayStart(date);
+  const end   = dayEnd(date);
+  const r = await apiFetch(`/api/day-activities?club_id=${clubId}&start=${start}&end=${end}`);
+  if (!r.ok) return new Map();
+  const data = await r.json();
+  const map = new Map();
+  for (const act of (data.activities || [])) {
+    const si = cellIdx(act.start_datetime);
+    const span = act.end_datetime > act.start_datetime
+      ? Math.max(1, Math.ceil((act.end_datetime - act.start_datetime) / (SLOT_W * 60000)))
+      : 1;
+    for (const c of (act.courts || [])) {
+      const cid = c.id || c.court_id;
+      if (!cid) continue;
+      for (let k = si; k < Math.min(si + span, N_CELLS); k++) {
+        const key = `${cid}:${k}`;
+        if (!map.has(key)) map.set(key, act);
+      }
+    }
+  }
+  return map;
 }
 
 /* v2 -> v1-shaped court list.
@@ -1027,7 +1053,7 @@ function esc(s) {
 }
 
 /* COURT GRID */
-function renderGrid(courts) {
+function renderGrid(courts, actMap = new Map()) {
   if (!courts?.length) return '<div class="empty">No data for this date.</div>';
 
   const padel = courts
@@ -1079,16 +1105,36 @@ function renderGrid(courts) {
           </div>
         </div>`;
       } else {
-        const bookedBy = court.bookedByCell?.get(i);
-        if (bookedBy) {
-          h += `<div class="cell bkd" aria-label="${esc(court.name)} ${time} booked by ${esc(bookedBy)}">
+        const act = actMap.get(`${court.court_id}:${i}`);
+        if (act) {
+          const booker = act.activity_title?.match(/PLAYER:\s*(.+)/i)?.[1]?.trim()
+                      || act.players?.[0]?.name || '';
+          const names  = (act.players || []).map(p => esc(p.name)).join(', ');
+          const ppp    = act.payment_per_person ? `£${act.payment_per_person.toFixed(2)} pp` : '';
+          const spots  = act.total_capacity
+            ? `${act.no_of_participants || 0}/${act.total_capacity} players`
+            : '';
+          const endTime = act.end_datetime ? localHM(act.end_datetime) : '';
+          h += `<div class="cell bkd" aria-label="${esc(court.name)} ${time} booked by ${esc(booker)}">
             <div class="tt" aria-hidden="true">
-              <span class="tt-t">${time} · ${esc(court.name)}</span>
-              <span class="tt-r">${esc(bookedBy)}</span>
+              <span class="tt-t">${time}${endTime ? '–'+endTime : ''} · ${esc(court.name)}</span>
+              ${names ? `<span class="tt-r" style="color:var(--text-2)">${names}</span>` : ''}
+              ${spots ? `<span class="tt-r">${esc(spots)}</span>` : ''}
+              ${ppp   ? `<span class="tt-r">${esc(ppp)}</span>`   : ''}
             </div>
           </div>`;
         } else {
-          h += `<div class="cell" aria-label="${esc(court.name)} ${time} unavailable"></div>`;
+          const bookedBy = court.bookedByCell?.get(i);
+          if (bookedBy) {
+            h += `<div class="cell bkd" aria-label="${esc(court.name)} ${time} booked by ${esc(bookedBy)}">
+              <div class="tt" aria-hidden="true">
+                <span class="tt-t">${time} · ${esc(court.name)}</span>
+                <span class="tt-r">${esc(bookedBy)}</span>
+              </div>
+            </div>`;
+          } else {
+            h += `<div class="cell" aria-label="${esc(court.name)} ${time} unavailable"></div>`;
+          }
         }
       }
     }
@@ -1419,17 +1465,21 @@ function fillStats(courts) {
   }
 }
 
-/* LOAD DAY · availability */
+/* LOAD DAY · availability + bookings in parallel */
 async function loadDay(date) {
   document.getElementById('gridOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
   document.getElementById('b2bOut').innerHTML  = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Calculating...</div>';
   try {
     const key = cacheKey(CLUB, isoDate(date));
-    if (!monthCache[key]) monthCache[key] = await fetchDay(date);
-    const courts = monthCache[key];
+    const [courts, actMap] = await Promise.all([
+      monthCache[key]      ? Promise.resolve(monthCache[key])      : fetchDay(date),
+      activitiesCache[key] ? Promise.resolve(activitiesCache[key]) : fetchDayActivities(date),
+    ]);
+    monthCache[key]      = courts;
+    activitiesCache[key] = actMap;
     dayData = courts;
     fillStats(courts);
-    document.getElementById('gridOut').innerHTML = renderGrid(courts);
+    document.getElementById('gridOut').innerHTML = renderGrid(courts, actMap);
     document.getElementById('b2bOut').innerHTML  = renderB2B(courts, selDur);
     populateNotifyCourts(courts);
   } catch(e) {

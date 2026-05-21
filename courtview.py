@@ -977,6 +977,51 @@ def api_club_info():
     return resp
 
 
+@app.route("/api/day-activities", methods=["GET"])
+def api_day_activities():
+    """Return all court bookings for a club+day by paginating /home/activity/filtered_activities."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+
+    club_id = request.args.get("club_id", "")
+    start   = request.args.get("start", "")
+    end     = request.args.get("end", "")
+    if not club_id or not start or not end:
+        return jsonify({"error": "club_id, start and end required"}), 400
+
+    PAGE_SIZE = 50
+    all_activities: list = []
+    skip = 0
+    try:
+        while True:
+            url = (
+                f"{TARGET}/home/activity/filtered_activities"
+                f"?club_id={club_id}&start={start}&end={end}"
+                f"&limit={PAGE_SIZE}&skip={skip}"
+            )
+            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+            if r.status_code != 200:
+                break
+            data = r.json()
+            page = data.get("activities", [])
+            all_activities.extend(page)
+            if len(page) < PAGE_SIZE:
+                break
+            skip += PAGE_SIZE
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    resp = Response(
+        json.dumps({"club_id": club_id, "activities": all_activities}),
+        status=200,
+        content_type="application/json",
+    )
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
 @app.route("/api/<path:p>", methods=["GET", "POST", "OPTIONS"])
 def proxy(p):
     if request.method == "OPTIONS":
