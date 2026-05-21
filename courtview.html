@@ -763,6 +763,11 @@ nav {
       <div class="card" style="padding:16px"><div id="statsMixOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div></div></div></div>
     </section>
 
+    <section aria-labelledby="stats-coaching-title" class="sec">
+      <div class="sec-hd"><h2 class="sec-title" id="stats-coaching-title">Coaching</h2><span class="sec-meta" id="statsCoachMeta"></span></div>
+      <div id="statsCoachOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div></div>
+    </section>
+
     <section aria-labelledby="cp-title">
       <div class="sec-hd">
         <h2 class="sec-title" id="cp-title">Court Popularity</h2>
@@ -907,7 +912,7 @@ function fmtGBP(n) {
 
 /* API */
 async function fetchDay(date, clubId = CLUB) {
-  const url = `${API}/player/player_booking/all_courts_slot_prices_v2?club_id=${clubId}&start_datetime=${dayStart(date)}&end_datetime=${dayEnd(date)}`;
+  const url = `${API}/player/player_booking/all_courts_slot_prices_v3?club_id=${clubId}&start_datetime=${dayStart(date)}&end_datetime=${dayEnd(date)}`;
   const r = await apiFetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const data = await r.json();
@@ -943,15 +948,28 @@ async function fetchDayActivities(date, clubId = CLUB) {
   return map;
 }
 
-/* v2 -> v1-shaped court list.
- * v1 (legacy): [{ court_id, court_name, sport_type, available_slots: [{ start_datetime, end_datetime, interval_prices: [{duration, price}, ...] }] }]
- * v2 (new):    { allSlots: [{ courtId, courtName, startTimestamp, endTimestamp, duration, price }], reservedBookings, reservedCount }
- * If the payload is already in v1 shape (cached rows from before the switch, or unexpected response), return as-is.
+/* Normalise v2/v3 API response -> v1-shaped court list with bookedByCell map.
+ * v1: [{ court_id, court_name, sport_type, available_slots: [...] }]
+ * v2: { allSlots: [...], reservedBookings, reservedCount }
+ * v3: { originalCourts: [...v1-shaped...], allSlots, reservedBookings } — use originalCourts directly.
  */
 function normaliseV2(v2) {
   if (!v2 || typeof v2 !== 'object' || !Array.isArray(v2.allSlots)) {
-    // Backward compat: v1-shaped or unknown - hand back unchanged
-    return v2;
+    return v2; // v1-shaped or unknown — hand back unchanged
+  }
+
+  // v3: originalCourts already in v1 shape — use directly, skip allSlots rebuild
+  if (Array.isArray(v2.originalCourts) && v2.originalCourts.length) {
+    const courts = v2.originalCourts
+      .filter(c => c.name !== 'PICKLEBALL' && c.sport_type !== 'PICKLEBALL' && !String(c.name).includes('PICKLEBALL'))
+      .map(c => ({
+        court_id:        c._id || c.court_id || c.id,
+        court_name:      c.name || c.court_name,
+        name:            c.name || c.court_name,
+        sport_type:      c.sport_type || 'PADEL',
+        available_slots: (c.available_slots || []).sort((a, b) => a.start_datetime - b.start_datetime),
+      }));
+    return attachBookedByCell(courts, v2.reservedBookings || []);
   }
   const byCourt = new Map();      // courtId -> { court_id, court_name, sport_type, slotsByStart: Map<start, slot> }
   for (const s of v2.allSlots) {
@@ -1002,9 +1020,22 @@ function normaliseV2(v2) {
     }
   }
 
-  // Build per-court bookedByCell map: cell index -> booker name
-  const courtBookings = new Map(); // courtId -> Map<cellIdx, name>
-  for (const bk of (v2.reservedBookings || [])) {
+  return attachBookedByCell(
+    Array.from(byCourt.values()).map(c => ({
+      court_id:   c.court_id,
+      court_name: c.court_name,
+      name:       c.court_name,
+      sport_type: c.sport_type,
+      available_slots: Array.from(c.slotsByStart.values())
+        .sort((a, b) => a.start_datetime - b.start_datetime),
+    })),
+    v2.reservedBookings || []
+  );
+}
+
+function attachBookedByCell(courts, reservedBookings) {
+  const courtBookings = new Map();
+  for (const bk of reservedBookings) {
     if (!bk || !bk.start_datetime) continue;
     const name = (bk.title?.match(/PLAYER:\s*(.+)/i)?.[1] ||
                   Object.values(bk.open_match?.players || {})[0]?.name || '').trim();
@@ -1021,16 +1052,7 @@ function normaliseV2(v2) {
       }
     }
   }
-
-  return Array.from(byCourt.values()).map(c => ({
-    court_id:   c.court_id,
-    court_name: c.court_name,
-    name:       c.court_name,                // renderGrid sorts on `name`
-    sport_type: c.sport_type,
-    available_slots: Array.from(c.slotsByStart.values())
-      .sort((a, b) => a.start_datetime - b.start_datetime),
-    bookedByCell: courtBookings.get(c.court_id) || null,
-  }));
+  return courts.map(c => ({ ...c, bookedByCell: courtBookings.get(c.court_id) || null }));
 }
 
 async function fetchClubProfile() {
@@ -2056,8 +2078,10 @@ async function loadStats() {
   document.getElementById('statsMonthLbl').textContent =
     now.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
-  // KPIs and activity mix are independent - render KPIs as soon as booked-hours resolves
-  const mixPromise = apiFetch(`/api/activity-summary?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
+  // Fire all three slow fetches in parallel; render each section as it arrives
+  const mixPromise   = apiFetch(`/api/activity-summary?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
+    .then(r => r.ok ? r.json() : null).catch(() => null);
+  const coachPromise = apiFetch(`/api/coach-stats?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
     .then(r => r.ok ? r.json() : null).catch(() => null);
 
   const [curr, prev] = await Promise.all([
@@ -2107,6 +2131,49 @@ async function loadStats() {
     document.getElementById('statsMixOut').innerHTML = mh;
   } else {
     document.getElementById('statsMixOut').innerHTML = '<div class="empty">No activity data.</div>';
+  }
+
+  // Coaching section
+  const coach = await coachPromise;
+  if (clubId !== CLUB) return;
+  if (coach && (coach.group?.total_sessions || coach.private?.total_sessions || coach.course?.total_sessions)) {
+    const overall = [
+      { label: 'Total sessions', val: coach.total_sessions },
+      { label: 'Revenue', val: coach.overall_revenue != null ? fmtGBP(parseFloat(coach.overall_revenue)) : null },
+      { label: 'Participants', val: coach.total_training_participants_all_sessions },
+    ];
+    const metaEl = document.getElementById('statsCoachMeta');
+    if (metaEl) metaEl.textContent = `${coach.total_sessions || 0} sessions · ${fmtGBP(parseFloat(coach.overall_revenue || 0))} revenue`;
+
+    // Flatten all coaches across types
+    const coachMap = new Map();
+    for (const type of ['group', 'private', 'course']) {
+      for (const c of (coach[type]?.coach_statistics || [])) {
+        const existing = coachMap.get(c.coach_id) || { ...c, total_revenue: 0, total_sessions: 0, total_participants: 0 };
+        existing.total_revenue     += c.total_revenue || 0;
+        existing.total_sessions    += c.total_sessions || 0;
+        existing.total_participants += c.total_participants || 0;
+        coachMap.set(c.coach_id, existing);
+      }
+    }
+    const coaches = [...coachMap.values()].sort((a, b) => b.total_sessions - a.total_sessions);
+
+    let ch = '<div class="stats-table-wrap"><table class="stats-table"><thead><tr>';
+    ch += '<th>Coach</th><th class="num">Sessions</th><th class="num">Revenue</th><th class="num">Participants</th><th class="num">Occ. rate</th>';
+    ch += '</tr></thead><tbody>';
+    for (const c of coaches) {
+      ch += `<tr>
+        <td>${esc(c.coach_name)}</td>
+        <td class="num">${c.total_sessions}</td>
+        <td class="num">${fmtGBP(c.total_revenue)}</td>
+        <td class="num">${c.total_participants}</td>
+        <td class="num">${(c.occupancy_rate ?? 0).toFixed(1)}%</td>
+      </tr>`;
+    }
+    ch += '</tbody></table></div>';
+    document.getElementById('statsCoachOut').innerHTML = ch;
+  } else {
+    document.getElementById('statsCoachOut').innerHTML = '<div class="empty">No coaching data this period.</div>';
   }
 }
 
@@ -2430,6 +2497,8 @@ async function switchClub(id) {
   if (kpiOut) kpiOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
   const mixOut = document.getElementById('statsMixOut');
   if (mixOut) mixOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div></div>';
+  const coachOut = document.getElementById('statsCoachOut');
+  if (coachOut) coachOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
   // Reset revenue + compare tabs so they re-fetch for the new club
   revLoaded = false;
   compareLoaded = false;

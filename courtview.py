@@ -50,7 +50,7 @@ APP_HEADERS = {
 
 # Endpoints allowed to proxy - whitelist prevents open proxy abuse
 ALLOWED_PATHS = {
-    "/player/player_booking/all_courts_slot_prices_v2",
+    "/player/player_booking/all_courts_slot_prices_v3",
     "/player/player_booking/search_clubs",
     "/club/",
     "/club/membership/",
@@ -61,7 +61,7 @@ ALLOWED_PATHS = {
 }
 
 # Path that uses the SQLite availability cache
-CACHED_PATH = "/player/player_booking/all_courts_slot_prices_v2"
+CACHED_PATH = "/player/player_booking/all_courts_slot_prices_v3"
 
 # Clubs and court counts for server-side heatmap fetching
 HEATMAP_CLUBS = [
@@ -1208,6 +1208,37 @@ def api_payment_history():
         status=200,
         content_type="application/json",
     )
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/coach-stats", methods=["GET"])
+def api_coach_stats():
+    """Proxy /club/statistics/coach with 1h SQLite cache."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    start   = request.args.get("start", "")
+    end     = request.args.get("end", "")
+    if not club_id or not start or not end:
+        return jsonify({"error": "club_id, start and end required"}), 400
+    ck = f"coach-stats:{club_id}:{start}:{end}"
+    cached = get_stats_cached(ck)
+    if cached:
+        resp = Response(cached, status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
+    try:
+        url = f"{TARGET}/club/statistics/coach?club_ids={club_id}&start_time={start}&end_time={end}"
+        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+        payload = r.content.decode("utf-8", errors="replace")
+        if r.status_code == 200:
+            set_stats_cached(ck, payload)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+    resp = Response(payload, status=r.status_code, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
