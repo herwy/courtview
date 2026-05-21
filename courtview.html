@@ -190,6 +190,9 @@ nav {
 .pay-table td.pay-status-fail { color:#ef4444; font-size:11px; }
 .pay-receipt { color:var(--accent-v); text-decoration:none; font-size:11px; }
 .pay-receipt:hover { text-decoration:underline; }
+.coach-bio-row td { padding:0 12px 10px 12px; color:var(--text-3); font-size:12px; line-height:1.5; border-bottom:1px solid var(--border-s); }
+.coach-expand { background:none; border:none; color:var(--accent-v); font-size:11px; cursor:pointer; padding:0; margin-left:6px; opacity:0.7; }
+.coach-expand:hover { opacity:1; }
 
 /* SECTION */
 .sec { margin-bottom: 36px; }
@@ -2170,23 +2173,44 @@ async function loadStats() {
       }))
       .sort((a, b) => b.occupancy_rate - a.occupancy_rate);
 
-    let ch = '<div class="stats-table-wrap"><table class="stats-table"><thead><tr>';
+    let ch = '<div class="stats-table-wrap"><table class="stats-table" id="coachTable"><thead><tr>';
     ch += '<th>Coach</th><th class="num">Sessions</th><th class="num">Revenue</th><th class="num">Rate/pp</th><th class="num">Participants</th><th class="num">Occ. rate</th>';
     ch += '</tr></thead><tbody>';
     for (const c of coaches) {
       const cr = coachRates[c.coach_id];
       const rpp = cr?.avg_rate != null ? fmtGBP(cr.avg_rate) : '-';
-      ch += `<tr>
-        <td>${esc(c.coach_name)}</td>
+      ch += `<tr data-coach-id="${esc(c.coach_id)}">
+        <td>${esc(c.coach_name)}<button class="coach-expand" data-cid="${esc(c.coach_id)}" title="Show bio">&#9432;</button></td>
         <td class="num">${c.total_sessions}</td>
         <td class="num">${fmtGBP(c.total_revenue)}</td>
         <td class="num">${rpp}</td>
         <td class="num">${c.total_participants}</td>
         <td class="num">${c.occupancy_rate.toFixed(1)}%</td>
-      </tr>`;
+      </tr>
+      <tr class="coach-bio-row" id="bio-${esc(c.coach_id)}" hidden><td colspan="6">Loading bio...</td></tr>`;
     }
     ch += '</tbody></table></div>';
     document.getElementById('statsCoachOut').innerHTML = ch;
+
+    // Wire expand buttons
+    document.querySelectorAll('.coach-expand').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const bioRow = document.getElementById('bio-' + btn.dataset.cid);
+        if (bioRow) bioRow.hidden = !bioRow.hidden;
+      });
+    });
+
+    // Fetch bios in background and populate bio rows
+    const names = coaches.map(c => c.coach_name.split(' ')[0]).join(',');
+    apiFetch(`/api/coach-bios?club_id=${clubId}&names=${encodeURIComponent(names)}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(bios => {
+        if (!bios) return;
+        for (const [cid, bio] of Object.entries(bios)) {
+          const row = document.getElementById('bio-' + cid);
+          if (row) row.querySelector('td').textContent = bio.info || 'No bio available.';
+        }
+      });
   } else {
     document.getElementById('statsCoachOut').innerHTML = '<div class="empty">No coaching data this period.</div>';
   }

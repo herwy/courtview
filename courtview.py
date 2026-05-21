@@ -16,6 +16,7 @@ import os
 import random
 import re
 import sqlite3
+import concurrent.futures
 import threading
 import time
 import urllib.request
@@ -1261,6 +1262,53 @@ def api_coach_stats():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
     resp = Response(payload, status=r.status_code, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/coach-bios", methods=["GET"])
+def api_coach_bios():
+    """Fetch coach bios from global_search in parallel, one query per coach name."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    names_raw = request.args.get("names", "")
+    if not club_id or not names_raw:
+        return jsonify({"error": "club_id and names required"}), 400
+
+    ck = f"coach-bios:{club_id}:{names_raw}"
+    cached = get_stats_cached(ck)
+    if cached:
+        resp = Response(cached, status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
+
+    names = [n.strip() for n in names_raw.split(",") if n.strip()]
+
+    def fetch_bio(name: str) -> dict:
+        try:
+            url = f"{TARGET}/club/global_search?club_id={club_id}&query={name}&limit=5"
+            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=10)
+            if r.status_code != 200:
+                return {}
+            coaches = r.json().get("coaches", [])
+            for c in coaches:
+                if c.get("name", "").lower().startswith(name.split()[0].lower()):
+                    return {c["_id"]: {"name": c.get("name", ""), "info": c.get("info", ""), "photo_url": c.get("photo_url", "")}}
+        except Exception:
+            pass
+        return {}
+
+    bios: dict = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+        for result in ex.map(fetch_bio, names):
+            bios.update(result)
+
+    payload = json.dumps(bios)
+    set_stats_cached(ck, payload)
+    resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
