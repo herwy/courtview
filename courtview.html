@@ -886,7 +886,7 @@ async function fetchDay(date, clubId = CLUB) {
   const data = await r.json();
   // Track today's booking density for the stats bar
   if (clubId === CLUB && isoDate(date) === TODAY_ISO) {
-    todayReservedCount = (data && typeof data.reservedCount === 'number') ? data.reservedCount : 0;
+    todayReservedCount = Array.isArray(data.reservedBookings) ? data.reservedBookings.length : 0;
   }
   return normaliseV2(data);
 }
