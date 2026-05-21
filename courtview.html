@@ -2258,7 +2258,7 @@ function renderPayments(data, reset) {
     document.getElementById('revPayOut').innerHTML = '<div class="empty">Payment history unavailable.</div>';
     return;
   }
-  const payments = data.payments || [];
+  const payments = (data.payments || []).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   revPayHasMore = data.has_more;
   revPaySkip += payments.length;
 
