@@ -472,9 +472,43 @@ def init_db() -> None:
                    fetched_at INTEGER
                )"""
         )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS stats_cache (
+                   cache_key  TEXT PRIMARY KEY,
+                   payload    TEXT,
+                   fetched_at INTEGER
+               )"""
+        )
         conn.commit()
     finally:
         conn.close()
+
+
+STATS_CACHE_TTL = 3600  # 1 hour
+
+def get_stats_cached(key: str) -> str | None:
+    cutoff = int(_now()) - STATS_CACHE_TTL
+    try:
+        conn = _db_connect()
+        row = conn.execute(
+            "SELECT payload FROM stats_cache WHERE cache_key=? AND fetched_at>?", (key, cutoff)
+        ).fetchone()
+        conn.close()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+def set_stats_cached(key: str, payload: str) -> None:
+    try:
+        conn = _db_connect()
+        conn.execute(
+            "INSERT OR REPLACE INTO stats_cache (cache_key, payload, fetched_at) VALUES (?,?,?)",
+            (key, payload, int(_now()))
+        )
+        conn.commit()
+        conn.close()
+    except sqlite3.Error:
+        pass
 
 
 def _cache_key(req_args: dict) -> tuple:
@@ -988,14 +1022,21 @@ def api_booked_hours():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
+    ck = f"booked-hours:{club_id}:{start}:{end}"
+    cached = get_stats_cached(ck)
+    if cached:
+        resp = Response(cached, status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
     try:
         url = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start}&end_datetime={end}"
         r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
-        payload = r.content
-        ct = r.headers.get("content-type", "application/json")
+        payload = r.content.decode("utf-8", errors="replace")
+        if r.status_code == 200:
+            set_stats_cached(ck, payload)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
-    resp = Response(payload, status=r.status_code, content_type=ct)
+    resp = Response(payload, status=r.status_code, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
@@ -1012,6 +1053,12 @@ def api_activity_summary():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
+    ck = f"activity-summary:{club_id}:{start}:{end}"
+    cached = get_stats_cached(ck)
+    if cached:
+        resp = Response(cached, status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
 
     PAGE_SIZE = 100
     counts: dict = {}
@@ -1041,11 +1088,9 @@ def api_activity_summary():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
-    resp = Response(
-        json.dumps({"total": total, "counts": counts}),
-        status=200,
-        content_type="application/json",
-    )
+    payload = json.dumps({"total": total, "counts": counts})
+    set_stats_cached(ck, payload)
+    resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
@@ -1108,19 +1153,25 @@ def api_revenue_summary():
     end       = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
-
+    ck = f"revenue-summary:{club_id}:{start}:{end}"
+    cached = get_stats_cached(ck)
+    if cached:
+        resp = Response(cached, status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
     try:
         url = (
             f"{TARGET}/club/statistics/financial/v2"
             f"?club_ids={club_id}&start_time={start}&end_time={end}"
         )
         r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
-        payload = r.content
-        ct = r.headers.get("content-type", "application/json")
+        payload = r.content.decode("utf-8", errors="replace")
+        if r.status_code == 200:
+            set_stats_cached(ck, payload)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
-    resp = Response(payload, status=r.status_code, content_type=ct)
+    resp = Response(payload, status=r.status_code, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
