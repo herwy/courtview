@@ -487,6 +487,14 @@ def init_db() -> None:
 
 STATS_CACHE_TTL = 21600  # 6 hours
 
+def _stats_key(endpoint: str, club_id: str, start: str, end: str) -> str:
+    """Round end to 6h bucket so all requests within the same window share a key."""
+    try:
+        end_bucket = int(end) // (STATS_CACHE_TTL * 1000) * (STATS_CACHE_TTL * 1000)
+    except (TypeError, ValueError):
+        end_bucket = end
+    return f"{endpoint}:{club_id}:{start}:{end_bucket}"
+
 def get_stats_cached(key: str) -> str | None:
     cutoff = int(_now()) - STATS_CACHE_TTL
     try:
@@ -1023,7 +1031,7 @@ def api_booked_hours():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
-    ck = f"booked-hours:{club_id}:{start}:{end}"
+    ck = _stats_key("booked-hours", club_id, start, end)
     cached = get_stats_cached(ck)
     if cached:
         resp = Response(cached, status=200, content_type="application/json")
@@ -1054,7 +1062,7 @@ def api_activity_summary():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
-    ck = f"activity-summary:{club_id}:{start}:{end}"
+    ck = _stats_key("activity-summary", club_id, start, end)
     cached = get_stats_cached(ck)
     if cached:
         resp = Response(cached, status=200, content_type="application/json")
@@ -1179,7 +1187,7 @@ def api_revenue_summary():
     end       = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
-    ck = f"revenue-summary:{club_id}:{start}:{end}"
+    ck = _stats_key("revenue-summary", club_id, start, end)
     cached = get_stats_cached(ck)
     if cached:
         resp = Response(cached, status=200, content_type="application/json")
@@ -1250,7 +1258,7 @@ def api_coach_stats():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
-    ck = f"coach-stats:{club_id}:{start}:{end}"
+    ck = _stats_key("coach-stats", club_id, start, end)
     cached = get_stats_cached(ck)
     if cached:
         resp = Response(cached, status=200, content_type="application/json")
