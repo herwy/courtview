@@ -493,11 +493,13 @@ def init_db() -> None:
 STATS_CACHE_TTL = 21600  # 6 hours
 
 def _stats_key(endpoint: str, club_id: str, start: str, end: str) -> str:
-    """Round end to 6h bucket so all requests within the same window share a key."""
+    """Round end to 6h bucket so all requests within the same window share a key.
+    Returns "" if end is not a valid integer; callers must treat "" as "no caching"."""
     try:
-        end_bucket = int(end) // (STATS_CACHE_TTL * 1000) * (STATS_CACHE_TTL * 1000)
+        end_int = int(end)
     except (TypeError, ValueError):
-        end_bucket = end
+        return ""
+    end_bucket = end_int // (STATS_CACHE_TTL * 1000) * (STATS_CACHE_TTL * 1000)
     return f"{endpoint}:{club_id}:{start}:{end_bucket}"
 
 def get_stats_cached(key: str) -> str | None:
@@ -1031,20 +1033,23 @@ def api_booked_hours():
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
     ck = _stats_key("booked-hours", club_id, start, end)
-    cached = get_stats_cached(ck)
-    if cached:
-        resp = Response(cached, status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
+    if ck:
+        cached = get_stats_cached(ck)
+        if cached:
+            resp = Response(cached, status=200, content_type="application/json")
+            if via_query: _set_cookie(resp, via_query)
+            return resp
     try:
         url = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start}&end_datetime={end}"
         r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
         payload = r.content.decode("utf-8", errors="replace")
-        if r.status_code == 200:
+        if ck and r.status_code == 200:
             set_stats_cached(ck, payload)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
-    resp = Response(payload, status=r.status_code, content_type="application/json")
+    if r.status_code != 200:
+        return jsonify({"error": "upstream error"}), 502
+    resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
@@ -1062,11 +1067,12 @@ def api_activity_summary():
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
     ck = _stats_key("activity-summary", club_id, start, end)
-    cached = get_stats_cached(ck)
-    if cached:
-        resp = Response(cached, status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
+    if ck:
+        cached = get_stats_cached(ck)
+        if cached:
+            resp = Response(cached, status=200, content_type="application/json")
+            if via_query: _set_cookie(resp, via_query)
+            return resp
 
     PAGE_SIZE = 100
     counts: dict = {}
@@ -1122,7 +1128,8 @@ def api_activity_summary():
     }
 
     payload = json.dumps({"total": total, "counts": counts, "coach_rates": coach_rate_summary})
-    set_stats_cached(ck, payload)
+    if ck:
+        set_stats_cached(ck, payload)
     resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
@@ -1143,10 +1150,11 @@ def api_day_activities():
         return jsonify({"error": "club_id, start and end required"}), 400
 
     PAGE_SIZE = 50
+    MAX_PAGES = 20  # cap at 1000 activities to prevent runaway upstream
     all_activities: list = []
     skip = 0
     try:
-        while True:
+        for page_num in range(MAX_PAGES):
             url = (
                 f"{TARGET}/home/activity/filtered_activities"
                 f"?club_id={club_id}&start={start}&end={end}"
@@ -1187,11 +1195,12 @@ def api_revenue_summary():
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
     ck = _stats_key("revenue-summary", club_id, start, end)
-    cached = get_stats_cached(ck)
-    if cached:
-        resp = Response(cached, status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
+    if ck:
+        cached = get_stats_cached(ck)
+        if cached:
+            resp = Response(cached, status=200, content_type="application/json")
+            if via_query: _set_cookie(resp, via_query)
+            return resp
     try:
         url = (
             f"{TARGET}/club/statistics/financial/v2"
@@ -1199,12 +1208,14 @@ def api_revenue_summary():
         )
         r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
         payload = r.content.decode("utf-8", errors="replace")
-        if r.status_code == 200:
+        if ck and r.status_code == 200:
             set_stats_cached(ck, payload)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
-    resp = Response(payload, status=r.status_code, content_type="application/json")
+    if r.status_code != 200:
+        return jsonify({"error": "upstream error"}), 502
+    resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
@@ -1220,8 +1231,11 @@ def api_payment_history():
     club_id = request.args.get("club_id", "")
     start   = request.args.get("start", "")
     end     = request.args.get("end", "")
-    limit   = min(int(request.args.get("limit", "50")), 100)
-    skip    = int(request.args.get("skip", "0"))
+    try:
+        limit = min(int(request.args.get("limit", "50")), 100)
+        skip  = int(request.args.get("skip", "0"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit and skip must be integers"}), 400
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
 
@@ -1258,20 +1272,23 @@ def api_coach_stats():
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
     ck = _stats_key("coach-stats", club_id, start, end)
-    cached = get_stats_cached(ck)
-    if cached:
-        resp = Response(cached, status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
+    if ck:
+        cached = get_stats_cached(ck)
+        if cached:
+            resp = Response(cached, status=200, content_type="application/json")
+            if via_query: _set_cookie(resp, via_query)
+            return resp
     try:
         url = f"{TARGET}/club/statistics/coach?club_ids={club_id}&start_time={start}&end_time={end}"
         r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
         payload = r.content.decode("utf-8", errors="replace")
-        if r.status_code == 200:
+        if ck and r.status_code == 200:
             set_stats_cached(ck, payload)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
-    resp = Response(payload, status=r.status_code, content_type="application/json")
+    if r.status_code != 200:
+        return jsonify({"error": "upstream error"}), 502
+    resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
