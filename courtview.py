@@ -1026,24 +1026,7 @@ def proxy(p):
         # Store in cache if this is the availability path
         if full_path == CACHED_PATH and upstream.status_code == 200:
             club_id, start, end = _cache_key(request.args.to_dict())
-            raw = upstream.content.decode("utf-8", errors="replace")
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict) and "reservedBookings" in parsed:
-                    rb = parsed.get("reservedBookings", []) or []
-                    parsed["reservedCount"] = len(rb)
-                    parsed["reservedBookings"] = [
-                        {
-                            "courts": b.get("courts", []),
-                            "start_datetime": b.get("start_datetime"),
-                            "end_datetime": b.get("end_datetime"),
-                        }
-                        for b in rb if isinstance(b, dict)
-                    ]
-                    raw = json.dumps(parsed)
-            except Exception:
-                pass
-            store_cached(club_id, start, end, raw)
+            store_cached(club_id, start, end, upstream.content.decode("utf-8", errors="replace"))
 
         ct = upstream.headers.get("content-type", "application/json")
         resp = Response(upstream.content, status=upstream.status_code, content_type=ct)
