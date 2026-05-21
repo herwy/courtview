@@ -678,6 +678,84 @@ def api_court_popularity():
     return resp
 
 
+@app.route("/api/membership-members", methods=["GET"])
+def api_membership_members():
+    """Fan out one request per membership plan and return per-plan member counts.
+
+    Returns { club_id, counts: { plan_id: int, ... } }.
+    /club/membership/member is NOT in ALLOWED_PATHS - this route keeps PII server-side only.
+    """
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+
+    club_id = request.args.get("club_id", "")
+    if not club_id:
+        return jsonify({"error": "club_id required"}), 400
+
+    empty_resp = json.dumps({"club_id": club_id, "counts": {}})
+
+    # Fetch the list of membership plans for this club
+    try:
+        plans_r = cffi_requests.get(
+            f"{TARGET}/club/membership/?club_id={club_id}",
+            headers=APP_HEADERS,
+            timeout=15,
+        )
+        if plans_r.status_code != 200:
+            resp = Response(empty_resp, status=200, content_type="application/json")
+            if via_query:
+                _set_cookie(resp, via_query)
+            return resp
+        plans = plans_r.json()
+        if not isinstance(plans, list):
+            resp = Response(empty_resp, status=200, content_type="application/json")
+            if via_query:
+                _set_cookie(resp, via_query)
+            return resp
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    counts: dict = {}
+    for plan in plans:
+        pid = plan.get("_id") or plan.get("id")
+        if not pid:
+            continue
+        pid = str(pid)
+        # Staggered requests to spread load on Padelmates backend
+        time.sleep(random.uniform(0.15, 0.30))
+        count = 0
+        try:
+            r = cffi_requests.get(
+                f"{TARGET}/club/membership/member?membership_id={pid}",
+                headers=APP_HEADERS,
+                timeout=15,
+            )
+            if r.status_code == 200:
+                parsed = r.json()
+                if isinstance(parsed, list):
+                    count = len(parsed)
+                elif isinstance(parsed, dict):
+                    # Try common list-shaped keys
+                    for key in ("members", "results", "data", "items"):
+                        val = parsed.get(key)
+                        if isinstance(val, list):
+                            count = len(val)
+                            break
+        except Exception:
+            count = 0
+        counts[pid] = count
+
+    resp = Response(
+        json.dumps({"club_id": club_id, "counts": counts}),
+        status=200,
+        content_type="application/json",
+    )
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
 @app.route("/api/<path:p>", methods=["GET", "POST", "OPTIONS"])
 def proxy(p):
     if request.method == "OPTIONS":
