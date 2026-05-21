@@ -440,6 +440,13 @@ def init_db() -> None:
                PRIMARY KEY (club_id, court_name)
            )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS membership_members_cache (
+               club_id    TEXT PRIMARY KEY,
+               payload    TEXT,
+               fetched_at INTEGER
+           )"""
+    )
     conn.commit()
     conn.close()
 
@@ -693,7 +700,25 @@ def api_membership_members():
     if not club_id:
         return jsonify({"error": "club_id required"}), 400
 
+    force_refresh = request.args.get("refresh") == "1"
     empty_resp = json.dumps({"club_id": club_id, "counts": {}})
+
+    # Serve from cache if fresh (6h TTL)
+    if not force_refresh:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            row = conn.execute(
+                "SELECT payload FROM membership_members_cache WHERE club_id=? AND fetched_at>?",
+                (club_id, int(_now()) - 6 * 3600),
+            ).fetchone()
+            conn.close()
+            if row:
+                resp = Response(row[0], status=200, content_type="application/json")
+                if via_query:
+                    _set_cookie(resp, via_query)
+                return resp
+        except sqlite3.Error:
+            pass
 
     # Fetch the list of membership plans for this club
     try:
@@ -763,11 +788,19 @@ def api_membership_members():
         counts[pid] = count
         members_by_plan[pid] = names
 
-    resp = Response(
-        json.dumps({"club_id": club_id, "counts": counts, "members": members_by_plan}),
-        status=200,
-        content_type="application/json",
-    )
+    payload = json.dumps({"club_id": club_id, "counts": counts, "members": members_by_plan})
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT OR REPLACE INTO membership_members_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
+            (club_id, payload, int(_now())),
+        )
+        conn.commit()
+        conn.close()
+    except sqlite3.Error:
+        pass
+
+    resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
