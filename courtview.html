@@ -171,9 +171,9 @@ nav {
 .rev-card-t { font-size:10px; font-weight:500; margin-top:4px; }
 .rev-card-t.up { color:var(--op-tx); }
 .rev-card-t.down { color:#ef4444; }
-.dow-chart { display:flex; gap:6px; align-items:flex-end; height:80px; }
-.dow-col { display:flex; flex-direction:column; align-items:center; gap:5px; flex:1; }
-.dow-bar-wrap { flex:1; width:100%; display:flex; align-items:flex-end; }
+.dow-chart { display:flex; gap:6px; align-items:flex-end; }
+.dow-col { display:flex; flex-direction:column; align-items:center; gap:4px; flex:1; }
+.dow-bar-wrap { width:100%; display:flex; align-items:flex-end; height:56px; }
 .dow-bar { width:100%; border-radius:3px 3px 0 0; transition:height 300ms ease; min-height:3px; }
 .dow-bar.dow-peak { background:rgba(113,112,255,0.7); }
 .dow-bar.dow-low  { background:rgba(113,112,255,0.2); }
@@ -1361,8 +1361,8 @@ function renderRealHeatmap(rawBuckets) {
 function renderDowChart(dowSignal) {
   if (!dowSignal || !Object.keys(dowSignal).length) return '';
   const max = Math.max(...Object.values(dowSignal));
-  const BAR_H = 68; // px available for bars
-  let h = '<div class="dow-chart" style="padding-top:12px">';
+  const BAR_H = 56; // matches .dow-bar-wrap height
+  let h = '<div class="dow-chart">';
   for (let d = 0; d < 7; d++) {
     const norm = dowSignal[d] ?? dowSignal[String(d)] ?? 0;
     const pct  = Math.round(norm * 100);
