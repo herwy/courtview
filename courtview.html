@@ -257,9 +257,7 @@ nav {
   position: relative; cursor: default;
   transition: filter 140ms ease;
 }
-.cell.avail { cursor: pointer; }
-.cell.avail:hover { filter: brightness(1.25); }
-.cell.avail:focus { outline: 2px solid var(--accent-v); outline-offset: 1px; }
+.cell.avail:hover { filter: brightness(1.15); }
 .cell.op { background: var(--op-bg); border-color: var(--op-bd); }
 .cell.st { background: var(--st-bg); border-color: var(--st-bd); }
 .cell.pk { background: var(--pk-bg); border-color: var(--pk-bd); }
@@ -1034,7 +1032,6 @@ function renderGrid(courts) {
           q120 ? `120 min · £${q120}` : ''
         ].filter(Boolean).join('<br>');
         h += `<div class="cell avail ${c.t}"
-          role="gridcell" tabindex="0"
           aria-label="${esc(court.name)} ${time} ${tierLabel(c.t)} from £${q60}">
           <div class="tt" aria-hidden="true">
             <span class="tt-t">${time} · ${esc(court.name)}</span>
@@ -1043,7 +1040,7 @@ function renderGrid(courts) {
           </div>
         </div>`;
       } else {
-        h += `<div class="cell" role="gridcell" aria-label="${esc(court.name)} ${time} unavailable"></div>`;
+        h += `<div class="cell" aria-label="${esc(court.name)} ${time} unavailable"></div>`;
       }
     }
     h += '</div></div>';
