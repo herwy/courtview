@@ -44,16 +44,41 @@ scp -q "$SCRIPT_DIR/courtview.html" "${RPI_HOST}:/root/projects/courtview/courtv
     && ok "  courtview.html" \
     || { err "  FAILED: courtview.html"; exit 1; }
 
-# Restart Flask server
-ssh "$RPI_HOST" "pkill -f '/root/projects/courtview/courtview.py' 2>/dev/null; true"
+# Deploy watchdog
+scp -q "$SCRIPT_DIR/watchdog.sh" "${RPI_HOST}:/root/projects/courtview/watchdog.sh" \
+    && ok "  watchdog.sh" \
+    || { err "  FAILED: watchdog.sh"; exit 1; }
+ssh "$RPI_HOST" "chmod +x /root/projects/courtview/watchdog.sh"
+
+# Install gunicorn if missing
+ssh "$RPI_HOST" "pip3 install gunicorn -q" || { err "gunicorn install failed"; exit 1; }
+
+# Stop watchdog FIRST so it doesn't race the restart
+ssh "$RPI_HOST" "pkill -f /root/projects/courtview/watchdog.sh 2>/dev/null; true"
+
+# Stop any current courtview (gunicorn or legacy python)
+ssh "$RPI_HOST" "pkill -f 'gunicorn.*courtview' 2>/dev/null; pkill -f '/root/projects/courtview/courtview.py' 2>/dev/null; true"
 sleep 1
-ssh "$RPI_HOST" "nohup python3 -u /root/projects/courtview/courtview.py >> /root/projects/courtview/courtview.log 2>&1 &"
+
+# Start via gunicorn (single worker, threaded model preserved by Flask + background daemon threads)
+ssh "$RPI_HOST" "cd /root/projects/courtview && nohup gunicorn --workers 1 --bind 0.0.0.0:8766 --timeout 60 --log-level warning courtview:app >> /root/projects/courtview/courtview.log 2>&1 &"
 sleep 2
 
-_cv_pid=$(ssh "$RPI_HOST" "pgrep -fa courtview.py" 2>/dev/null)
+_cv_pid=$(ssh "$RPI_HOST" "pgrep -fa 'gunicorn.*courtview|courtview.py'" 2>/dev/null)
 if [[ -z "$_cv_pid" ]]; then
-    err "courtview.py did not start - check /root/projects/courtview/courtview.log"
+    err "courtview did not start - check /root/projects/courtview/courtview.log"
     exit 1
 fi
 ok "courtview running: $_cv_pid"
+
+# Start watchdog AFTER courtview is confirmed up
+ssh "$RPI_HOST" "nohup zsh /root/projects/courtview/watchdog.sh >/dev/null 2>&1 &"
+sleep 1
+_wd_pid=$(ssh "$RPI_HOST" "pgrep -fa watchdog.sh" 2>/dev/null)
+if [[ -z "$_wd_pid" ]]; then
+    err "watchdog did not start"
+    exit 1
+fi
+ok "watchdog running: $_wd_pid"
+
 log "=== CourtView deploy complete ==="
