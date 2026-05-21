@@ -1052,6 +1052,21 @@ function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function scrollGridToNow(date) {
+  const scroller = document.querySelector('.grid-scroll');
+  if (!scroller) return;
+  const CELL_W = 52; // 50px + 2px gap
+  if (isoDate(date) === TODAY_ISO) {
+    const now = new Date();
+    const s = now.toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit', timeZone: TZ, hour12: false});
+    const [h, m] = s.split(':').map(Number);
+    const idx = Math.max(0, Math.floor(((h - H_START) * 60 + m) / SLOT_W) - 1);
+    scroller.scrollLeft = idx * CELL_W;
+  } else {
+    scroller.scrollLeft = 0;
+  }
+}
+
 /* COURT GRID */
 function renderGrid(courts, actMap = new Map()) {
   if (!courts?.length) return '<div class="empty">No data for this date.</div>';
@@ -1480,6 +1495,7 @@ async function loadDay(date) {
     dayData = courts;
     fillStats(courts);
     document.getElementById('gridOut').innerHTML = renderGrid(courts, actMap);
+    scrollGridToNow(date);
     document.getElementById('b2bOut').innerHTML  = renderB2B(courts, selDur);
     populateNotifyCourts(courts);
   } catch(e) {
