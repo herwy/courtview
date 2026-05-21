@@ -20,7 +20,8 @@ import threading
 import time
 import urllib.request
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from time import time as _now
 from urllib.parse import urlencode, parse_qsl
 
@@ -96,6 +97,7 @@ DASHBOARD_HTML = os.path.join(os.path.dirname(__file__), "courtview.html")
 COOKIE_NAME    = "courtview_token"
 COOKIE_MAX_AGE = 7776000
 CACHE_TTL      = 28 * 86400  # 28-day availability cache TTL
+_LONDON_TZ     = ZoneInfo("Europe/London")
 
 # ---------------------------------------------------------------------------
 # Styled 403 page - copied pattern from dashboard.py _FORBIDDEN_HTML
@@ -689,6 +691,46 @@ def api_court_popularity():
     ]
     resp = Response(
         json.dumps({"club_id": club_id, "fetched_at": fetched_at, "courts": courts}),
+        status=200, content_type="application/json",
+    )
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/month", methods=["GET"])
+def api_month():
+    """Return cached availability for 28 days in one response — replaces 28 serial fetchDay calls."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    if not club_id:
+        return jsonify({"error": "club_id required"}), 400
+
+    cutoff = int(_now()) - CACHE_TTL
+    today  = datetime.now(_LONDON_TZ).date()
+    days: dict = {}
+    try:
+        conn = _db_connect()
+        for i in range(28):
+            d        = today + timedelta(days=i)
+            start_ms = int(datetime(d.year, d.month, d.day, 0, 0, 0,
+                                    tzinfo=_LONDON_TZ).timestamp() * 1000)
+            end_ms   = int(datetime(d.year, d.month, d.day, 23, 59, 59, 999000,
+                                    tzinfo=_LONDON_TZ).timestamp() * 1000)
+            row = conn.execute(
+                "SELECT payload FROM availability"
+                " WHERE club_id=? AND start_datetime=? AND end_datetime=? AND fetched_at>?",
+                (club_id, str(start_ms), str(end_ms), cutoff),
+            ).fetchone()
+            days[str(d)] = json.loads(row[0]) if row else None
+        conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    resp = Response(
+        json.dumps({"club_id": club_id, "days": days}),
         status=200, content_type="application/json",
     )
     if via_query:

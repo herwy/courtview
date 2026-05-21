@@ -1322,28 +1322,51 @@ async function loadDay(date) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const jitter = (min, max) => min + Math.floor(Math.random() * (max - min));
 
-/* LOAD 28 DAYS · heatmap + recs — staggered to avoid burst pattern */
+/* LOAD 28 DAYS · batch endpoint first, fall back to serial fetchDay */
 async function loadMonth() {
-  for (let i = 0; i < 28; i++) {
-    const d = new Date(); d.setDate(d.getDate() + i);
-    const k = cacheKey(CLUB, isoDate(d));
-    if (!monthCache[k]) {
-      try {
-        monthCache[k] = await fetchDay(d);
-      } catch {
-        monthCache[k] = [];
+  const clubId = CLUB;
+  let batchOk = false;
+  try {
+    const r = await fetch(`/api/month?club_id=${encodeURIComponent(clubId)}`);
+    if (r.ok) {
+      const d = await r.json();
+      const missing = [];
+      for (const [dateStr, courts] of Object.entries(d.days || {})) {
+        const k = cacheKey(clubId, dateStr);
+        if (courts !== null) {
+          monthCache[k] = courts;
+        } else {
+          missing.push(dateStr);
+        }
       }
-      // randomised delay between requests — looks like human browse pace
-      if (i < 27) await sleep(jitter(180, 420));
+      batchOk = true;
+      if (CLUB === clubId) updateRecs();
+      // Background: fetch any uncached days individually with stagger
+      for (const dateStr of missing) {
+        if (CLUB !== clubId) return;
+        const k = cacheKey(clubId, dateStr);
+        if (monthCache[k]) continue;
+        try {
+          monthCache[k] = await fetchDay(new Date(dateStr + 'T12:00:00'), clubId);
+        } catch { monthCache[k] = []; }
+        await sleep(jitter(180, 420));
+      }
+      if (CLUB === clubId && missing.length) updateRecs();
     }
+  } catch (_) {}
+
+  if (!batchOk) {
+    // Fallback: original sequential approach
+    for (let i = 0; i < 28; i++) {
+      const d = new Date(); d.setDate(d.getDate() + i);
+      const k = cacheKey(CLUB, isoDate(d));
+      if (!monthCache[k]) {
+        try { monthCache[k] = await fetchDay(d); } catch { monthCache[k] = []; }
+        if (i < 27) await sleep(jitter(180, 420));
+      }
+    }
+    updateRecs();
   }
-  // Filter monthCache to only entries for the current club before rendering
-  const clubMonth = {};
-  const prefix = `${CLUB}/`;
-  for (const k of Object.keys(monthCache)) {
-    if (k.startsWith(prefix)) clubMonth[k.slice(prefix.length)] = monthCache[k];
-  }
-  updateRecs();
 }
 
 /* DURATION PICKER */
