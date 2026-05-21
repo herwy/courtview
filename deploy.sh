@@ -50,15 +50,15 @@ scp -q "$SCRIPT_DIR/watchdog.sh" "${RPI_HOST}:/root/projects/courtview/watchdog.
     || { err "  FAILED: watchdog.sh"; exit 1; }
 ssh "$RPI_HOST" "chmod +x /root/projects/courtview/watchdog.sh"
 
-# Install gunicorn if missing
-ssh "$RPI_HOST" "pip3 install gunicorn -q" || { err "gunicorn install failed"; exit 1; }
+# Install gunicorn if missing (--break-system-packages required on Debian 12+ RPi)
+ssh "$RPI_HOST" "pip3 install gunicorn -q --break-system-packages 2>/dev/null || pip3 install gunicorn -q" || { err "gunicorn install failed"; exit 1; }
 
 # Stop watchdog FIRST so it doesn't race the restart
 ssh "$RPI_HOST" "pkill -f /root/projects/courtview/watchdog.sh 2>/dev/null; true"
 
 # Stop any current courtview (gunicorn or legacy python)
 ssh "$RPI_HOST" "pkill -f 'gunicorn.*courtview' 2>/dev/null; pkill -f '/root/projects/courtview/courtview.py' 2>/dev/null; true"
-sleep 1
+sleep 3
 
 # Start via gunicorn (single worker, threaded model preserved by Flask + background daemon threads)
 ssh "$RPI_HOST" "cd /root/projects/courtview && nohup gunicorn --workers 1 --bind 0.0.0.0:8766 --timeout 60 --log-level warning courtview:app >> /root/projects/courtview/courtview.log 2>&1 &"
