@@ -835,6 +835,7 @@ let activeTab   = 'book';
 let compareDate = new Date();
 let compareHour = new Date().getHours() < 22 ? Math.max(new Date().getHours() + 1, 7) : 19;
 let compareCache = {};
+let membershipCache = {};
 
 /* CACHE KEY — scopes monthCache entries by club */
 const cacheKey = (clubId, dateKey) => `${clubId}/${dateKey}`;
@@ -1506,12 +1507,17 @@ async function loadClubInfo() {
   clubLoaded = true;
   const out = document.getElementById('clubOut');
   try {
-    const profile = await fetchClubProfile().catch(() => null);
-    await sleep(jitter(150, 350));
-    const members = await fetchMembership().catch(() => []);
-    await sleep(jitter(150, 350));
-    const credits = await fetchCreditPackages().catch(() => []);
-    out.innerHTML = renderClubInfo(profile, members, credits);
+    const r = await fetch(`${API}/club-info?club_id=${encodeURIComponent(CLUB)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const profile = data.profile || null;
+    const membershipsRaw = data.memberships;
+    const memberships = Array.isArray(membershipsRaw)
+      ? membershipsRaw
+      : (membershipsRaw && Array.isArray(membershipsRaw.memberships) ? membershipsRaw.memberships : []);
+    const credits = data.credits || [];
+    membershipCache[CLUB] = memberships;
+    out.innerHTML = renderClubInfo(profile, memberships, credits);
     loadMemberCounts(CLUB);  // fan-out fills in counts + bars in place; no await
   } catch (e) {
     out.innerHTML = `<div class="empty">Could not load club info: ${esc(e.message)}</div>`;
@@ -1765,9 +1771,8 @@ async function runCompare() {
   h += '</tbody></table>';
   out.innerHTML = h;
 
-  // Fetch each club sequentially with jitter — avoids 4 simultaneous requests
-  for (let i = 0; i < COMPARE_CLUBS.length; i++) {
-    const club = COMPARE_CLUBS[i];
+  // Fetch all clubs in parallel; per-club try/catch keeps one failure from poisoning the others
+  await Promise.all(COMPARE_CLUBS.map(async (club) => {
     const cacheKey = `${club.id}-${dateKey}`;
     try {
       if (!compareCache[cacheKey]) {
@@ -1777,8 +1782,7 @@ async function runCompare() {
       compareCache[cacheKey] = [];
     }
     updateCompareRow(club);
-    if (i < COMPARE_CLUBS.length - 1) await sleep(jitter(200, 500));
-  }
+  }));
   renderCompareTable();
 }
 
@@ -1848,8 +1852,7 @@ async function loadStats() {
   statsLoaded = true;
   try {
     const fin = await fetchFinancialStats().catch(() => null);
-    await sleep(jitter(200, 450));
-    const members = await fetchMembership().catch(() => []);
+    const members = membershipCache[CLUB] || await fetchMembership().catch(() => []);
     renderStats(fin, members);
   } catch (e) {
     document.getElementById('memRankOut').innerHTML = `<div class="empty">Could not load stats: ${esc(e.message)}</div>`;
