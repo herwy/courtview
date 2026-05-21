@@ -219,8 +219,22 @@ def _load_web_assets() -> None:
 
 
 def _strip_wireslammer() -> None:
-    """Remove Wireslammer tab from the in-memory copies without touching disk files."""
+    """Patch in-memory access page for CourtView: remove Wireslammer, retitle, strip logo."""
     global _ACCESS_HTML_BYTES, _ACCESS_JS_BYTES
+
+    # Retitle
+    _ACCESS_HTML_BYTES = _ACCESS_HTML_BYTES.replace(
+        b'<title>doxxnet Labs</title>',
+        b'<title>CourtView Access Log</title>',
+    )
+
+    # Remove logo div (<!-- Logo --> comment through its closing </div>)
+    _ACCESS_HTML_BYTES = re.sub(
+        rb'[ \t]*<!-- Logo -->.*?</div>\s*',
+        b'\n',
+        _ACCESS_HTML_BYTES,
+        flags=re.DOTALL,
+    )
 
     # Remove the tab button
     _ACCESS_HTML_BYTES = re.sub(
