@@ -461,25 +461,6 @@ nav {
 .credit-v { color: var(--text-2); font-variant-numeric: tabular-nums; }
 
 /* COMPARE TAB */
-.compare-controls {
-  display: flex; flex-direction: column; gap: 12px;
-  margin-bottom: 20px;
-}
-.compare-control-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.compare-control-label { font-size: 10px; font-weight: 600; color: var(--text-4); text-transform: uppercase; letter-spacing: 0.04em; min-width: 70px; }
-.hour-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
-.htab {
-  background: rgba(255,255,255,0.02);
-  border: 1px solid var(--border-s);
-  border-radius: 6px; padding: 5px 11px;
-  cursor: pointer; font-family: inherit;
-  font-size: 12px; font-weight: 500;
-  color: var(--text-3); transition: all 140ms ease;
-  font-variant-numeric: tabular-nums;
-}
-.htab:hover { background: rgba(255,255,255,0.04); color: var(--text-2); }
-.htab.on { background: rgba(113,112,255,0.12); border-color: rgba(113,112,255,0.3); color: var(--accent-v); }
-.htab:focus-visible { outline: 2px solid var(--accent-v); outline-offset: 2px; }
 
 .compare-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .compare-table {
@@ -751,16 +732,6 @@ nav {
 
   <!-- =========================== TAB 3 · COMPARE =========================== -->
   <div id="tab-compare" role="tabpanel" aria-labelledby="tab-compare-btn" hidden>
-    <div class="compare-controls">
-      <div class="compare-control-row">
-        <span class="compare-control-label">Date</span>
-        <div class="date-tabs" id="compareDateTabs" role="tablist" aria-label="Compare date"></div>
-      </div>
-      <div class="compare-control-row">
-        <span class="compare-control-label">Hour</span>
-        <div class="hour-tabs" id="compareHourTabs" role="tablist" aria-label="Compare hour"></div>
-      </div>
-    </div>
     <div class="card">
       <div class="compare-table-wrap">
         <div id="compareOut">
@@ -889,8 +860,7 @@ let monthCache  = {};
 let selDur      = 120;
 let watches     = [];
 let activeTab   = 'book';
-let compareDate = new Date();
-let compareHour = new Date().getHours() < 22 ? Math.max(new Date().getHours() + 1, 7) : 19;
+const compareDate = new Date();
 let compareCache = {};
 let membershipCache = {};
 let todayReservedCount = 0;
@@ -1949,54 +1919,11 @@ function normaliseDay(d) {
 }
 
 /* COMPARE TAB */
-function buildCompareDateTabs() {
-  const el = document.getElementById('compareDateTabs');
-  el.innerHTML = '';
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(); d.setDate(d.getDate() + i);
-    const btn = document.createElement('button');
-    btn.className = 'dtab' + (i===0?' on':'');
-    btn.setAttribute('role','tab');
-    btn.setAttribute('aria-selected', i===0 ? 'true':'false');
-    btn.dataset.offset = i;
-    btn.innerHTML = `<span class="dn">${d.toLocaleDateString('en-GB',{weekday:'short',timeZone:TZ})}</span><span class="dd">${d.toLocaleDateString('en-GB',{day:'numeric',timeZone:TZ})}</span>`;
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('#compareDateTabs .dtab').forEach(t=>{t.classList.remove('on');t.setAttribute('aria-selected','false');});
-      btn.classList.add('on'); btn.setAttribute('aria-selected','true');
-      const nd = new Date(); nd.setDate(nd.getDate() + i);
-      compareDate = nd;
-      runCompare();
-    });
-    el.appendChild(btn);
-  }
-}
-
-function buildCompareHourTabs() {
-  const el = document.getElementById('compareHourTabs');
-  el.innerHTML = '';
-  for (let hr = 7; hr <= 22; hr++) {
-    const btn = document.createElement('button');
-    btn.className = 'htab' + (hr === compareHour ? ' on' : '');
-    btn.setAttribute('role','tab');
-    btn.setAttribute('aria-selected', hr === compareHour ? 'true' : 'false');
-    btn.dataset.hour = hr;
-    btn.textContent = String(hr).padStart(2,'0') + ':00';
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('#compareHourTabs .htab').forEach(t=>{t.classList.remove('on');t.setAttribute('aria-selected','false');});
-      btn.classList.add('on'); btn.setAttribute('aria-selected','true');
-      compareHour = hr;
-      renderCompareTable();
-    });
-    el.appendChild(btn);
-  }
-}
 
 let compareLoaded = false;
 async function loadCompare() {
   if (compareLoaded) return;
   compareLoaded = true;
-  buildCompareDateTabs();
-  buildCompareHourTabs();
   await runCompare();
 }
 
@@ -2007,10 +1934,10 @@ async function runCompare() {
   let h = '<table class="compare-table"><thead><tr>';
   h += '<th>Club</th>';
   h += '<th class="num">Courts</th>';
-  h += '<th class="num">Free at hour</th>';
-  h += '<th class="num">Best 60min</th>';
-  h += '<th class="num">Best 90min</th>';
+  h += '<th class="num">Off-peak 60min</th>';
+  h += '<th class="num">Peak 60min</th>';
   h += '<th class="num">Revenue (mo)</th>';
+  h += '<th class="num">Activities (mo)</th>';
   h += '<th></th>';
   h += '</tr></thead><tbody>';
   for (const club of COMPARE_CLUBS) {
@@ -2027,13 +1954,15 @@ async function runCompare() {
   h += '</tbody></table>';
   out.innerHTML = h;
 
-  // Fetch availability + revenue for all clubs in parallel
+  // Fetch availability + revenue + activities for all clubs in parallel
   const now = new Date();
   const moStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
   const moEnd   = now.getTime();
+  const mk = `${now.getFullYear()}-${now.getMonth()}`;
   await Promise.all(COMPARE_CLUBS.map(async (club) => {
     const ck = `${club.id}-${dateKey}`;
-    const rk = `rev-${club.id}-${now.getFullYear()}-${now.getMonth()}`;
+    const rk = `rev-${club.id}-${mk}`;
+    const ak = `act-${club.id}-${mk}`;
     await Promise.all([
       (async () => {
         try {
@@ -2049,6 +1978,14 @@ async function runCompare() {
           compareCache[rk] = d?.total_combined_payments ?? null;
         } catch (_) { compareCache[rk] = null; }
       })(),
+      (async () => {
+        if (compareCache[ak] !== undefined) return;
+        try {
+          const r = await apiFetch(`/api/booked-hours?club_id=${club.id}&start=${moStart}&end=${moEnd}`);
+          const d = r.ok ? await r.json() : null;
+          compareCache[ak] = d?.total_activities ?? null;
+        } catch (_) { compareCache[ak] = null; }
+      })(),
     ]);
   }));
   renderCompareTable();
@@ -2061,30 +1998,16 @@ function updateCompareRow(club) {
   const row = document.querySelector(`tr[data-club="${club.id}"]`);
   if (!row) return;
 
-  // count courts with a slot starting within 30 min of compareHour
-  const targetMin = compareHour * 60;
-  const winLo = targetMin - 30;
-  const winHi = targetMin + 30;
-  let freeAtHour = 0;
   const prices60 = [];
-  const prices90 = [];
   for (const court of padel) {
-    let inWindow = false;
     for (const sl of (court.available_slots || [])) {
-      const t = localHour(sl.start_datetime);
-      const mins = +new Date(sl.start_datetime).toLocaleTimeString('en-GB',{minute:'2-digit',hour12:false,timeZone:TZ});
-      // Simple proximity: hour matches and minute 0/30, or adjacent hour with right minute
-      const slotMin = t * 60 + (isNaN(mins) ? 0 : mins);
-      if (slotMin >= winLo && slotMin <= winHi) inWindow = true;
-      const q60 = p60(sl); if (q60 > 0) prices60.push(q60);
-      const q90 = p90(sl); if (q90 != null && q90 > 0) prices90.push(q90);
+      const q = p60(sl);
+      if (q > 0) prices60.push(q);
     }
-    if (inWindow) freeAtHour++;
   }
-  row.dataset.padel = padel.length;
-  row.dataset.free = freeAtHour;
-  row.dataset.best60 = prices60.length ? Math.min(...prices60) : '';
-  row.dataset.best90 = prices90.length ? Math.min(...prices90) : '';
+  row.dataset.padel   = padel.length;
+  row.dataset.offpeak = prices60.length ? Math.min(...prices60) : '';
+  row.dataset.peak    = prices60.length ? Math.max(...prices60) : '';
 }
 
 function renderCompareTable() {
@@ -2095,26 +2018,26 @@ function renderCompareTable() {
   }
   const rows = [...document.querySelectorAll('#compareOut tr[data-club]')];
   // Sort by free desc, then courts desc
-  rows.sort((a,b) => (+b.dataset.free||0) - (+a.dataset.free||0) || (+b.dataset.padel||0) - (+a.dataset.padel||0));
+  rows.sort((a,b) => (+a.dataset.offpeak||999) - (+b.dataset.offpeak||999) || (+b.dataset.padel||0) - (+a.dataset.padel||0));
   const tbody = document.querySelector('#compareOut tbody');
   if (tbody) rows.forEach(r => tbody.appendChild(r));
 
   const now2 = new Date();
+  const mk2 = `${now2.getFullYear()}-${now2.getMonth()}`;
+  const dash = '<span style="color:var(--text-4)">-</span>';
   for (const row of rows) {
-    const clubId = row.dataset.club;
-    const padel = +row.dataset.padel || 0;
-    const free = +row.dataset.free || 0;
-    const best60 = row.dataset.best60;
-    const best90 = row.dataset.best90;
-    const rk = `rev-${clubId}-${now2.getFullYear()}-${now2.getMonth()}`;
-    const rev = compareCache[rk];
-    const cells = row.querySelectorAll('td');
-    cells[1].innerHTML = padel ? padel : '<span style="color:var(--text-4)">-</span>';
-    if (free > 0) cells[2].innerHTML = `<span class="free-cell">${free} free</span>`;
-    else cells[2].innerHTML = `<span class="free-cell none">none</span>`;
-    cells[3].innerHTML = best60 ? `£${best60}` : '<span style="color:var(--text-4)">-</span>';
-    cells[4].innerHTML = best90 ? `£${best90}` : '<span style="color:var(--text-4)">-</span>';
-    cells[5].innerHTML = rev != null ? fmtGBP(rev) : '<span style="color:var(--text-4)">-</span>';
+    const cid = row.dataset.club;
+    const padel   = +row.dataset.padel   || 0;
+    const offpeak = row.dataset.offpeak;
+    const peak    = row.dataset.peak;
+    const rev     = compareCache[`rev-${cid}-${mk2}`];
+    const acts    = compareCache[`act-${cid}-${mk2}`];
+    const cells   = row.querySelectorAll('td');
+    cells[1].innerHTML = padel ? padel : dash;
+    cells[2].innerHTML = offpeak ? `<span class="free-cell">£${offpeak}</span>` : dash;
+    cells[3].innerHTML = peak    ? `£${peak}` : dash;
+    cells[4].innerHTML = rev  != null ? fmtGBP(rev)  : dash;
+    cells[5].innerHTML = acts != null ? acts.toLocaleString('en-GB') : dash;
   }
 }
 
