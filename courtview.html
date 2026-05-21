@@ -615,6 +615,7 @@ nav {
       <div class="stat"><div class="stat-v" id="sSlots">-</div><div class="stat-l">Slots today</div></div>
       <div class="stat"><div class="stat-v" id="sBest">-</div><div class="stat-l">Best 60 min</div></div>
       <div class="stat"><div class="stat-v" id="sPeak">-</div><div class="stat-l">Peak 60 min</div></div>
+      <div class="stat" style="display:none"><div class="stat-v" id="sBooked">-</div><div class="stat-l">Booked today</div></div>
     </div>
 
     <!-- COURT GRID -->
@@ -836,6 +837,7 @@ let compareDate = new Date();
 let compareHour = new Date().getHours() < 22 ? Math.max(new Date().getHours() + 1, 7) : 19;
 let compareCache = {};
 let membershipCache = {};
+let todayReservedCount = 0;
 
 /* CACHE KEY — scopes monthCache entries by club */
 const cacheKey = (clubId, dateKey) => `${clubId}/${dateKey}`;
@@ -844,6 +846,8 @@ const cacheKey = (clubId, dateKey) => `${clubId}/${dateKey}`;
 const dayStart = d => { const x=new Date(d); x.setHours(0,0,0,0); return x.getTime(); };
 const dayEnd   = d => { const x=new Date(d); x.setHours(23,59,59,999); return x.getTime(); };
 const isoDate  = d => d.toISOString().split('T')[0];
+
+const TODAY_ISO = (() => { const d = new Date(); return isoDate(d); })();
 
 function localHour(ms) {
   return +new Date(ms).toLocaleString('en-GB',{hour:'2-digit',timeZone:TZ,hour12:false}).replace(':','');
@@ -876,10 +880,69 @@ function fmtGBP(n) {
 
 /* API */
 async function fetchDay(date, clubId = CLUB) {
-  const url = `${API}/player/player_booking/all_courts_slot_prices?club_id=${clubId}&start_datetime=${dayStart(date)}&end_datetime=${dayEnd(date)}`;
+  const url = `${API}/player/player_booking/all_courts_slot_prices_v2?club_id=${clubId}&start_datetime=${dayStart(date)}&end_datetime=${dayEnd(date)}`;
   const r = await apiFetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+  const data = await r.json();
+  // Track today's booking density for the stats bar
+  if (clubId === CLUB && isoDate(date) === TODAY_ISO) {
+    todayReservedCount = (data && typeof data.reservedCount === 'number') ? data.reservedCount : 0;
+  }
+  return normaliseV2(data);
+}
+
+/* v2 -> v1-shaped court list.
+ * v1 (legacy): [{ court_id, court_name, sport_type, available_slots: [{ start_datetime, end_datetime, interval_prices: [{duration, price}, ...] }] }]
+ * v2 (new):    { allSlots: [{ courtId, courtName, startTimestamp, endTimestamp, duration, price }], reservedBookings, reservedCount }
+ * If the payload is already in v1 shape (cached rows from before the switch, or unexpected response), return as-is.
+ */
+function normaliseV2(v2) {
+  if (!v2 || typeof v2 !== 'object' || !Array.isArray(v2.allSlots)) {
+    // Backward compat: v1-shaped or unknown - hand back unchanged
+    return v2;
+  }
+  const byCourt = new Map();      // courtId -> { court_id, court_name, sport_type, slotsByStart: Map<start, slot> }
+  for (const s of v2.allSlots) {
+    if (!s || s.courtName === 'PICKLEBALL') continue;
+    const cid = s.courtId;
+    if (!cid) continue;
+    let entry = byCourt.get(cid);
+    if (!entry) {
+      entry = {
+        court_id: cid,
+        court_name: s.courtName || cid,
+        sport_type: 'PADEL',
+        slotsByStart: new Map(),
+      };
+      byCourt.set(cid, entry);
+    }
+    const key = s.startTimestamp;
+    let slot = entry.slotsByStart.get(key);
+    if (!slot) {
+      slot = {
+        start_datetime: s.startTimestamp,
+        end_datetime:   s.endTimestamp,
+        interval_prices: [],
+      };
+      entry.slotsByStart.set(key, slot);
+    }
+    // end_datetime keeps the longest available duration on this start slot
+    if (typeof s.endTimestamp === 'number' && s.endTimestamp > (slot.end_datetime || 0)) {
+      slot.end_datetime = s.endTimestamp;
+    }
+    if (typeof s.duration === 'number' && typeof s.price === 'number') {
+      slot[`price_${s.duration}`] = s.price;
+      slot.interval_prices.push({ duration: s.duration, price: s.price });
+    }
+  }
+  return Array.from(byCourt.values()).map(c => ({
+    court_id:   c.court_id,
+    court_name: c.court_name,
+    name:       c.court_name,                // renderGrid sorts on `name`
+    sport_type: c.sport_type,
+    available_slots: Array.from(c.slotsByStart.values())
+      .sort((a, b) => a.start_datetime - b.start_datetime),
+  }));
 }
 
 async function fetchClubProfile() {
@@ -1299,6 +1362,15 @@ function fillStats(courts) {
   document.getElementById('sSlots').textContent  = total;
   document.getElementById('sBest').textContent   = ps.length ? `£${Math.min(...ps)}` : '-';
   document.getElementById('sPeak').textContent   = ps.length ? `£${Math.max(...ps)}` : '-';
+  const bookedEl = document.getElementById('sBooked');
+  if (bookedEl) {
+    if (todayReservedCount > 0) {
+      bookedEl.textContent = String(todayReservedCount);
+      bookedEl.parentElement.style.display = '';
+    } else {
+      bookedEl.parentElement.style.display = 'none';
+    }
+  }
 }
 
 /* LOAD DAY · availability */
@@ -1335,7 +1407,7 @@ async function loadMonth() {
       for (const [dateStr, courts] of Object.entries(d.days || {})) {
         const k = cacheKey(clubId, dateStr);
         if (courts !== null) {
-          monthCache[k] = courts;
+          monthCache[k] = normaliseV2(courts);
         } else {
           missing.push(dateStr);
         }
@@ -1516,8 +1588,9 @@ async function loadClubInfo() {
       ? membershipsRaw
       : (membershipsRaw && Array.isArray(membershipsRaw.memberships) ? membershipsRaw.memberships : []);
     const credits = data.credits || [];
+    const extras = Array.isArray(data.extras) ? data.extras : [];
     membershipCache[CLUB] = memberships;
-    out.innerHTML = renderClubInfo(profile, memberships, credits);
+    out.innerHTML = renderClubInfo(profile, memberships, credits, extras);
     loadMemberCounts(CLUB);  // fan-out fills in counts + bars in place; no await
   } catch (e) {
     out.innerHTML = `<div class="empty">Could not load club info: ${esc(e.message)}</div>`;
@@ -1581,7 +1654,7 @@ async function loadMemberCounts(clubId) {
   }
 }
 
-function renderClubInfo(profile, members, credits) {
+function renderClubInfo(profile, members, credits, extras) {
   const c = profile || {};
   let h = '';
 
@@ -1659,7 +1732,21 @@ function renderClubInfo(profile, members, credits) {
     h += '</div></section>';
   }
 
-  if (!plans.length && !packs.length && !hours) {
+  // Extras (equipment hire, lessons, etc.)
+  const extrasList = (extras || []).filter(e => !e.hidden && Number(e.price) > 0);
+  if (extrasList.length) {
+    h += '<section class="sec"><div class="sec-hd"><h2 class="sec-title">Extras</h2></div>';
+    h += '<div class="credit-grid">';
+    for (const e of extrasList) {
+      h += `<div class="credit">
+        <div class="credit-title">${esc(e.name)}</div>
+        <div class="credit-price">£${esc(e.price)}</div>
+      </div>`;
+    }
+    h += '</div></section>';
+  }
+
+  if (!plans.length && !packs.length && !hours && !extrasList.length) {
     h += '<div class="empty">No additional club info available.</div>';
   }
   return h;
