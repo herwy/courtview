@@ -2419,10 +2419,18 @@ async function switchClub(id) {
   statsLoaded = false;
   const cpOut = document.getElementById('cpOut');
   if (cpOut) cpOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading court popularity...</div>';
-  // Reload availability + heatmap; other tabs lazy-load on activation
+  const kpiOut = document.getElementById('statsKpiOut');
+  if (kpiOut) kpiOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+  const mixOut = document.getElementById('statsMixOut');
+  if (mixOut) mixOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div></div>';
+  // Reset revenue + compare tabs so they re-fetch for the new club
+  revLoaded = false;
+  compareLoaded = false;
+  // Reload availability + heatmap; then pre-load all other tabs in background
   await Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]);
-  // If Stats tab is currently active, reload its data immediately
-  if (activeTab === 'stats') { loadStats(); loadCourtPopularity(); }
+  loadStats(); loadCourtPopularity();
+  setTimeout(() => { if (!compareLoaded) loadCompare(); }, 300);
+  setTimeout(() => { if (!revLoaded) loadRevenue(); }, 700);
 }
 
 function setupClubSelector() {
@@ -2446,7 +2454,11 @@ setupRevenue();
 buildDateTabs();
 setupNotifyPanel();
 setupClubSelector();
-Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]);
+Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]).then(() => {
+  loadStats(); loadCourtPopularity();
+  setTimeout(() => { if (!compareLoaded) loadCompare(); }, 500);
+  setTimeout(() => { if (!revLoaded) loadRevenue(); }, 1000);
+});
 setInterval(pollWatches, NOTIFY_POLL_MS);
 </script>
 </body>
