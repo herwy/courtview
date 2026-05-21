@@ -1,0 +1,1885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CourtView</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+/* LINEAR.APP DESIGN SYSTEM */
+:root {
+  --bg-0: #08090a;
+  --bg-1: #0f1011;
+  --bg-2: #191a1b;
+  --bg-3: #28282c;
+  --text-1: #f7f8f8;
+  --text-2: #d0d6e0;
+  --text-3: #8a8f98;
+  --text-4: #62666d;
+  --accent:  #5e6ad2;
+  --accent-v: #7170ff;
+  --accent-h: #828fff;
+  --border:   rgba(255,255,255,0.08);
+  --border-s: rgba(255,255,255,0.05);
+  /* price tier colours */
+  --op-bg: rgba(16,185,129,0.14);  --op-bd: rgba(16,185,129,0.38);  --op-tx: #10b981;
+  --st-bg: rgba(113,112,255,0.12); --st-bd: rgba(113,112,255,0.32); --st-tx: #7170ff;
+  --pk-bg: rgba(245,158,11,0.12);  --pk-bd: rgba(245,158,11,0.35);  --pk-tx: #f59e0b;
+  --bk-bg: rgba(255,255,255,0.025);
+  /* warn colour for stats disclaimer */
+  --wn-bg: rgba(245,158,11,0.08);
+  --wn-bd: rgba(245,158,11,0.32);
+  --wn-tx: #f59e0b;
+}
+*,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg-0);
+  color: var(--text-1);
+  font-family: 'Inter', -apple-system, system-ui, sans-serif;
+  font-feature-settings: 'cv01','ss03';
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* NAV */
+nav {
+  position: sticky; top: 0; z-index: 200;
+  height: 52px; padding: 0 24px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border-s);
+  display: flex; align-items: center; gap: 12px;
+}
+.n-logo { font-size: 15px; font-weight: 600; letter-spacing: -0.2px; display: flex; align-items: center; gap: 8px; }
+.n-logo svg { color: var(--accent-v); }
+.n-sep { width: 1px; height: 16px; background: var(--border); }
+.n-club { font-size: 12px; font-weight: 500; color: var(--text-3); }
+
+.club-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: transparent; border: 1px solid transparent;
+  color: var(--text-2); font: inherit; font-size: 12px; font-weight: 500;
+  padding: 4px 8px; border-radius: 6px; cursor: pointer;
+  line-height: 1;
+}
+.club-btn:hover { background: var(--bg-2); border-color: var(--border); }
+.club-btn[aria-expanded="true"] { background: var(--bg-2); border-color: var(--border); }
+.club-btn .club-btn-name { color: var(--text-1); font-weight: 600; }
+.club-btn .club-btn-sub  { color: var(--text-3); }
+.club-btn .chev { width: 10px; height: 10px; opacity: 0.6; transition: transform 0.15s; }
+.club-btn[aria-expanded="true"] .chev { transform: rotate(180deg); }
+
+.club-wrap { position: relative; }
+.club-drop {
+  position: absolute; top: calc(100% + 6px); left: 0;
+  min-width: 240px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  padding: 4px;
+  display: none;
+  z-index: 1000;
+}
+.club-drop.open { display: block; }
+.club-opt {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 10px; border-radius: 6px;
+  cursor: pointer; user-select: none;
+}
+.club-opt:hover { background: rgba(255,255,255,0.04); }
+.club-opt .club-opt-text { display: flex; flex-direction: column; gap: 2px; }
+.club-opt .club-opt-name { color: var(--text-1); font-size: 13px; font-weight: 500; }
+.club-opt .club-opt-sub  { color: var(--text-3); font-size: 11px; }
+.club-opt .check { color: var(--accent-v); opacity: 0; width: 12px; height: 12px; }
+.club-opt.active .check { opacity: 1; }
+
+.n-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.live-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10px; font-weight: 500; color: var(--text-3);
+  padding: 3px 9px 3px 6px; border-radius: 9999px;
+  border: 1px solid var(--border);
+}
+.live-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--op-tx); animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+/* TAB NAV (Linear underline style) */
+.tabnav {
+  position: sticky; top: 52px; z-index: 150;
+  background: var(--bg-0);
+  border-bottom: 1px solid var(--border-s);
+}
+.tabnav-inner {
+  max-width: 1440px; margin: 0 auto;
+  padding: 0 24px;
+  display: flex; gap: 24px;
+}
+.tnav-btn {
+  position: relative;
+  background: none; border: 0;
+  padding: 14px 2px;
+  font-family: inherit;
+  font-size: 13px; font-weight: 500;
+  color: var(--text-4);
+  cursor: pointer;
+  transition: color 140ms ease;
+}
+.tnav-btn:hover { color: var(--text-2); }
+.tnav-btn[aria-selected="true"] { color: var(--text-1); }
+.tnav-btn[aria-selected="true"]::after {
+  content: '';
+  position: absolute; left: 0; right: 0; bottom: -1px;
+  height: 2px; background: var(--accent-v);
+  border-radius: 1px 1px 0 0;
+}
+.tnav-btn:focus { outline: none; }
+.tnav-btn:focus-visible {
+  outline: 2px solid var(--accent-v); outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* LAYOUT */
+.wrap { max-width: 1440px; margin: 0 auto; padding: 28px 24px 60px; }
+[role="tabpanel"][hidden] { display: none; }
+
+/* STATS */
+.stats { display: flex; gap: 8px; margin-bottom: 28px; flex-wrap: wrap; }
+.stat {
+  flex: 1; min-width: 120px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px 16px;
+}
+.stat-v { font-size: 22px; font-weight: 600; letter-spacing: -0.7px; line-height: 1; margin-bottom: 5px; font-variant-numeric: tabular-nums; }
+.stat-l { font-size: 11px; font-weight: 500; color: var(--text-4); }
+.stat-trend { font-size: 10px; font-weight: 500; margin-top: 4px; }
+.stat-trend.up { color: var(--op-tx); }
+.stat-trend.down { color: #ef4444; }
+
+/* SECTION */
+.sec { margin-bottom: 36px; }
+.sec-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; gap: 12px; flex-wrap: wrap; }
+.sec-title { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-4); }
+.sec-meta { font-size: 11px; color: var(--text-4); }
+
+/* CARD */
+.card {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* DATE TABS */
+.date-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.dtab {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border-s);
+  border-radius: 6px; padding: 5px 11px;
+  cursor: pointer; font-family: inherit;
+  transition: all 140ms ease; text-align: center;
+}
+.dtab:hover { background: rgba(255,255,255,0.04); color: var(--text-2); }
+.dtab.on { background: rgba(113,112,255,0.12); border-color: rgba(113,112,255,0.3); }
+.dtab .dn { display: block; font-size: 10px; font-weight: 500; color: var(--text-4); }
+.dtab.on .dn { color: var(--accent-v); }
+.dtab .dd { display: block; font-size: 14px; font-weight: 600; color: var(--text-2); margin-top: 1px; font-variant-numeric: tabular-nums; }
+.dtab.on .dd { color: var(--accent-v); }
+.dtab:focus-visible { outline: 2px solid var(--accent-v); outline-offset: 1px; }
+
+/* NOTIFY BUTTON + PANEL */
+.notify-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.btn {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 12px;
+  font-family: inherit; font-size: 12px; font-weight: 500;
+  color: var(--text-2); cursor: pointer;
+  transition: all 140ms ease;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:hover { background: rgba(255,255,255,0.04); color: var(--text-1); }
+.btn.primary { background: var(--accent-v); border-color: var(--accent-v); color: #fff; }
+.btn.primary:hover { background: var(--accent-h); }
+.btn:focus-visible { outline: 2px solid var(--accent-v); outline-offset: 2px; }
+
+.notify-panel {
+  margin-top: 12px; padding: 14px 16px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: none; gap: 10px;
+  flex-wrap: wrap; align-items: flex-end;
+}
+.notify-panel.open { display: flex; }
+.np-field { display: flex; flex-direction: column; gap: 4px; }
+.np-label { font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-4); }
+.np-select, .np-input {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px;
+  font-family: inherit; font-size: 12px;
+  color: var(--text-1); min-width: 140px;
+}
+.np-select:focus, .np-input:focus { outline: 2px solid var(--accent-v); outline-offset: 1px; }
+.watch-chips { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 500;
+  padding: 4px 4px 4px 10px; border-radius: 9999px;
+  background: rgba(113,112,255,0.12);
+  border: 1px solid rgba(113,112,255,0.3);
+  color: var(--accent-v);
+}
+.chip button {
+  background: none; border: 0;
+  color: var(--accent-v); cursor: pointer;
+  width: 18px; height: 18px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; line-height: 1;
+}
+.chip button:hover { background: rgba(113,112,255,0.18); }
+
+/* COURT GRID */
+.grid-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.grid-body { padding: 12px 16px; min-width: 820px; }
+.grid-hrow { display: flex; margin-bottom: 3px; padding-left: 80px; }
+.tlabel { flex: none; width: 52px; font-size: 10px; font-weight: 500; color: var(--text-4); text-align: center; font-variant-numeric: tabular-nums; }
+.crow { display: flex; align-items: center; margin-bottom: 3px; }
+.cname { flex: none; width: 80px; font-size: 11px; font-weight: 500; color: var(--text-3); padding-right: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cslots { display: flex; gap: 2px; }
+.cell {
+  flex: none; width: 50px; height: 28px;
+  border-radius: 3px; border: 1px solid transparent;
+  background: var(--bk-bg);
+  position: relative; cursor: default;
+  transition: filter 140ms ease;
+}
+.cell.avail { cursor: pointer; }
+.cell.avail:hover { filter: brightness(1.25); }
+.cell.avail:focus { outline: 2px solid var(--accent-v); outline-offset: 1px; }
+.cell.op { background: var(--op-bg); border-color: var(--op-bd); }
+.cell.st { background: var(--st-bg); border-color: var(--st-bd); }
+.cell.pk { background: var(--pk-bg); border-color: var(--pk-bd); }
+.tt {
+  display: none; position: absolute;
+  bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px 10px;
+  white-space: nowrap; z-index: 100;
+  font-size: 11px; color: var(--text-2);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  pointer-events: none;
+}
+.cell:hover .tt { display: block; }
+.tt-t { display: block; font-weight: 600; color: var(--text-1); margin-bottom: 5px; }
+.tt-r { display: block; color: var(--text-3); margin-bottom: 1px; font-variant-numeric: tabular-nums; }
+
+/* LEGEND */
+.legend {
+  display: flex; gap: 14px; padding: 10px 16px;
+  border-top: 1px solid var(--border-s); flex-wrap: wrap;
+}
+.leg { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-4); }
+.legdot { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+
+/* BACK-TO-BACK */
+.dur-row { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.dbtn {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border-s);
+  border-radius: 6px; padding: 6px 14px;
+  font-family: inherit; font-size: 12px; font-weight: 500;
+  color: var(--text-3); cursor: pointer;
+  transition: all 140ms ease;
+}
+.dbtn:hover { background: rgba(255,255,255,0.04); color: var(--text-2); }
+.dbtn.on { background: rgba(113,112,255,0.12); border-color: rgba(113,112,255,0.3); color: var(--accent-v); }
+.dbtn:focus-visible { outline: 2px solid var(--accent-v); outline-offset: 2px; }
+
+.b2b-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 8px; }
+.b2b {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px 16px;
+  cursor: default; transition: all 140ms ease;
+}
+.b2b:hover { background: rgba(255,255,255,0.035); border-color: rgba(255,255,255,0.12); }
+.b2b.best { border-color: rgba(113,112,255,0.32); background: rgba(113,112,255,0.055); }
+.b2b-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+.b2b-time { font-size: 15px; font-weight: 600; letter-spacing: -0.2px; font-variant-numeric: tabular-nums; }
+.b2b-price { font-size: 14px; font-weight: 600; color: var(--text-2); font-variant-numeric: tabular-nums; text-align: right; }
+.b2b-pp { font-size: 11px; color: var(--text-4); font-variant-numeric: tabular-nums; }
+.b2b-segs { display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px; }
+.seg { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.segdot { width: 5px; height: 5px; border-radius: 50%; flex: none; }
+.gap-row { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--text-4); padding-left: 12px; }
+.gap-ln { width: 1px; height: 10px; background: var(--border); }
+.tags { display: flex; gap: 5px; flex-wrap: wrap; }
+.tag {
+  font-size: 10px; font-weight: 500;
+  padding: 2px 7px; border-radius: 9999px; border: 1px solid;
+}
+.tag-op { background: var(--op-bg); border-color: var(--op-bd); color: var(--op-tx); }
+.tag-st { background: var(--st-bg); border-color: var(--st-bd); color: var(--st-tx); }
+.tag-pk { background: var(--pk-bg); border-color: var(--pk-bd); color: var(--pk-tx); }
+.tag-best { background: rgba(113,112,255,0.12); border-color: rgba(113,112,255,0.3); color: var(--accent-v); }
+.tag-sc { background: rgba(255,255,255,0.04); border-color: var(--border); color: var(--text-4); }
+
+/* BOTTOM GRID */
+.bottom-row { display: grid; grid-template-columns: 1fr 320px; gap: 16px; align-items: start; }
+
+/* HEATMAP */
+.hm-scroll { padding: 12px 16px; }
+.hm-table { border-collapse: separate; border-spacing: 3px; table-layout: fixed; width: 100%; }
+.hm-table th { font-size: 10px; font-weight: 500; color: var(--text-4); padding: 2px 0; text-align: center; }
+.hm-table th.rl { text-align: right; width: 42px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.hm-table td { padding: 0; }
+.hm-cell {
+  width: 100%; height: 28px; border-radius: 3px;
+  cursor: pointer; transition: filter 140ms ease;
+}
+.hm-cell:hover { filter: brightness(1.4); }
+.hm-cell:focus { outline: 2px solid var(--accent-v); outline-offset: 1px; }
+
+/* RECOMMENDATIONS */
+.rec-list { display: flex; flex-direction: column; gap: 6px; }
+.rec {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px 14px;
+}
+.rec-rank { font-size: 10px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-4); margin-bottom: 5px; }
+.rec-time { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; line-height: 1; font-variant-numeric: tabular-nums; }
+.rec-day  { font-size: 12px; color: var(--text-3); margin-top: 2px; margin-bottom: 10px; }
+.rec-row  { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; }
+.rec-k { color: var(--text-4); }
+.rec-v { font-weight: 500; font-variant-numeric: tabular-nums; }
+.score-bar { height: 2px; border-radius: 9999px; background: var(--bg-3); margin-top: 9px; overflow: hidden; }
+.score-fill { height: 100%; border-radius: 9999px; background: var(--accent-v); transition: width 500ms ease; }
+
+/* CLUB INFO */
+.club-hdr {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 22px;
+  margin-bottom: 24px;
+}
+.club-name { font-size: 22px; font-weight: 600; letter-spacing: -0.4px; margin-bottom: 4px; }
+.club-org { font-size: 12px; color: var(--text-3); margin-bottom: 12px; }
+.club-meta { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: var(--text-3); }
+.club-meta a { color: var(--accent-v); text-decoration: none; }
+.club-meta a:hover { color: var(--accent-h); text-decoration: underline; }
+.club-meta strong { color: var(--text-2); font-weight: 500; margin-right: 6px; }
+
+.hours-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  padding: 14px 16px;
+}
+.hour-cell {
+  text-align: center;
+  padding: 8px 4px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border-s);
+  border-radius: 6px;
+}
+.hour-day { font-size: 10px; font-weight: 600; color: var(--text-4); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+.hour-time { font-size: 11px; font-weight: 500; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.hour-closed { color: var(--text-4); }
+
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+.plan {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 8px; padding: 16px 18px;
+  display: flex; flex-direction: column;
+}
+.plan-name { font-size: 14px; font-weight: 600; letter-spacing: -0.2px; margin-bottom: 4px; }
+.plan-price { font-size: 20px; font-weight: 600; color: var(--accent-v); font-variant-numeric: tabular-nums; }
+.plan-period { font-size: 11px; color: var(--text-4); margin-bottom: 12px; }
+.plan-members { font-size: 11px; color: var(--text-3); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+.plan-bar { height: 2px; background: var(--bg-3); border-radius: 9999px; overflow: hidden; margin-bottom: 12px; }
+.plan-bar-fill { height: 100%; background: var(--accent-v); border-radius: 9999px; }
+.plan-usps { display: flex; flex-direction: column; gap: 4px; }
+.plan-usp { font-size: 11px; color: var(--text-3); padding-left: 14px; position: relative; }
+.plan-usp::before {
+  content: '·'; position: absolute; left: 4px; top: 0;
+  color: var(--accent-v); font-weight: 700;
+}
+
+.credit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.credit {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px 16px;
+}
+.credit-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.credit-price { font-size: 18px; font-weight: 600; color: var(--accent-v); font-variant-numeric: tabular-nums; margin-bottom: 8px; }
+.credit-row { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; }
+.credit-k { color: var(--text-4); }
+.credit-v { color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+/* COMPARE TAB */
+.compare-controls {
+  display: flex; flex-direction: column; gap: 12px;
+  margin-bottom: 20px;
+}
+.compare-control-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.compare-control-label { font-size: 10px; font-weight: 600; color: var(--text-4); text-transform: uppercase; letter-spacing: 0.04em; min-width: 70px; }
+.hour-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.htab {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border-s);
+  border-radius: 6px; padding: 5px 11px;
+  cursor: pointer; font-family: inherit;
+  font-size: 12px; font-weight: 500;
+  color: var(--text-3); transition: all 140ms ease;
+  font-variant-numeric: tabular-nums;
+}
+.htab:hover { background: rgba(255,255,255,0.04); color: var(--text-2); }
+.htab.on { background: rgba(113,112,255,0.12); border-color: rgba(113,112,255,0.3); color: var(--accent-v); }
+.htab:focus-visible { outline: 2px solid var(--accent-v); outline-offset: 2px; }
+
+.compare-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.compare-table {
+  width: 100%; border-collapse: collapse;
+  min-width: 700px;
+}
+.compare-table th {
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-4);
+  padding: 12px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.compare-table th.num { text-align: right; }
+.compare-table td {
+  padding: 14px;
+  border-bottom: 1px solid var(--border-s);
+  font-size: 13px;
+}
+.compare-table td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
+.compare-table tr:last-child td { border-bottom: 0; }
+.compare-table .club-cell { font-weight: 500; color: var(--text-1); }
+.compare-table .free-cell { color: var(--op-tx); font-weight: 500; }
+.compare-table .free-cell.none { color: var(--text-4); }
+.compare-loading {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-4); font-size: 11px;
+}
+.compare-loading .sp { width: 11px; height: 11px; border-width: 1.5px; }
+
+/* STATS TAB */
+.disclaimer {
+  background: var(--wn-bg);
+  border: 1px solid var(--wn-bd);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 24px;
+  display: flex; gap: 12px; align-items: flex-start;
+}
+.disclaimer-icon {
+  width: 18px; height: 18px; flex: none;
+  color: var(--wn-tx);
+}
+.disclaimer-body { font-size: 12px; color: var(--text-2); line-height: 1.55; }
+.disclaimer-body strong { color: var(--wn-tx); font-weight: 600; }
+
+.stats-table-wrap {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.stats-table { width: 100%; border-collapse: collapse; }
+.stats-table th {
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-4);
+  padding: 12px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-s);
+}
+.stats-table th.num { text-align: right; }
+.stats-table td { padding: 12px 16px; font-size: 13px; border-bottom: 1px solid var(--border-s); }
+.stats-table td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
+.stats-table tr:last-child td { border-bottom: 0; }
+.stats-table tr:hover td { background: rgba(255,255,255,0.015); }
+.stats-note {
+  margin-top: 16px;
+  font-size: 11px; color: var(--text-4);
+  line-height: 1.55;
+}
+
+/* LOADING / EMPTY */
+.spin-wrap { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 36px; color: var(--text-4); font-size: 12px; }
+.sp { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent-v); border-radius: 50%; animation: spin 0.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.empty { padding: 32px; text-align: center; font-size: 12px; color: var(--text-4); }
+
+@media (max-width: 1024px) {
+  .hours-grid { grid-template-columns: repeat(7, 1fr); }
+}
+@media (max-width: 900px) {
+  .bottom-row { grid-template-columns: 1fr; }
+  .rec-list { display: grid; grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 768px) {
+  .tabnav-inner { padding: 0 16px; gap: 16px; overflow-x: auto; }
+  .tnav-btn { white-space: nowrap; }
+}
+@media (max-width: 600px) {
+  .wrap { padding: 16px 12px 48px; }
+  .stats { gap: 6px; }
+  .stat { min-width: calc(50% - 3px); flex: none; }
+  .b2b-grid { grid-template-columns: 1fr; }
+  .rec-list { grid-template-columns: 1fr; }
+  .hours-grid { grid-template-columns: repeat(4, 1fr); }
+  .plan-grid { grid-template-columns: 1fr; }
+  .credit-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 375px) {
+  .hours-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,*::before,*::after { transition: none !important; animation: none !important; }
+  .live-dot { animation: none !important; }
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="n-logo">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1" y="1" width="6" height="6" rx="1.5" fill="currentColor" opacity="0.9"/>
+      <rect x="9" y="1" width="6" height="6" rx="1.5" fill="currentColor" opacity="0.55"/>
+      <rect x="1" y="9" width="6" height="6" rx="1.5" fill="currentColor" opacity="0.55"/>
+      <rect x="9" y="9" width="6" height="6" rx="1.5" fill="currentColor" opacity="0.25"/>
+    </svg>
+    CourtView
+  </div>
+  <div class="n-sep" role="separator"></div>
+  <div class="club-wrap">
+    <button class="club-btn" id="clubBtn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Switch club">
+      <span class="club-btn-name" id="clubBtnName">Racketeer</span>
+      <span class="club-btn-sub"  id="clubBtnSub">North Acton, London</span>
+      <svg class="chev" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+        <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+    <div class="club-drop" id="clubDrop" role="listbox" aria-labelledby="clubBtn"></div>
+  </div>
+  <div class="n-right">
+    <div class="live-pill" role="status" aria-label="Live data">
+      <div class="live-dot" aria-hidden="true"></div>
+      Live
+    </div>
+  </div>
+</nav>
+
+<div class="tabnav">
+  <div class="tabnav-inner" role="tablist" aria-label="Dashboard sections">
+    <button class="tnav-btn" role="tab" id="tab-book-btn"    aria-selected="true"  aria-controls="tab-book"    data-tab="book">Availability</button>
+    <button class="tnav-btn" role="tab" id="tab-club-btn"    aria-selected="false" aria-controls="tab-club"    data-tab="club" tabindex="-1">Club Info</button>
+    <button class="tnav-btn" role="tab" id="tab-compare-btn" aria-selected="false" aria-controls="tab-compare" data-tab="compare" tabindex="-1">Compare</button>
+    <button class="tnav-btn" role="tab" id="tab-stats-btn"   aria-selected="false" aria-controls="tab-stats"   data-tab="stats" tabindex="-1">Stats</button>
+  </div>
+</div>
+
+<main class="wrap">
+
+  <!-- =========================== TAB 1 · AVAILABILITY =========================== -->
+  <div id="tab-book" role="tabpanel" aria-labelledby="tab-book-btn">
+
+    <!-- STATS -->
+    <div class="stats" role="region" aria-label="Summary statistics">
+      <div class="stat"><div class="stat-v" id="sCourts">-</div><div class="stat-l">Padel courts</div></div>
+      <div class="stat"><div class="stat-v" id="sSlots">-</div><div class="stat-l">Slots today</div></div>
+      <div class="stat"><div class="stat-v" id="sBest">-</div><div class="stat-l">Best 60 min</div></div>
+      <div class="stat"><div class="stat-v" id="sPeak">-</div><div class="stat-l">Peak 60 min</div></div>
+    </div>
+
+    <!-- COURT GRID -->
+    <section class="sec" aria-labelledby="grid-title">
+      <div class="sec-hd">
+        <h2 class="sec-title" id="grid-title">Court Availability</h2>
+        <div class="notify-row">
+          <div class="date-tabs" id="dateTabs" role="tablist" aria-label="Select date"></div>
+          <button class="btn" id="notifyToggle" aria-expanded="false" aria-controls="notifyPanel">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M8 2a4 4 0 0 0-4 4v3l-1 2h10l-1-2V6a4 4 0 0 0-4-4z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+              <path d="M6 13a2 2 0 0 0 4 0" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            </svg>
+            Notify me
+          </button>
+        </div>
+      </div>
+
+      <div class="notify-panel" id="notifyPanel" role="region" aria-label="Set up an availability alert">
+        <div class="np-field">
+          <label class="np-label" for="np-court">Court</label>
+          <select class="np-select" id="np-court"><option value="">Any padel court</option></select>
+        </div>
+        <div class="np-field">
+          <label class="np-label" for="np-hour">Hour</label>
+          <select class="np-select" id="np-hour"></select>
+        </div>
+        <div class="np-field">
+          <label class="np-label" for="np-dur">Duration</label>
+          <select class="np-select" id="np-dur">
+            <option value="60">60 min</option>
+            <option value="90">90 min</option>
+            <option value="120">120 min</option>
+          </select>
+        </div>
+        <button class="btn primary" id="np-add">Watch</button>
+      </div>
+      <div class="watch-chips" id="watchChips" aria-live="polite"></div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="grid-scroll" role="region" aria-label="Court schedule grid" tabindex="0">
+          <div id="gridOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading schedule...</div></div>
+        </div>
+        <div class="legend" aria-label="Legend">
+          <div class="leg"><div class="legdot" style="background:var(--op-bg);border:1px solid var(--op-bd)"></div>Off-peak · from £36/h</div>
+          <div class="leg"><div class="legdot" style="background:var(--st-bg);border:1px solid var(--st-bd)"></div>Standard · from £60/h</div>
+          <div class="leg"><div class="legdot" style="background:var(--pk-bg);border:1px solid var(--pk-bd)"></div>Peak · from £80/h</div>
+          <div class="leg"><div class="legdot" style="background:rgba(255,255,255,0.04)"></div>Booked / unavailable</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- BACK TO BACK -->
+    <section class="sec" aria-labelledby="b2b-title">
+      <div class="sec-hd">
+        <h2 class="sec-title" id="b2b-title">Back-to-Back Sessions</h2>
+      </div>
+      <div class="dur-row" role="group" aria-label="Target session duration">
+        <button class="dbtn on" data-dur="120" onclick="pickDur(this)">2 hrs</button>
+        <button class="dbtn"    data-dur="150" onclick="pickDur(this)">2.5 hrs</button>
+        <button class="dbtn"    data-dur="180" onclick="pickDur(this)">3 hrs</button>
+        <button class="dbtn"    data-dur="240" onclick="pickDur(this)">4 hrs</button>
+      </div>
+      <div id="b2bOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Calculating...</div></div>
+    </section>
+
+    <!-- HEATMAP + RECS -->
+    <div class="bottom-row">
+      <section aria-labelledby="hm-title">
+        <div class="sec-hd">
+          <h2 class="sec-title" id="hm-title">Weekly Pattern</h2>
+          <span class="sec-meta">28-day avg · day of week · padel</span>
+        </div>
+        <div class="card">
+          <div id="hmOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Fetching 4 weeks...</div></div>
+          <div class="legend" aria-label="Heatmap legend">
+            <div class="leg"><div class="legdot" style="background:rgba(16,185,129,0.55)"></div>Very open</div>
+            <div class="leg"><div class="legdot" style="background:rgba(113,112,255,0.4)"></div>Moderate</div>
+            <div class="leg"><div class="legdot" style="background:rgba(245,158,11,0.4)"></div>Filling up</div>
+            <div class="leg"><div class="legdot" style="background:rgba(239,68,68,0.4)"></div>Busy</div>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="rec-title">
+        <div class="sec-hd">
+          <h2 class="sec-title" id="rec-title">Best Times to Play</h2>
+        </div>
+        <div id="recOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Analysing...</div></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- =========================== TAB 2 · CLUB INFO =========================== -->
+  <div id="tab-club" role="tabpanel" aria-labelledby="tab-club-btn" hidden>
+    <div id="clubOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading club info...</div></div>
+  </div>
+
+  <!-- =========================== TAB 3 · COMPARE =========================== -->
+  <div id="tab-compare" role="tabpanel" aria-labelledby="tab-compare-btn" hidden>
+    <div class="compare-controls">
+      <div class="compare-control-row">
+        <span class="compare-control-label">Date</span>
+        <div class="date-tabs" id="compareDateTabs" role="tablist" aria-label="Compare date"></div>
+      </div>
+      <div class="compare-control-row">
+        <span class="compare-control-label">Hour</span>
+        <div class="hour-tabs" id="compareHourTabs" role="tablist" aria-label="Compare hour"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="compare-table-wrap">
+        <div id="compareOut">
+          <div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading clubs...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =========================== TAB 4 · STATS =========================== -->
+  <div id="tab-stats" role="tabpanel" aria-labelledby="tab-stats-btn" hidden>
+    <div class="disclaimer" role="note">
+      <svg class="disclaimer-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M8 1l7 13H1L8 1z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+        <path d="M8 6v4M8 12.5v0.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+      </svg>
+      <div class="disclaimer-body">
+        <strong>Research data.</strong> This information is exposed via an unauthenticated API endpoint. It is not intended to be public. Treat as illustrative only.
+      </div>
+    </div>
+
+    <div class="stats" role="region" aria-label="Financial overview">
+      <div class="stat">
+        <div class="stat-v" id="statRev">-</div>
+        <div class="stat-l">Online revenue · 30d</div>
+        <div class="stat-trend" id="statTrend"></div>
+      </div>
+      <div class="stat">
+        <div class="stat-v" id="statMembers">-</div>
+        <div class="stat-l">Active members</div>
+      </div>
+      <div class="stat">
+        <div class="stat-v" id="statPlans">-</div>
+        <div class="stat-l">Plans on sale</div>
+      </div>
+      <div class="stat">
+        <div class="stat-v" id="statAvg">-</div>
+        <div class="stat-l">Avg plan price</div>
+      </div>
+    </div>
+
+    <section aria-labelledby="memrank-title">
+      <div class="sec-hd">
+        <h2 class="sec-title" id="memrank-title">Membership · ranked by members</h2>
+      </div>
+      <div class="stats-table-wrap">
+        <div id="memRankOut">
+          <div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>
+        </div>
+      </div>
+      <div class="stats-note">
+        These endpoints require no authentication. This is a finding from API analysis of the Padelmates mobile app.
+      </div>
+    </section>
+  </div>
+
+</main>
+
+<script>
+/* CONFIG */
+const CLUBS = [
+  { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer',           sub: 'North Acton, London' },
+  { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium Canary Wharf', sub: 'Canary Wharf, London' }
+];
+let CLUB = (localStorage.getItem('cv-club-id') && CLUBS.find(c => c.id === localStorage.getItem('cv-club-id')))
+  ? localStorage.getItem('cv-club-id')
+  : CLUBS[0].id;
+let clubInfo = CLUBS.find(c => c.id === CLUB) || CLUBS[0];
+// All API calls route via same-origin /api/* (courtview proxy on port 8766)
+const API = '/api';
+async function apiFetch(url, opts) {
+  return fetch(url, opts);
+}
+const TZ      = 'Europe/London';
+const H_START = 6;
+const H_END   = 24;
+const SLOT_W  = 30;
+const N_CELLS = (H_END - H_START) * 60 / SLOT_W;
+const HM_HRS  = Array.from({length:16}, (_,i) => i + 7);
+const NOTIFY_POLL_MS = 10 * 60 * 1000;
+const NOTIFY_KEY = 'racketeer-watches-v1';
+const WEEK_DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+const COMPARE_CLUBS = [
+  { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer · North Acton' },
+  { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium · Canary Wharf' },
+  { id: 'ec97429b51dc4e678fddb93ec02f751e', name: 'eBaTT · NW2' },
+  { id: 'd11965b0f8c24527bf36491e6c32a39f', name: 'House of Racquet' }
+];
+
+/* STATE */
+let dayData     = null;
+let monthCache  = {};
+let selDur      = 120;
+let watches     = [];
+let activeTab   = 'book';
+let compareDate = new Date();
+let compareHour = new Date().getHours() < 22 ? Math.max(new Date().getHours() + 1, 7) : 19;
+let compareCache = {};
+
+/* CACHE KEY — scopes monthCache entries by club */
+const cacheKey = (clubId, dateKey) => `${clubId}/${dateKey}`;
+
+/* DATE HELPERS */
+const dayStart = d => { const x=new Date(d); x.setHours(0,0,0,0); return x.getTime(); };
+const dayEnd   = d => { const x=new Date(d); x.setHours(23,59,59,999); return x.getTime(); };
+const isoDate  = d => d.toISOString().split('T')[0];
+
+function localHour(ms) {
+  return +new Date(ms).toLocaleString('en-GB',{hour:'2-digit',timeZone:TZ,hour12:false}).replace(':','');
+}
+function localHM(ms) {
+  return new Date(ms).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:TZ,hour12:false});
+}
+function cellIdx(ms) {
+  const d = new Date(ms);
+  const s = d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:TZ,hour12:false});
+  const [h,m] = s.split(':').map(Number);
+  return Math.floor(((h - H_START) * 60 + m) / SLOT_W);
+}
+function cellLabel(i) {
+  const min = H_START * 60 + i * SLOT_W;
+  const h = String(Math.floor(min/60)).padStart(2,'0');
+  const m = String(min % 60).padStart(2,'0');
+  return `${h}:${m}`;
+}
+function dayOfWeekIdx(dateStr) {
+  // returns 0=Mon, 6=Sun
+  const d = new Date(dateStr + 'T12:00:00');
+  return (d.getDay() + 6) % 7;
+}
+function fmtGBP(n) {
+  if (n == null || isNaN(n)) return '-';
+  if (Math.abs(n) >= 1000) return '£' + (n / 1000).toFixed(1).replace(/\.0$/,'') + 'k';
+  return '£' + Math.round(n);
+}
+
+/* API */
+async function fetchDay(date, clubId = CLUB) {
+  const url = `${API}/player/player_booking/all_courts_slot_prices?club_id=${clubId}&start_datetime=${dayStart(date)}&end_datetime=${dayEnd(date)}`;
+  const r = await apiFetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+async function fetchClubProfile() {
+  const r = await apiFetch(`${API}/club/?club_id=${CLUB}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchMembership() {
+  const r = await apiFetch(`${API}/club/membership/?club_id=${CLUB}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const data = await r.json();
+  return Array.isArray(data) ? data : (data.memberships || []);
+}
+async function fetchCreditPackages() {
+  const r = await apiFetch(`${API}/club/creditpackage/?club_id=${CLUB}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchFinancialStats() {
+  const now = Date.now();
+  const start = now - (30 * 24 * 60 * 60 * 1000);
+  const url = `${API}/club/statistics/financial?club_id=${CLUB}&selected_duration=month&start_time=${start}&end_time=${now}&user_timezone=Europe/London`;
+  const r = await apiFetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+/* PRICE HELPERS */
+const p60  = s => s.interval_prices?.find(x=>x.duration===60)?.price  ?? 0;
+const p90  = s => s.interval_prices?.find(x=>x.duration===90)?.price  ?? null;
+const p120 = s => s.interval_prices?.find(x=>x.duration===120)?.price ?? null;
+
+function tier(price60) {
+  if (price60 <= 45) return 'op';
+  if (price60 <= 70) return 'st';
+  return 'pk';
+}
+const tierLabel = t => ({op:'Off-peak', st:'Standard', pk:'Peak'})[t];
+const tierColor = t => ({op:'var(--op-tx)', st:'var(--st-tx)', pk:'var(--pk-tx)'})[t];
+
+/* HTML ESCAPE */
+function esc(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* COURT GRID */
+function renderGrid(courts) {
+  if (!courts?.length) return '<div class="empty">No data for this date.</div>';
+
+  const padel = courts
+    .filter(c => c.sport_type === 'PADEL')
+    .sort((a,b) => (parseInt(a.name.replace(/\D/g,''))||99) - (parseInt(b.name.replace(/\D/g,''))||99));
+  const other = courts.filter(c => c.sport_type !== 'PADEL');
+  const sorted = [...padel, ...other];
+
+  let h = '<div class="grid-body">';
+  h += '<div class="grid-hrow" aria-hidden="true">';
+  for (let i = 0; i < N_CELLS; i++) {
+    const lbl = cellLabel(i);
+    h += `<div class="tlabel">${lbl.endsWith(':00') ? lbl : ''}</div>`;
+  }
+  h += '</div>';
+
+  const now = Date.now();
+  for (const court of sorted) {
+    const cells = new Array(N_CELLS).fill(null);
+    for (const slot of (court.available_slots || [])) {
+      if (slot.start_datetime < now) continue;
+      const si = cellIdx(slot.start_datetime);
+      const span = Math.max(1, Math.ceil((slot.end_datetime - slot.start_datetime) / (SLOT_W * 60000)));
+      const t = tier(p60(slot));
+      for (let k = si; k < Math.min(si + span, N_CELLS); k++) {
+        if (k >= 0 && !cells[k]) cells[k] = { slot, t };
+      }
+    }
+
+    h += `<div class="crow">`;
+    h += `<div class="cname" title="${esc(court.name)}">${esc(court.name)}</div>`;
+    h += `<div class="cslots" role="row" aria-label="${esc(court.name)}">`;
+    for (let i = 0; i < N_CELLS; i++) {
+      const c = cells[i];
+      const time = cellLabel(i);
+      if (c) {
+        const q60 = p60(c.slot), q90 = p90(c.slot), q120 = p120(c.slot);
+        const prRow = [
+          `60 min · £${q60}`,
+          q90  ? `90 min · £${q90}`  : '',
+          q120 ? `120 min · £${q120}` : ''
+        ].filter(Boolean).join('<br>');
+        h += `<div class="cell avail ${c.t}"
+          role="gridcell" tabindex="0"
+          aria-label="${esc(court.name)} ${time} ${tierLabel(c.t)} from £${q60}">
+          <div class="tt" aria-hidden="true">
+            <span class="tt-t">${time} · ${esc(court.name)}</span>
+            ${prRow.split('<br>').map(l=>`<span class="tt-r">${l}</span>`).join('')}
+            <span class="tt-r" style="margin-top:3px;color:var(--text-4)">${tierLabel(c.t)}</span>
+          </div>
+        </div>`;
+      } else {
+        h += `<div class="cell" role="gridcell" aria-label="${esc(court.name)} ${time} unavailable"></div>`;
+      }
+    }
+    h += '</div></div>';
+  }
+  h += '</div>';
+  return h;
+}
+
+/* BACK TO BACK · fixed deduplication */
+function calcB2B(courts, targetMin) {
+  const now = Date.now();
+  const slots = [];
+  for (const court of courts) {
+    if (court.sport_type !== 'PADEL') continue;
+    for (const slot of (court.available_slots || [])) {
+      if (slot.start_datetime < now) continue;
+      const durs = (slot.interval_prices || []).filter(x=>x.enabled).map(x=>x.duration);
+      for (const dur of durs) {
+        slots.push({
+          court, slot, dur,
+          start: slot.start_datetime,
+          end:   slot.start_datetime + dur * 60000,
+          price: slot.interval_prices.find(x=>x.duration===dur)?.price ?? 0
+        });
+      }
+    }
+  }
+  slots.sort((a,b) => a.start - b.start);
+
+  const GAP = 35 * 60000;
+  const chains = [];
+
+  for (let i = 0; i < slots.length; i++) {
+    const stack = [[slots[i]]];
+    while (stack.length) {
+      const chain = stack.pop();
+      const total = chain.reduce((s,c) => s + c.dur, 0);
+      if (total >= targetMin) {
+        const price = chain.reduce((s,c) => s+c.price, 0);
+        const sameCourt = chain.every(c => c.court._id === chain[0].court._id);
+        const maxGap = chain.length > 1
+          ? Math.max(...chain.slice(1).map((c,i) => c.start - chain[i].end))
+          : 0;
+        chains.push({ chain, total, price, sameCourt, maxGap,
+          startMs: chain[0].start, endMs: chain[chain.length-1].end });
+        continue;
+      }
+      const last = chain[chain.length - 1];
+      for (let j = 0; j < slots.length; j++) {
+        const s = slots[j];
+        const gap = s.start - last.end;
+        if (gap < 0 || gap > GAP) continue;
+        if (chain.some(c => c.start === s.start && c.court._id === s.court._id && c.dur === s.dur)) continue;
+        stack.push([...chain, s]);
+      }
+    }
+  }
+
+  // Group by startMs, keep cheapest chain per unique start time.
+  // This stops 11 same-window variants from monopolising the top 8.
+  const byStart = new Map();
+  for (const c of chains) {
+    const cur = byStart.get(c.startMs);
+    if (!cur) { byStart.set(c.startMs, c); continue; }
+    // prefer lower price, then lower maxGap, then same court
+    const cmp = (c.price - cur.price) || (c.maxGap - cur.maxGap) || ((cur.sameCourt?0:1) - (c.sameCourt?0:1));
+    if (cmp < 0) byStart.set(c.startMs, c);
+  }
+
+  return [...byStart.values()]
+    .sort((a,b) => (a.price + a.maxGap/60000) - (b.price + b.maxGap/60000))
+    .slice(0, 8);
+}
+
+function renderB2B(courts, dur) {
+  const results = calcB2B(courts, dur);
+  if (!results.length) return '<div class="empty">No combinations found for this duration on this date. Try a different day.</div>';
+
+  let h = '<div class="b2b-grid">';
+  results.forEach(({chain, price, sameCourt, startMs, endMs}, idx) => {
+    const best = idx === 0;
+    const tiers = [...new Set(chain.map(s => tier(s.price / (s.dur/60))))];
+    h += `<div class="b2b${best?' best':''}">`;
+    h += `<div class="b2b-top">
+      <div class="b2b-time">${localHM(startMs)} - ${localHM(endMs)}</div>
+      <div class="b2b-price">£${price}<div class="b2b-pp">£${Math.round(price/4)}pp</div></div>
+    </div>`;
+    h += '<div class="b2b-segs">';
+    chain.forEach((seg, si) => {
+      const t = tier(seg.price / (seg.dur/60));
+      h += `<div class="seg">
+        <div class="segdot" style="background:${tierColor(t)}"></div>
+        <span>${localHM(seg.start)} · ${esc(seg.court.name)} · ${seg.dur} min · £${seg.price}</span>
+      </div>`;
+      if (si < chain.length - 1) {
+        const gapMin = Math.round((chain[si+1].start - seg.end) / 60000);
+        if (gapMin > 0) h += `<div class="gap-row"><div class="gap-ln"></div>${gapMin} min between courts</div>`;
+      }
+    });
+    h += '</div>';
+    h += '<div class="tags">';
+    if (best)       h += `<span class="tag tag-best">Best value</span>`;
+    if (sameCourt)  h += `<span class="tag tag-sc">Same court</span>`;
+    tiers.forEach(t => h += `<span class="tag tag-${t}">${tierLabel(t)}</span>`);
+    h += '</div></div>';
+  });
+  h += '</div>';
+  return h;
+}
+
+/* HEATMAP · 28-day aggregate by day of week */
+function buildDowMatrix(cache) {
+  // For each day-of-week (0=Mon..6=Sun) and hour, compute avg ratio of free courts
+  // across all cached dates that match that day-of-week.
+  const buckets = {};
+  for (let d = 0; d < 7; d++) {
+    buckets[d] = {};
+    for (const hr of HM_HRS) buckets[d][hr] = { availSum: 0, totalSum: 0, count: 0 };
+  }
+  for (const [dateStr, courts] of Object.entries(cache)) {
+    if (!courts || !courts.length) continue;
+    const dow = dayOfWeekIdx(dateStr);
+    const padel = courts.filter(c => c.sport_type === 'PADEL');
+    if (!padel.length) continue;
+    for (const hr of HM_HRS) {
+      let avail = 0;
+      for (const court of padel) {
+        const has = (court.available_slots || []).some(sl => localHour(sl.start_datetime) === hr);
+        if (has) avail++;
+      }
+      buckets[dow][hr].availSum += avail;
+      buckets[dow][hr].totalSum += padel.length;
+      buckets[dow][hr].count += 1;
+    }
+  }
+  return buckets;
+}
+
+function hmColor(ratio) {
+  if (ratio === 0)    return 'rgba(239,68,68,0.18)';
+  if (ratio < 0.25)  return 'rgba(239,68,68,0.38)';
+  if (ratio < 0.50)  return 'rgba(245,158,11,0.38)';
+  if (ratio < 0.75)  return 'rgba(113,112,255,0.38)';
+  return 'rgba(16,185,129,0.55)';
+}
+
+function renderHeatmap(cache) {
+  const buckets = buildDowMatrix(cache);
+  const hasData = Object.values(buckets).some(d => Object.values(d).some(c => c.count > 0));
+  if (!hasData) return '<div class="empty">No data yet.</div>';
+
+  let h = '<div class="hm-scroll"><table class="hm-table" role="grid" aria-label="Weekly occupancy pattern across 28 days"><thead><tr>';
+  h += '<th class="rl" scope="col"></th>';
+  for (let d = 0; d < 7; d++) {
+    h += `<th scope="col">${WEEK_DAYS[d]}</th>`;
+  }
+  h += '</tr></thead><tbody>';
+
+  for (const hr of HM_HRS) {
+    h += `<tr><th class="rl" scope="row">${hr}:00</th>`;
+    for (let d = 0; d < 7; d++) {
+      const b = buckets[d][hr];
+      const ratio = b.totalSum > 0 ? b.availSum / b.totalSum : 0;
+      const col = b.count ? hmColor(ratio) : 'rgba(255,255,255,0.025)';
+      const dayName = WEEK_DAYS[d];
+      const lbl = b.count ? `${dayName} ${hr}:00 - ${Math.round(ratio*100)}% courts free (avg of ${b.count} ${b.count===1?'day':'days'})` : `${dayName} ${hr}:00 - no data`;
+      h += `<td><div class="hm-cell" style="background:${col}"
+        tabindex="0" role="gridcell"
+        title="${lbl}"
+        aria-label="${lbl}"></div></td>`;
+    }
+    h += '</tr>';
+  }
+  h += '</tbody></table></div>';
+  return h;
+}
+
+/* RECOMMENDATIONS · still based on next 7 days only */
+function buildRecs(cache) {
+  const cands = [];
+  const todayStr = isoDate(new Date());
+  const nowHour  = new Date().getHours();
+  const next7 = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i);
+    next7.push(isoDate(d));
+  }
+
+  for (const day of next7) {
+    const courts = (cache[day] || []).filter(c => c.sport_type === 'PADEL');
+    if (!courts.length) continue;
+    const total = courts.length;
+
+    for (const hr of HM_HRS) {
+      if (day === todayStr && hr <= nowHour) continue;
+      let avail = 0;
+      const prices = [];
+      for (const court of courts) {
+        let courtHas = false;
+        for (const sl of (court.available_slots || [])) {
+          if (localHour(sl.start_datetime) === hr) {
+            courtHas = true;
+            const q = p60(sl);
+            if (q > 0) prices.push(q);
+          }
+        }
+        if (courtHas) avail++;
+      }
+      if (!total) continue;
+      const ratio = avail / total;
+      if (ratio < 0.15) continue;
+      const avgP = prices.length ? Math.round(prices.reduce((a,b)=>a+b,0)/prices.length) : 80;
+      const t = tier(avgP);
+      const score = ratio * 0.6 + (1 - avgP/100) * 0.4;
+      const d = new Date(day+'T12:00:00');
+      cands.push({
+        day, hr, ratio, avgP, t, score,
+        dayLong: d.toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'short',timeZone:TZ})
+      });
+    }
+  }
+  return cands.sort((a,b) => b.score - a.score).slice(0,4);
+}
+
+function renderRecs(recs) {
+  if (!recs.length) return '<div class="empty">Not enough data yet.</div>';
+  const ranks = ['Best pick','2nd','3rd','4th'];
+  let h = '<div class="rec-list">';
+  recs.forEach((r,i) => {
+    const sc = Math.round(r.score * 100);
+    h += `<div class="rec">
+      <div class="rec-rank">${ranks[i]}</div>
+      <div class="rec-time">${r.hr}:00</div>
+      <div class="rec-day">${esc(r.dayLong)}</div>
+      <div class="rec-row"><span class="rec-k">Courts free</span><span class="rec-v" style="color:${r.ratio>0.6?'var(--op-tx)':'var(--text-2)'}">${Math.round(r.ratio*100)}%</span></div>
+      <div class="rec-row"><span class="rec-k">Avg 60 min</span><span class="rec-v" style="color:${tierColor(r.t)}">£${r.avgP}</span></div>
+      <div class="rec-row"><span class="rec-k">Price tier</span><span class="rec-v">${tierLabel(r.t)}</span></div>
+      <div class="score-bar"><div class="score-fill" style="width:${sc}%"></div></div>
+    </div>`;
+  });
+  h += '</div>';
+  return h;
+}
+
+/* DATE TABS · availability */
+function buildDateTabs() {
+  const el = document.getElementById('dateTabs');
+  el.innerHTML = '';
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i);
+    const btn = document.createElement('button');
+    btn.className = 'dtab' + (i===0?' on':'');
+    btn.setAttribute('role','tab');
+    btn.setAttribute('aria-selected', i===0 ? 'true':'false');
+    btn.dataset.offset = i;
+    btn.innerHTML = `<span class="dn">${d.toLocaleDateString('en-GB',{weekday:'short',timeZone:TZ})}</span><span class="dd">${d.toLocaleDateString('en-GB',{day:'numeric',timeZone:TZ})}</span>`;
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#dateTabs .dtab').forEach(t=>{t.classList.remove('on');t.setAttribute('aria-selected','false');});
+      btn.classList.add('on'); btn.setAttribute('aria-selected','true');
+      const nd = new Date(); nd.setDate(nd.getDate() + i);
+      loadDay(nd);
+    });
+    el.appendChild(btn);
+  }
+}
+
+/* STATS BAR · availability */
+function fillStats(courts) {
+  const padel = courts.filter(c=>c.sport_type==='PADEL');
+  const total = padel.reduce((s,c)=>(s+(c.available_slots||[]).length),0);
+  const ps = padel.flatMap(c=>(c.available_slots||[]).map(s=>p60(s))).filter(x=>x>0);
+  document.getElementById('sCourts').textContent = padel.length;
+  document.getElementById('sSlots').textContent  = total;
+  document.getElementById('sBest').textContent   = ps.length ? `£${Math.min(...ps)}` : '-';
+  document.getElementById('sPeak').textContent   = ps.length ? `£${Math.max(...ps)}` : '-';
+}
+
+/* LOAD DAY · availability */
+async function loadDay(date) {
+  document.getElementById('gridOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+  document.getElementById('b2bOut').innerHTML  = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Calculating...</div>';
+  try {
+    const key = cacheKey(CLUB, isoDate(date));
+    if (!monthCache[key]) monthCache[key] = await fetchDay(date);
+    const courts = monthCache[key];
+    dayData = courts;
+    fillStats(courts);
+    document.getElementById('gridOut').innerHTML = renderGrid(courts);
+    document.getElementById('b2bOut').innerHTML  = renderB2B(courts, selDur);
+    populateNotifyCourts(courts);
+  } catch(e) {
+    document.getElementById('gridOut').innerHTML = `<div class="empty">Could not load data: ${esc(e.message)}</div>`;
+    document.getElementById('b2bOut').innerHTML  = '';
+  }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const jitter = (min, max) => min + Math.floor(Math.random() * (max - min));
+
+/* LOAD 28 DAYS · heatmap + recs — staggered to avoid burst pattern */
+async function loadMonth() {
+  for (let i = 0; i < 28; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i);
+    const k = cacheKey(CLUB, isoDate(d));
+    if (!monthCache[k]) {
+      try {
+        monthCache[k] = await fetchDay(d);
+      } catch {
+        monthCache[k] = [];
+      }
+      // randomised delay between requests — looks like human browse pace
+      if (i < 27) await sleep(jitter(180, 420));
+    }
+  }
+  // Filter monthCache to only entries for the current club before rendering
+  const clubMonth = {};
+  const prefix = `${CLUB}/`;
+  for (const k of Object.keys(monthCache)) {
+    if (k.startsWith(prefix)) clubMonth[k.slice(prefix.length)] = monthCache[k];
+  }
+  document.getElementById('hmOut').innerHTML  = renderHeatmap(clubMonth);
+  document.getElementById('recOut').innerHTML = renderRecs(buildRecs(clubMonth));
+}
+
+/* DURATION PICKER */
+function pickDur(btn) {
+  document.querySelectorAll('.dbtn').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');
+  selDur = +btn.dataset.dur;
+  if (dayData) document.getElementById('b2bOut').innerHTML = renderB2B(dayData, selDur);
+}
+
+/* NOTIFY · panel UI */
+function setupNotifyPanel() {
+  const toggle = document.getElementById('notifyToggle');
+  const panel  = document.getElementById('notifyPanel');
+  toggle.addEventListener('click', () => {
+    const open = panel.classList.toggle('open');
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+
+  // Build hour options 07..22
+  const hourSel = document.getElementById('np-hour');
+  for (let hr = 7; hr <= 22; hr++) {
+    const opt = document.createElement('option');
+    opt.value = hr;
+    opt.textContent = String(hr).padStart(2,'0') + ':00';
+    hourSel.appendChild(opt);
+  }
+  hourSel.value = Math.max(7, Math.min(22, new Date().getHours() + 1));
+
+  document.getElementById('np-add').addEventListener('click', addWatch);
+
+  loadWatches();
+  renderWatchChips();
+}
+
+function populateNotifyCourts(courts) {
+  const sel = document.getElementById('np-court');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">Any padel court</option>';
+  const padel = courts.filter(c => c.sport_type === 'PADEL');
+  for (const c of padel) {
+    const opt = document.createElement('option');
+    opt.value = c._id;
+    opt.textContent = c.name;
+    sel.appendChild(opt);
+  }
+  if (cur) sel.value = cur;
+}
+
+async function addWatch() {
+  const courtSel = document.getElementById('np-court');
+  const hourSel  = document.getElementById('np-hour');
+  const durSel   = document.getElementById('np-dur');
+  const courtId  = courtSel.value || null;
+  const courtName = courtId ? courtSel.options[courtSel.selectedIndex].text : 'Any court';
+  const hour     = +hourSel.value;
+  const dur      = +durSel.value;
+  const id       = `${courtId || 'any'}-${hour}-${dur}`;
+
+  if (watches.some(w => w.id === id)) return;
+  watches.push({ id, courtId, courtName, hour, dur, created: Date.now() });
+  saveWatches();
+  renderWatchChips();
+
+  if ('Notification' in window && Notification.permission === 'default') {
+    try { await Notification.requestPermission(); } catch (_) {}
+  }
+}
+
+function removeWatch(id) {
+  watches = watches.filter(w => w.id !== id);
+  saveWatches();
+  renderWatchChips();
+}
+
+function saveWatches() {
+  try { localStorage.setItem(NOTIFY_KEY, JSON.stringify(watches)); } catch (_) {}
+}
+function loadWatches() {
+  try {
+    const raw = localStorage.getItem(NOTIFY_KEY);
+    watches = raw ? JSON.parse(raw) : [];
+  } catch (_) { watches = []; }
+}
+
+function renderWatchChips() {
+  const el = document.getElementById('watchChips');
+  if (!watches.length) { el.innerHTML = ''; return; }
+  el.innerHTML = watches.map(w => `
+    <span class="chip">
+      ${esc(w.courtName)} · ${String(w.hour).padStart(2,'0')}:00 · ${w.dur}m
+      <button type="button" aria-label="Remove watch" data-id="${esc(w.id)}">&times;</button>
+    </span>
+  `).join('');
+  el.querySelectorAll('button[data-id]').forEach(b => {
+    b.addEventListener('click', () => removeWatch(b.dataset.id));
+  });
+}
+
+/* NOTIFY · polling */
+async function pollWatches() {
+  if (!watches.length) return;
+  try {
+    const today = new Date();
+    const key = cacheKey(CLUB, isoDate(today));
+    const courts = await fetchDay(today);
+    monthCache[key] = courts;
+    const padel = courts.filter(c => c.sport_type === 'PADEL');
+    for (const w of watches) {
+      const matchingCourts = w.courtId ? padel.filter(c => c._id === w.courtId) : padel;
+      for (const court of matchingCourts) {
+        for (const sl of (court.available_slots || [])) {
+          if (localHour(sl.start_datetime) !== w.hour) continue;
+          const dur = (sl.interval_prices || []).find(x => x.duration === w.dur && x.enabled);
+          if (!dur) continue;
+          fireNotification(w, court, sl, dur.price);
+        }
+      }
+    }
+  } catch (_) { /* ignore poll errors */ }
+}
+
+function fireNotification(w, court, slot, price) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const lastKey = `${w.id}-${slot.start_datetime}`;
+  if (sessionStorage.getItem(lastKey)) return;
+  sessionStorage.setItem(lastKey, '1');
+  const title = `Court available at ${String(w.hour).padStart(2,'0')}:00`;
+  const body = `${court.name} · ${w.dur} min · £${price}`;
+  try { new Notification(title, { body, tag: lastKey }); } catch (_) {}
+}
+
+/* CLUB INFO TAB */
+let clubLoaded = false;
+async function loadClubInfo() {
+  if (clubLoaded) return;
+  clubLoaded = true;
+  const out = document.getElementById('clubOut');
+  try {
+    const profile = await fetchClubProfile().catch(() => null);
+    await sleep(jitter(150, 350));
+    const members = await fetchMembership().catch(() => []);
+    await sleep(jitter(150, 350));
+    const credits = await fetchCreditPackages().catch(() => []);
+    out.innerHTML = renderClubInfo(profile, members, credits);
+  } catch (e) {
+    out.innerHTML = `<div class="empty">Could not load club info: ${esc(e.message)}</div>`;
+    clubLoaded = false;
+  }
+}
+
+function renderClubInfo(profile, members, credits) {
+  const c = profile || {};
+  let h = '';
+
+  // Header
+  const addr = [c.address, c.postal_code, c.city].filter(Boolean).join(', ');
+  h += '<div class="club-hdr">';
+  h += `<div class="club-name">${esc(c.name || 'Club')}</div>`;
+  if (c.organization?.name) h += `<div class="club-org">${esc(c.organization.name)}</div>`;
+  h += '<div class="club-meta">';
+  if (addr) h += `<div><strong>Address</strong>${esc(addr)}</div>`;
+  if (c.email) h += `<div><strong>Email</strong><a href="mailto:${esc(c.email)}">${esc(c.email)}</a></div>`;
+  if (c.phone) h += `<div><strong>Phone</strong>${esc(c.phone)}</div>`;
+  if (c.website) {
+    const href = c.website.startsWith('http') ? c.website : 'https://' + c.website;
+    h += `<div><strong>Website</strong><a href="${esc(href)}" target="_blank" rel="noopener">${esc(c.website)}</a></div>`;
+  }
+  h += '</div></div>';
+
+  // Opening hours
+  const hours = parseHours(c.opening_hours || c.hours);
+  if (hours) {
+    h += '<section class="sec"><div class="sec-hd"><h2 class="sec-title">Opening hours</h2></div>';
+    h += '<div class="card"><div class="hours-grid">';
+    for (let i = 0; i < 7; i++) {
+      const day = hours[i];
+      h += `<div class="hour-cell">
+        <div class="hour-day">${WEEK_DAYS[i]}</div>
+        <div class="hour-time${day.closed ? ' hour-closed':''}">${day.closed ? 'Closed' : `${day.open} - ${day.close}`}</div>
+      </div>`;
+    }
+    h += '</div></div></section>';
+  }
+
+  // Membership plans
+  const plans = (members || [])
+    .filter(p => !p.hidden && (p.price || 0) > 0)
+    .sort((a,b) => (b.total_members || b.member_count || 0) - (a.total_members || a.member_count || 0));
+  if (plans.length) {
+    const mc = p => p.total_members || p.member_count || 0;
+    const maxMembers = Math.max(...plans.map(mc), 1);
+    h += '<section class="sec"><div class="sec-hd"><h2 class="sec-title">Membership plans</h2><span class="sec-meta">' + plans.length + ' on sale</span></div>';
+    h += '<div class="plan-grid">';
+    for (const p of plans) {
+      const pct = Math.round((mc(p) / maxMembers) * 100);
+      // API returns usp_1, usp_2 ... usp_8 as individual string fields
+      const uspFields = ['usp_1','usp_2','usp_3','usp_4','usp_5','usp_6','usp_7','usp_8'];
+      const usps = uspFields.map(k => p[k]).filter(v => v && v.trim()).slice(0, 3);
+      const period = p.period || p.recurrence || 'month';
+      h += `<div class="plan">
+        <div class="plan-name">${esc(p.name)}</div>
+        <div class="plan-price">£${esc(p.price)}</div>
+        <div class="plan-period">per ${esc(period)}</div>
+        <div class="plan-members">${mc(p)} members</div>
+        <div class="plan-bar"><div class="plan-bar-fill" style="width:${pct}%"></div></div>
+        <div class="plan-usps">${usps.map(u => `<div class="plan-usp">${esc(String(u))}</div>`).join('')}</div>
+      </div>`;
+    }
+    h += '</div></section>';
+  }
+
+  // Credit packages
+  const packs = (credits || []).filter(p => !p.hidden);
+  if (packs.length) {
+    h += '<section class="sec"><div class="sec-hd"><h2 class="sec-title">Credit packages</h2></div>';
+    h += '<div class="credit-grid">';
+    for (const p of packs) {
+      const validity = p.validity_days || p.expires_in_days || p.validity;
+      h += `<div class="credit">
+        <div class="credit-title">${esc(p.title || p.name)}</div>
+        <div class="credit-price">£${esc(p.price)}</div>
+        <div class="credit-row"><span class="credit-k">Credits</span><span class="credit-v">${esc(p.credits ?? p.amount ?? '-')}</span></div>
+        ${validity ? `<div class="credit-row"><span class="credit-k">Valid for</span><span class="credit-v">${esc(validity)} days</span></div>` : ''}
+      </div>`;
+    }
+    h += '</div></section>';
+  }
+
+  if (!plans.length && !packs.length && !hours) {
+    h += '<div class="empty">No additional club info available.</div>';
+  }
+  return h;
+}
+
+function parseHours(raw) {
+  if (!raw) return null;
+  // Accept either { mon: {open,close}, ... } or an array indexed 0..6 (Mon=0)
+  if (Array.isArray(raw)) {
+    return raw.slice(0, 7).map(d => normaliseDay(d));
+  }
+  if (typeof raw === 'object') {
+    const map = { mon:0, tue:1, wed:2, thu:3, fri:4, sat:5, sun:6,
+                  monday:0, tuesday:1, wednesday:2, thursday:3, friday:4, saturday:5, sunday:6 };
+    const days = Array(7).fill(null).map(() => ({ closed: true, open: '', close: '' }));
+    let any = false;
+    for (const k of Object.keys(raw)) {
+      const idx = map[k.toLowerCase()];
+      if (idx == null) continue;
+      days[idx] = normaliseDay(raw[k]);
+      any = true;
+    }
+    return any ? days : null;
+  }
+  return null;
+}
+function normaliseDay(d) {
+  if (!d || d.closed) return { closed: true, open: '', close: '' };
+  const open  = d.open || d.from || d.opens || '';
+  const close = d.close || d.to || d.closes || '';
+  if (!open && !close) return { closed: true, open: '', close: '' };
+  return { closed: false, open: String(open).slice(0,5), close: String(close).slice(0,5) };
+}
+
+/* COMPARE TAB */
+function buildCompareDateTabs() {
+  const el = document.getElementById('compareDateTabs');
+  el.innerHTML = '';
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i);
+    const btn = document.createElement('button');
+    btn.className = 'dtab' + (i===0?' on':'');
+    btn.setAttribute('role','tab');
+    btn.setAttribute('aria-selected', i===0 ? 'true':'false');
+    btn.dataset.offset = i;
+    btn.innerHTML = `<span class="dn">${d.toLocaleDateString('en-GB',{weekday:'short',timeZone:TZ})}</span><span class="dd">${d.toLocaleDateString('en-GB',{day:'numeric',timeZone:TZ})}</span>`;
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#compareDateTabs .dtab').forEach(t=>{t.classList.remove('on');t.setAttribute('aria-selected','false');});
+      btn.classList.add('on'); btn.setAttribute('aria-selected','true');
+      const nd = new Date(); nd.setDate(nd.getDate() + i);
+      compareDate = nd;
+      runCompare();
+    });
+    el.appendChild(btn);
+  }
+}
+
+function buildCompareHourTabs() {
+  const el = document.getElementById('compareHourTabs');
+  el.innerHTML = '';
+  for (let hr = 7; hr <= 22; hr++) {
+    const btn = document.createElement('button');
+    btn.className = 'htab' + (hr === compareHour ? ' on' : '');
+    btn.setAttribute('role','tab');
+    btn.setAttribute('aria-selected', hr === compareHour ? 'true' : 'false');
+    btn.dataset.hour = hr;
+    btn.textContent = String(hr).padStart(2,'0') + ':00';
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#compareHourTabs .htab').forEach(t=>{t.classList.remove('on');t.setAttribute('aria-selected','false');});
+      btn.classList.add('on'); btn.setAttribute('aria-selected','true');
+      compareHour = hr;
+      renderCompareTable();
+    });
+    el.appendChild(btn);
+  }
+}
+
+let compareLoaded = false;
+async function loadCompare() {
+  if (compareLoaded) return;
+  compareLoaded = true;
+  buildCompareDateTabs();
+  buildCompareHourTabs();
+  await runCompare();
+}
+
+async function runCompare() {
+  const out = document.getElementById('compareOut');
+  // Render skeleton table with loaders per club
+  const dateKey = isoDate(compareDate);
+  let h = '<table class="compare-table"><thead><tr>';
+  h += '<th>Club</th>';
+  h += '<th class="num">Courts</th>';
+  h += '<th class="num">Free at hour</th>';
+  h += '<th class="num">Best 60min</th>';
+  h += '<th class="num">Best 90min</th>';
+  h += '<th></th>';
+  h += '</tr></thead><tbody>';
+  for (const club of COMPARE_CLUBS) {
+    h += `<tr data-club="${club.id}">
+      <td class="club-cell">${esc(club.name)}</td>
+      <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
+      <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
+      <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
+      <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
+      <td><a class="btn" href="https://padelmates.com" target="_blank" rel="noopener">Book in app</a></td>
+    </tr>`;
+  }
+  h += '</tbody></table>';
+  out.innerHTML = h;
+
+  // Fetch each club sequentially with jitter — avoids 4 simultaneous requests
+  for (let i = 0; i < COMPARE_CLUBS.length; i++) {
+    const club = COMPARE_CLUBS[i];
+    const cacheKey = `${club.id}-${dateKey}`;
+    try {
+      if (!compareCache[cacheKey]) {
+        compareCache[cacheKey] = await fetchDay(compareDate, club.id);
+      }
+    } catch (_) {
+      compareCache[cacheKey] = [];
+    }
+    updateCompareRow(club);
+    if (i < COMPARE_CLUBS.length - 1) await sleep(jitter(200, 500));
+  }
+  renderCompareTable();
+}
+
+function updateCompareRow(club) {
+  const dateKey = isoDate(compareDate);
+  const courts = compareCache[`${club.id}-${dateKey}`] || [];
+  const padel = courts.filter(c => c.sport_type === 'PADEL');
+  const row = document.querySelector(`tr[data-club="${club.id}"]`);
+  if (!row) return;
+
+  // count courts with a slot starting within 30 min of compareHour
+  const targetMin = compareHour * 60;
+  const winLo = targetMin - 30;
+  const winHi = targetMin + 30;
+  let freeAtHour = 0;
+  const prices60 = [];
+  const prices90 = [];
+  for (const court of padel) {
+    let inWindow = false;
+    for (const sl of (court.available_slots || [])) {
+      const t = localHour(sl.start_datetime);
+      const mins = +new Date(sl.start_datetime).toLocaleTimeString('en-GB',{minute:'2-digit',hour12:false,timeZone:TZ});
+      // Simple proximity: hour matches and minute 0/30, or adjacent hour with right minute
+      const slotMin = t * 60 + (isNaN(mins) ? 0 : mins);
+      if (slotMin >= winLo && slotMin <= winHi) inWindow = true;
+      const q60 = p60(sl); if (q60 > 0) prices60.push(q60);
+      const q90 = p90(sl); if (q90 != null && q90 > 0) prices90.push(q90);
+    }
+    if (inWindow) freeAtHour++;
+  }
+  row.dataset.padel = padel.length;
+  row.dataset.free = freeAtHour;
+  row.dataset.best60 = prices60.length ? Math.min(...prices60) : '';
+  row.dataset.best90 = prices90.length ? Math.min(...prices90) : '';
+}
+
+function renderCompareTable() {
+  const dateKey = isoDate(compareDate);
+  // Re-evaluate free-at-hour against current compareHour using cached data
+  for (const club of COMPARE_CLUBS) {
+    if (compareCache[`${club.id}-${dateKey}`]) updateCompareRow(club);
+  }
+  const rows = [...document.querySelectorAll('#compareOut tr[data-club]')];
+  // Sort by free desc, then courts desc
+  rows.sort((a,b) => (+b.dataset.free||0) - (+a.dataset.free||0) || (+b.dataset.padel||0) - (+a.dataset.padel||0));
+  const tbody = document.querySelector('#compareOut tbody');
+  if (tbody) rows.forEach(r => tbody.appendChild(r));
+
+  for (const row of rows) {
+    const padel = +row.dataset.padel || 0;
+    const free = +row.dataset.free || 0;
+    const best60 = row.dataset.best60;
+    const best90 = row.dataset.best90;
+    const cells = row.querySelectorAll('td');
+    cells[1].innerHTML = padel ? padel : '<span style="color:var(--text-4)">-</span>';
+    if (free > 0) cells[2].innerHTML = `<span class="free-cell">${free} free</span>`;
+    else cells[2].innerHTML = `<span class="free-cell none">none</span>`;
+    cells[3].innerHTML = best60 ? `£${best60}` : '<span style="color:var(--text-4)">-</span>';
+    cells[4].innerHTML = best90 ? `£${best90}` : '<span style="color:var(--text-4)">-</span>';
+  }
+}
+
+/* STATS TAB */
+let statsLoaded = false;
+async function loadStats() {
+  if (statsLoaded) return;
+  statsLoaded = true;
+  try {
+    const fin = await fetchFinancialStats().catch(() => null);
+    await sleep(jitter(200, 450));
+    const members = await fetchMembership().catch(() => []);
+    renderStats(fin, members);
+  } catch (e) {
+    document.getElementById('memRankOut').innerHTML = `<div class="empty">Could not load stats: ${esc(e.message)}</div>`;
+    statsLoaded = false;
+  }
+}
+
+function renderStats(fin, members) {
+  // KPI row
+  // actual field names from the API response
+  const onlineRev = fin?.total_online_payment ?? fin?.online_revenue ?? fin?.total_revenue ?? null;
+  const trendRaw  = fin?.bookings_total_price_percentage ?? fin?.trend_pct ?? null;
+  // API returns e.g. "-7.9%" as a string — parse to number
+  const trend = trendRaw != null ? parseFloat(String(trendRaw).replace('%','')) : null;
+
+  document.getElementById('statRev').textContent = onlineRev != null ? fmtGBP(onlineRev) : '-';
+
+  const trendEl = document.getElementById('statTrend');
+  if (trend != null) {
+    const sign = trend >= 0 ? '+' : '';
+    trendEl.textContent = `${sign}${trend.toFixed(1)}% vs prior`;
+    trendEl.className = 'stat-trend ' + (trend >= 0 ? 'up' : 'down');
+  } else {
+    trendEl.textContent = '';
+  }
+
+  const plansOnSale = (members || []).filter(p => !p.hidden && (p.price||0) > 0);
+  const totalMembers = plansOnSale.reduce((s,p) => s + (p.total_members || p.member_count || 0), 0);
+  const avgPrice = plansOnSale.length
+    ? Math.round(plansOnSale.reduce((s,p) => s + (p.price||0), 0) / plansOnSale.length)
+    : 0;
+
+  document.getElementById('statMembers').textContent = totalMembers.toLocaleString('en-GB');
+  document.getElementById('statPlans').textContent   = plansOnSale.length;
+  document.getElementById('statAvg').textContent     = avgPrice ? `£${avgPrice}` : '-';
+
+  // Ranking table
+  const mCount = p => p.total_members || p.member_count || 0;
+  const ranked = [...plansOnSale].sort((a,b) => mCount(b) - mCount(a));
+  if (!ranked.length) {
+    document.getElementById('memRankOut').innerHTML = '<div class="empty">No membership data.</div>';
+    return;
+  }
+  let h = '<table class="stats-table"><thead><tr>';
+  h += '<th>Plan</th><th class="num">Members</th><th class="num">Price</th><th class="num">Period</th><th class="num">Share</th>';
+  h += '</tr></thead><tbody>';
+  for (const p of ranked) {
+    const share = totalMembers ? Math.round((mCount(p) / totalMembers) * 100) : 0;
+    h += `<tr>
+      <td>${esc(p.name)}</td>
+      <td class="num">${mCount(p).toLocaleString('en-GB')}</td>
+      <td class="num">£${esc(p.price)}</td>
+      <td class="num">${esc(p.period || p.recurrence || 'month')}</td>
+      <td class="num">${share}%</td>
+    </tr>`;
+  }
+  h += '</tbody></table>';
+  document.getElementById('memRankOut').innerHTML = h;
+}
+
+/* TAB SWITCHING */
+function setupTabs() {
+  const tabs = [...document.querySelectorAll('.tnav-btn')];
+
+  function activate(tabName, focusBtn = true) {
+    activeTab = tabName;
+    tabs.forEach(t => {
+      const on = t.dataset.tab === tabName;
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+      t.tabIndex = on ? 0 : -1;
+      if (on && focusBtn) t.focus();
+    });
+    document.querySelectorAll('[role="tabpanel"]').forEach(p => {
+      p.hidden = p.id !== 'tab-' + tabName;
+    });
+    if (tabName === 'club')    loadClubInfo();
+    if (tabName === 'compare') loadCompare();
+    if (tabName === 'stats')   loadStats();
+  }
+
+  tabs.forEach((t) => {
+    t.addEventListener('click', () => activate(t.dataset.tab, false));
+    t.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const dir = e.key === 'ArrowRight' ? 1 : -1;
+        const cur = tabs.findIndex(x => x.dataset.tab === activeTab);
+        const next = tabs[(cur + dir + tabs.length) % tabs.length];
+        activate(next.dataset.tab, true);
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        activate(tabs[0].dataset.tab, true);
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        activate(tabs[tabs.length-1].dataset.tab, true);
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        activate(t.dataset.tab, false);
+      }
+    });
+  });
+}
+
+/* CLUB SELECTOR */
+function renderClubDrop() {
+  const drop = document.getElementById('clubDrop');
+  drop.innerHTML = CLUBS.map(c => `
+    <div class="club-opt${c.id === CLUB ? ' active' : ''}" role="option" data-club-id="${c.id}" aria-selected="${c.id === CLUB}">
+      <span class="club-opt-text">
+        <span class="club-opt-name">${esc(c.name)}</span>
+        <span class="club-opt-sub">${esc(c.sub)}</span>
+      </span>
+      <svg class="check" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+        <path d="M2.5 6.5L5 9L9.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>`).join('');
+  drop.querySelectorAll('.club-opt').forEach(opt => {
+    opt.addEventListener('click', () => switchClub(opt.dataset.clubId));
+  });
+}
+
+function setClubLabel() {
+  document.getElementById('clubBtnName').textContent = clubInfo.name;
+  document.getElementById('clubBtnSub').textContent  = clubInfo.sub;
+}
+
+function toggleClubDrop(force) {
+  const btn  = document.getElementById('clubBtn');
+  const drop = document.getElementById('clubDrop');
+  const open = (typeof force === 'boolean') ? force : !drop.classList.contains('open');
+  drop.classList.toggle('open', open);
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+async function switchClub(id) {
+  if (id === CLUB) { toggleClubDrop(false); return; }
+  const next = CLUBS.find(c => c.id === id);
+  if (!next) return;
+  CLUB = id;
+  clubInfo = next;
+  localStorage.setItem('cv-club-id', id);
+  setClubLabel();
+  renderClubDrop();
+  toggleClubDrop(false);
+  // Reset club info tab so it re-fetches on next activation
+  clubLoaded = false;
+  const clubOut = document.getElementById('clubOut');
+  if (clubOut) clubOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading club info...</div>';
+  // Reload availability + heatmap; other tabs lazy-load on activation
+  await Promise.all([loadDay(new Date()), loadMonth()]);
+}
+
+function setupClubSelector() {
+  renderClubDrop();
+  setClubLabel();
+  document.getElementById('clubBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleClubDrop();
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.club-wrap')) toggleClubDrop(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') toggleClubDrop(false);
+  });
+}
+
+/* INIT */
+setupTabs();
+buildDateTabs();
+setupNotifyPanel();
+setupClubSelector();
+Promise.all([loadDay(new Date()), loadMonth()]);
+setInterval(pollWatches, NOTIFY_POLL_MS);
+</script>
+</body>
+</html>
