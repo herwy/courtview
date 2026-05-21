@@ -1424,6 +1424,7 @@ function buildRecs() {
     const courts = (monthCache[prefix + dateStr] || []).filter(c => c.sport_type === 'PADEL');
     if (!courts.length) continue;
     for (const hr of HM_HRS) {
+      if (hr < 10) continue; // exclude early morning slots
       if (dateStr === todayStr && hr <= nowHour) continue;
       const prices = [];
       for (const court of courts) {
@@ -2002,11 +2003,13 @@ async function runCompare() {
   h += '<th class="num">Peak 60min</th>';
   h += '<th class="num">Revenue (mo)</th>';
   h += '<th class="num">Activities (mo)</th>';
+  h += '<th class="num">Occupancy (mo)</th>';
   h += '<th></th>';
   h += '</tr></thead><tbody>';
   for (const club of COMPARE_CLUBS) {
     h += `<tr data-club="${club.id}">
       <td class="club-cell">${esc(club.name)}</td>
+      <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
       <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
       <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
       <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
@@ -2047,7 +2050,7 @@ async function runCompare() {
         try {
           const r = await apiFetch(`/api/booked-hours?club_id=${club.id}&start=${moStart}&end=${moEnd}`);
           const d = r.ok ? await r.json() : null;
-          compareCache[ak] = d?.total_activities ?? null;
+          compareCache[ak] = d ? { activities: d.total_activities ?? null, hours: d.total_booked_hours ?? null } : null;
         } catch (_) { compareCache[ak] = null; }
       })(),
     ]);
@@ -2095,13 +2098,21 @@ function renderCompareTable() {
     const offpeak = row.dataset.offpeak;
     const peak    = row.dataset.peak;
     const rev     = compareCache[`rev-${cid}-${mk2}`];
-    const acts    = compareCache[`act-${cid}-${mk2}`];
+    const actData = compareCache[`act-${cid}-${mk2}`];
+    const acts    = actData?.activities ?? null;
+    const hours   = actData?.hours ?? null;
+    // Occupancy = booked hours / (courts × 18h/day × elapsed days this month)
+    const elapsedDays = now2.getDate();
+    const occ = (hours != null && padel > 0)
+      ? Math.round(hours / (padel * (H_END - H_START) * elapsedDays) * 100)
+      : null;
     const cells   = row.querySelectorAll('td');
     cells[1].innerHTML = padel ? padel : dash;
     cells[2].innerHTML = offpeak ? `<span class="free-cell">£${offpeak}</span>` : dash;
     cells[3].innerHTML = peak    ? `£${peak}` : dash;
     cells[4].innerHTML = rev  != null ? fmtGBP(rev)  : dash;
     cells[5].innerHTML = acts != null ? acts.toLocaleString('en-GB') : dash;
+    cells[6].innerHTML = occ  != null ? `${occ}%` : dash;
   }
 }
 
