@@ -67,7 +67,7 @@ HEATMAP_CLUBS = [
     {"id": "788fa2c66535421aabc60fd27f941c42",  "courts": 12},  # Rocket Padel Ilford
 ]
 HEATMAP_HOURS      = list(range(7, 23))   # 07:00-22:00
-HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h
+HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h (1 API call per club)
 
 # Runtime paths on RPi
 TOKEN_PATH      = "/root/.courtview_token"
@@ -770,46 +770,68 @@ def _heatmap_is_stale(club_id: str) -> bool:
 
 
 def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
-    """Fetch past 7 days x 16 hours of get_booked_hours, aggregate by DOW, store in SQLite."""
-    from datetime import datetime as _dt, timedelta as _td
-    print(f"[heatmap] fetching for club {club_id} ({n_courts} courts)")
+    """One call to /club/statistics/operational; build DOW x hour matrix from hottest_time_slots
+    (hour-of-day signal) × week_day_wise_activity_count_combined_graph (DOW signal)."""
+    print(f"[heatmap] fetching operational stats for club {club_id}")
+    now_ms   = int(_now() * 1000)
+    start_ms = now_ms - 30 * 24 * 3600 * 1000  # 30 days
+    url = (
+        f"{TARGET}/club/statistics/operational"
+        f"?club_ids={club_id}"
+        f"&selected_duration=month"
+        f"&start_time={start_ms}&end_time={now_ms}"
+        f"&user_timezone=Europe/London"
+    )
+    try:
+        r    = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+        data = r.json()
+    except Exception as exc:
+        print(f"[heatmap] fetch error for club {club_id}: {exc}")
+        return
 
-    buckets: dict = {}  # {(dow, hour): [occupancy_values]}
-    for d in range(7):
-        for hr in HEATMAP_HOURS:
-            buckets[(d, hr)] = []
+    if "detail" in data:
+        print(f"[heatmap] API error for club {club_id}: {data['detail']}")
+        return
 
-    for day_offset in range(1, 8):
-        date = _dt.now().date() - _td(days=day_offset)
-        dow  = (date.weekday())  # Mon=0 already matches our scheme
+    # --- Hour-of-day signal from hottest_time_slots (30-min buckets → aggregate per hour) ---
+    hour_counts: dict = {}
+    for entry in data.get("hottest_time_slots", []):
+        try:
+            hr  = int(entry["x"].split(":")[0])
+            val = float(entry.get("y") or 0)
+            hour_counts[hr] = hour_counts.get(hr, 0.0) + val
+        except (ValueError, KeyError):
+            pass
+    max_hour = max(hour_counts.values()) if hour_counts else 1.0
 
-        for hr in HEATMAP_HOURS:
-            start_ms = int(_dt(date.year, date.month, date.day, hr, 0).timestamp() * 1000)
-            end_ms   = start_ms + 3599000  # 59:59 into the hour
-            url      = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start_ms}&end_datetime={end_ms}"
+    # --- DOW signal from week_day_wise_activity_count_combined_graph ---
+    dow_map    = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
+    dow_counts: dict = {}
+    for entry in data.get("week_day_wise_activity_count_combined_graph", []):
+        dow_idx = dow_map.get(entry.get("x"))
+        if dow_idx is not None:
             try:
-                r    = cffi_requests.get(url, headers=APP_HEADERS, timeout=10)
-                data = r.json()
-                occ  = min(1.0, (data.get("total_booked_hours") or 0) / n_courts)
-                buckets[(dow, hr)].append(occ)
-            except Exception as exc:
-                print(f"[heatmap] error club={club_id} day-{day_offset} hr={hr}: {exc}")
-            time.sleep(random.uniform(0.10, 0.18))
+                dow_counts[dow_idx] = float(entry.get("y") or 0)
+            except ValueError:
+                pass
+    max_dow = max(dow_counts.values()) if dow_counts else 1.0
 
+    # --- Build DOW x hour occupancy matrix (product of normalised signals) ---
     now_ts = int(_now())
     try:
         conn = sqlite3.connect(DB_PATH)
-        for (dow, hr), values in buckets.items():
-            if not values:
-                continue
-            avg_occ = sum(values) / len(values)
-            conn.execute(
-                "INSERT OR REPLACE INTO heatmap_cache (club_id, dow, hour, avg_occ, samples, fetched_at) VALUES (?,?,?,?,?,?)",
-                (club_id, dow, hr, avg_occ, len(values), now_ts),
-            )
+        for dow in range(7):
+            dow_w = dow_counts.get(dow, 0.0) / max_dow
+            for hr in HEATMAP_HOURS:
+                hr_w  = hour_counts.get(hr, 0.0) / max_hour
+                occ   = round(dow_w * hr_w, 4)
+                conn.execute(
+                    "INSERT OR REPLACE INTO heatmap_cache (club_id, dow, hour, avg_occ, samples, fetched_at) VALUES (?,?,?,?,?,?)",
+                    (club_id, dow, hr, occ, 30, now_ts),
+                )
         conn.commit()
         conn.close()
-        print(f"[heatmap] stored for club {club_id}")
+        print(f"[heatmap] stored 30-day operational data for club {club_id}")
     except sqlite3.Error as exc:
         print(f"[heatmap] db write error: {exc}")
 
