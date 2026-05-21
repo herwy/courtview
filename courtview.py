@@ -22,6 +22,7 @@ import urllib.request
 from collections import deque
 from datetime import datetime
 from time import time as _now
+from urllib.parse import urlencode, parse_qsl
 
 from flask import Flask, Response, jsonify, make_response, request
 from curl_cffi import requests as cffi_requests
@@ -73,6 +74,19 @@ HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h (1 API call per clu
 TOKEN_PATH      = "/root/.courtview_token"
 DB_PATH         = "/root/projects/courtview/courtview_cache.db"
 ACCESS_LOG_PATH = "/root/projects/courtview/access.log"
+
+# ---------------------------------------------------------------------------
+# SQLite connection helper - unified WAL/timeout settings
+# ---------------------------------------------------------------------------
+
+def _db_connect() -> sqlite3.Connection:
+    """Open a SQLite connection with WAL mode, synchronous=NORMAL, and a 10s busy timeout.
+    Every sqlite3.connect call site in this module must route through here so the pragmas
+    are applied consistently and connection settings live in one place."""
+    conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
 
 # Shared web assets served from the nightwatch dashboard directory
 WEB_ASSETS_DIR  = "/root/labs/web"
@@ -844,7 +858,6 @@ def proxy(p):
     url = TARGET + full_path
     if request.query_string:
         # Strip our own token param before forwarding
-        from urllib.parse import urlencode, parse_qsl
         qs_pairs = [(k, v) for k, v in parse_qsl(request.query_string.decode()) if k != "token"]
         if qs_pairs:
             url += "?" + urlencode(qs_pairs)
@@ -1160,7 +1173,11 @@ def _refresh_loop() -> None:
 # Module-level startup (runs at import time so gunicorn picks it up)
 # ---------------------------------------------------------------------------
 
+_STARTUP_LOCK = threading.Lock()
 _STARTUP_DONE = False
+
+_MEMBERSHIP_FETCH_LOCKS: dict = {}
+_MEMBERSHIP_FETCH_MUTEX = threading.Lock()
 
 
 def _startup() -> None:
