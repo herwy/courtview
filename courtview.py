@@ -50,17 +50,18 @@ APP_HEADERS = {
 
 # Endpoints allowed to proxy - whitelist prevents open proxy abuse
 ALLOWED_PATHS = {
-    "/player/player_booking/all_courts_slot_prices",
+    "/player/player_booking/all_courts_slot_prices_v2",
     "/player/player_booking/search_clubs",
     "/club/",
     "/club/membership/",
     "/club/creditpackage/",
     "/club/statistics/financial",
     "/club/statistics/financial/v2",
+    "/club/club_extras",
 }
 
 # Path that uses the SQLite availability cache
-CACHED_PATH = "/player/player_booking/all_courts_slot_prices"
+CACHED_PATH = "/player/player_booking/all_courts_slot_prices_v2"
 
 # Clubs and court counts for server-side heatmap fetching
 HEATMAP_CLUBS = [
@@ -921,18 +922,23 @@ def api_club_info():
         except sqlite3.Error:
             pass
 
-    results: dict = {"profile": None, "memberships": None, "credits": None}
+    results: dict = {"profile": None, "memberships": None, "credits": None, "extras": None}
     targets = [
         ("profile",     f"/club/?club_id={club_id}"),
         ("memberships", f"/club/membership/?club_id={club_id}"),
         ("credits",     f"/club/creditpackage/?club_id={club_id}"),
+        ("extras",      f"/club/club_extras?club_id={club_id}"),
     ]
 
     def _fetch(key: str, path: str) -> None:
         try:
             r = cffi_requests.get(TARGET + path, headers=APP_HEADERS, timeout=15)
             if r.status_code == 200:
-                results[key] = r.json()
+                d = r.json()
+                if key == "extras" and isinstance(d, dict):
+                    results[key] = d.get("data", [])
+                else:
+                    results[key] = d
         except Exception:
             results[key] = None
 
@@ -1020,7 +1026,24 @@ def proxy(p):
         # Store in cache if this is the availability path
         if full_path == CACHED_PATH and upstream.status_code == 200:
             club_id, start, end = _cache_key(request.args.to_dict())
-            store_cached(club_id, start, end, upstream.content.decode("utf-8", errors="replace"))
+            raw = upstream.content.decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict) and "reservedBookings" in parsed:
+                    rb = parsed.get("reservedBookings", []) or []
+                    parsed["reservedCount"] = len(rb)
+                    parsed["reservedBookings"] = [
+                        {
+                            "courts": b.get("courts", []),
+                            "start_datetime": b.get("start_datetime"),
+                            "end_datetime": b.get("end_datetime"),
+                        }
+                        for b in rb if isinstance(b, dict)
+                    ]
+                    raw = json.dumps(parsed)
+            except Exception:
+                pass
+            store_cached(club_id, start, end, raw)
 
         ct = upstream.headers.get("content-type", "application/json")
         resp = Response(upstream.content, status=upstream.status_code, content_type=ct)
