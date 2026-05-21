@@ -1852,7 +1852,7 @@ function renderClubInfo(profile, members, credits, extras) {
 
   // Membership plans
   const plans = (members || [])
-    .filter(p => (p.price || 0) > 0)
+    .filter(p => p.name)
     .sort((a,b) => (b.total_members || b.member_count || 0) - (a.total_members || a.member_count || 0));
   if (plans.length) {
     const mc = p => p.total_members || p.member_count || 0;
@@ -1864,11 +1864,12 @@ function renderClubInfo(profile, members, credits, extras) {
       // API returns usp_1, usp_2 ... usp_8 as individual string fields
       const uspFields = ['usp_1','usp_2','usp_3','usp_4','usp_5','usp_6','usp_7','usp_8'];
       const usps = uspFields.map(k => p[k]).filter(v => v && v.trim()).slice(0, 3);
-      const period = p.period || p.recurrence || 'month';
+      const period = p.period || p.recurrence || '';
+      const priceStr = p.price != null ? `£${esc(p.price)}` : '<span style="color:var(--text-4)">Free / partner</span>';
       h += `<div class="plan" data-mid="${esc(p._id || p.id || '')}">
         <div class="plan-name">${esc(p.name)}</div>
-        <div class="plan-price">£${esc(p.price)}</div>
-        <div class="plan-period">per ${esc(period)}</div>
+        <div class="plan-price">${priceStr}</div>
+        ${period ? `<div class="plan-period">per ${esc(period)}</div>` : ''}
         <div class="plan-members"><span class="mem-count">${mc(p) || '...'}</span> members</div>
         <div class="plan-bar"><div class="plan-bar-fill" style="width:${pct}%"></div></div>
         <div class="plan-usps">${usps.map(u => `<div class="plan-usp">${esc(String(u))}</div>`).join('')}</div>
