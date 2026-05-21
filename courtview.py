@@ -641,10 +641,12 @@ def index():
         return _forbidden()
     if not _dashboard_bytes:
         return Response(b"Dashboard not loaded.", status=503, content_type="text/plain")
-    resp = Response(_dashboard_bytes, status=200, content_type="text/html; charset=utf-8")
     if via_query:
+        resp = Response(status=302)
+        resp.headers["Location"] = "/"
         _set_cookie(resp, via_query)
-    return resp
+        return resp
+    return Response(_dashboard_bytes, status=200, content_type="text/html; charset=utf-8")
 
 
 @app.route("/<path:filename>", methods=["GET"])
