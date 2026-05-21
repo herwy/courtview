@@ -977,6 +977,80 @@ def api_club_info():
     return resp
 
 
+@app.route("/api/booked-hours", methods=["GET"])
+def api_booked_hours():
+    """Proxy /home/activity/get_booked_hours."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    start   = request.args.get("start", "")
+    end     = request.args.get("end", "")
+    if not club_id or not start or not end:
+        return jsonify({"error": "club_id, start and end required"}), 400
+    try:
+        url = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start}&end_datetime={end}"
+        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+        payload = r.content
+        ct = r.headers.get("content-type", "application/json")
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+    resp = Response(payload, status=r.status_code, content_type=ct)
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/activity-summary", methods=["GET"])
+def api_activity_summary():
+    """Fetch filtered_activities for a range and return counts grouped by type (max 5 pages)."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    start   = request.args.get("start", "")
+    end     = request.args.get("end", "")
+    if not club_id or not start or not end:
+        return jsonify({"error": "club_id, start and end required"}), 400
+
+    PAGE_SIZE = 100
+    counts: dict = {}
+    total = 0
+    skip = 0
+    try:
+        for _ in range(10):
+            url = (
+                f"{TARGET}/home/activity/filtered_activities"
+                f"?club_id={club_id}&start={start}&end={end}"
+                f"&limit={PAGE_SIZE}&skip={skip}"
+            )
+            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+            if r.status_code != 200:
+                break
+            data = r.json()
+            page = data.get("activities", [])
+            for act in page:
+                atype = act.get("activity_type") or "Other"
+                btype = act.get("booking_type") or ""
+                key = atype if atype != "Book Court" else ("Open Match" if btype == "OPEN_MATCH" else "Court Booking")
+                counts[key] = counts.get(key, 0) + 1
+                total += 1
+            if len(page) < PAGE_SIZE:
+                break
+            skip += PAGE_SIZE
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    resp = Response(
+        json.dumps({"total": total, "counts": counts}),
+        status=200,
+        content_type="application/json",
+    )
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
 @app.route("/api/day-activities", methods=["GET"])
 def api_day_activities():
     """Return all court bookings for a club+day by paginating /home/activity/filtered_activities."""

@@ -782,18 +782,14 @@ nav {
       </div>
     </div>
 
-    <section aria-labelledby="memrank-title">
-      <div class="sec-hd">
-        <h2 class="sec-title" id="memrank-title">Membership · ranked by members</h2>
-      </div>
-      <div class="stats-table-wrap">
-        <div id="memRankOut">
-          <div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>
-        </div>
-      </div>
-      <div class="stats-note">
-        These endpoints require no authentication. This is a finding from API analysis of the Padelmates mobile app.
-      </div>
+    <section aria-labelledby="stats-kpi-title" class="sec">
+      <div class="sec-hd"><h2 class="sec-title" id="stats-kpi-title">This month</h2><span class="sec-meta" id="statsMonthLbl"></span></div>
+      <div id="statsKpiOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div></div>
+    </section>
+
+    <section aria-labelledby="stats-mix-title" class="sec">
+      <div class="sec-hd"><h2 class="sec-title" id="stats-mix-title">Activity mix</h2></div>
+      <div class="card" style="padding:16px"><div id="statsMixOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div></div></div></div>
     </section>
 
     <section aria-labelledby="cp-title">
@@ -2014,11 +2010,13 @@ async function runCompare() {
   h += '<th class="num">Free at hour</th>';
   h += '<th class="num">Best 60min</th>';
   h += '<th class="num">Best 90min</th>';
+  h += '<th class="num">Revenue (mo)</th>';
   h += '<th></th>';
   h += '</tr></thead><tbody>';
   for (const club of COMPARE_CLUBS) {
     h += `<tr data-club="${club.id}">
       <td class="club-cell">${esc(club.name)}</td>
+      <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
       <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
       <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
       <td class="num"><span class="compare-loading"><span class="sp"></span></span></td>
@@ -2029,17 +2027,29 @@ async function runCompare() {
   h += '</tbody></table>';
   out.innerHTML = h;
 
-  // Fetch all clubs in parallel; per-club try/catch keeps one failure from poisoning the others
+  // Fetch availability + revenue for all clubs in parallel
+  const now = new Date();
+  const moStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const moEnd   = now.getTime();
   await Promise.all(COMPARE_CLUBS.map(async (club) => {
-    const cacheKey = `${club.id}-${dateKey}`;
-    try {
-      if (!compareCache[cacheKey]) {
-        compareCache[cacheKey] = await fetchDay(compareDate, club.id);
-      }
-    } catch (_) {
-      compareCache[cacheKey] = [];
-    }
-    updateCompareRow(club);
+    const ck = `${club.id}-${dateKey}`;
+    const rk = `rev-${club.id}-${now.getFullYear()}-${now.getMonth()}`;
+    await Promise.all([
+      (async () => {
+        try {
+          if (!compareCache[ck]) compareCache[ck] = await fetchDay(compareDate, club.id);
+        } catch (_) { compareCache[ck] = []; }
+        updateCompareRow(club);
+      })(),
+      (async () => {
+        if (compareCache[rk] !== undefined) return;
+        try {
+          const r = await apiFetch(`/api/revenue-summary?club_id=${club.id}&start=${moStart}&end=${moEnd}`);
+          const d = r.ok ? await r.json() : null;
+          compareCache[rk] = d?.total_combined_payments ?? null;
+        } catch (_) { compareCache[rk] = null; }
+      })(),
+    ]);
   }));
   renderCompareTable();
 }
@@ -2089,17 +2099,22 @@ function renderCompareTable() {
   const tbody = document.querySelector('#compareOut tbody');
   if (tbody) rows.forEach(r => tbody.appendChild(r));
 
+  const now2 = new Date();
   for (const row of rows) {
+    const clubId = row.dataset.club;
     const padel = +row.dataset.padel || 0;
     const free = +row.dataset.free || 0;
     const best60 = row.dataset.best60;
     const best90 = row.dataset.best90;
+    const rk = `rev-${clubId}-${now2.getFullYear()}-${now2.getMonth()}`;
+    const rev = compareCache[rk];
     const cells = row.querySelectorAll('td');
     cells[1].innerHTML = padel ? padel : '<span style="color:var(--text-4)">-</span>';
     if (free > 0) cells[2].innerHTML = `<span class="free-cell">${free} free</span>`;
     else cells[2].innerHTML = `<span class="free-cell none">none</span>`;
     cells[3].innerHTML = best60 ? `£${best60}` : '<span style="color:var(--text-4)">-</span>';
     cells[4].innerHTML = best90 ? `£${best90}` : '<span style="color:var(--text-4)">-</span>';
+    cells[5].innerHTML = rev != null ? fmtGBP(rev) : '<span style="color:var(--text-4)">-</span>';
   }
 }
 
@@ -2108,40 +2123,64 @@ let statsLoaded = false;
 async function loadStats() {
   if (statsLoaded) return;
   statsLoaded = true;
-  try {
-    const members = membershipCache[CLUB] || await fetchMembership().catch(() => []);
-    renderStats(members);
-  } catch (e) {
-    document.getElementById('memRankOut').innerHTML = `<div class="empty">Could not load stats: ${esc(e.message)}</div>`;
-    statsLoaded = false;
-  }
-}
+  const clubId = CLUB;
+  const now = new Date();
+  const moStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const moEnd   = now.getTime();
+  const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
+  const prevEnd   = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999).getTime();
 
-function renderStats(members) {
-  const plansOnSale = (members || []).filter(p => !p.hidden && (p.price||0) > 0);
+  document.getElementById('statsMonthLbl').textContent =
+    now.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
-  // Ranking table
-  const mCount = p => p.total_members || p.member_count || 0;
-  const ranked = [...plansOnSale].sort((a,b) => mCount(b) - mCount(a));
-  if (!ranked.length) {
-    document.getElementById('memRankOut').innerHTML = '<div class="empty">No membership data.</div>';
-    return;
+  const [curr, prev, mix] = await Promise.all([
+    apiFetch(`/api/booked-hours?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+    apiFetch(`/api/booked-hours?club_id=${clubId}&start=${prevStart}&end=${prevEnd}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+    apiFetch(`/api/activity-summary?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+  ]);
+  if (clubId !== CLUB) return;
+
+  // KPI cards
+  const kpis = [
+    { label: 'Activities this month', cur: curr?.total_activities, prev: prev?.total_activities, fmt: n => n.toLocaleString('en-GB') },
+    { label: 'Booked hours this month', cur: curr?.total_booked_hours, prev: prev?.total_booked_hours, fmt: n => n.toFixed(1) + 'h' },
+  ];
+  let kh = '<div class="rev-cards">';
+  for (const kpi of kpis) {
+    const val = kpi.cur ?? null;
+    let trend = '';
+    if (val != null && kpi.prev) {
+      const pct = ((val - kpi.prev) / kpi.prev * 100);
+      const cls = pct >= 0 ? 'up' : 'down';
+      trend = `<div class="rev-card-t ${cls}">${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% vs last month</div>`;
+    }
+    kh += `<div class="rev-card">
+      <div class="rev-card-v">${val != null ? kpi.fmt(val) : '-'}</div>
+      <div class="rev-card-l">${esc(kpi.label)}</div>${trend}
+    </div>`;
   }
-  let h = '<table class="stats-table"><thead><tr>';
-  h += '<th>Plan</th><th class="num">Members</th><th class="num">Price</th><th class="num">Period</th><th class="num">Share</th>';
-  h += '</tr></thead><tbody>';
-  for (const p of ranked) {
-    const share = totalMembers ? Math.round((mCount(p) / totalMembers) * 100) : 0;
-    h += `<tr>
-      <td>${esc(p.name)}</td>
-      <td class="num">${mCount(p).toLocaleString('en-GB')}</td>
-      <td class="num">£${esc(p.price)}</td>
-      <td class="num">${esc(p.period || p.recurrence || 'month')}</td>
-      <td class="num">${share}%</td>
-    </tr>`;
+  kh += '</div>';
+  document.getElementById('statsKpiOut').innerHTML = kh;
+
+  // Activity mix
+  if (mix && mix.total > 0) {
+    const sorted = Object.entries(mix.counts).sort((a,b) => b[1]-a[1]);
+    let mh = '';
+    for (const [type, count] of sorted) {
+      const pct = (count / mix.total * 100);
+      mh += `<div class="rev-dow-row">
+        <div class="rev-dow-day" style="width:100px;white-space:nowrap">${esc(type)}</div>
+        <div class="rev-dow-bar-track"><div class="rev-dow-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
+        <div class="rev-dow-val">${count.toLocaleString('en-GB')} <span style="color:var(--text-4)">(${pct.toFixed(0)}%)</span></div>
+      </div>`;
+    }
+    document.getElementById('statsMixOut').innerHTML = mh;
+  } else {
+    document.getElementById('statsMixOut').innerHTML = '<div class="empty">No activity data.</div>';
   }
-  h += '</tbody></table>';
-  document.getElementById('memRankOut').innerHTML = h;
 }
 
 /* COURT POPULARITY */
