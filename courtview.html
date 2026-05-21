@@ -2145,29 +2145,45 @@ async function loadStats() {
     const metaEl = document.getElementById('statsCoachMeta');
     if (metaEl) metaEl.textContent = `${coach.total_sessions || 0} sessions · ${fmtGBP(parseFloat(coach.overall_revenue || 0))} revenue`;
 
-    // Flatten all coaches across types
+    // Flatten all coaches across session types, summing hours for accurate rate/occ
     const coachMap = new Map();
     for (const type of ['group', 'private', 'course']) {
       for (const c of (coach[type]?.coach_statistics || [])) {
-        const existing = coachMap.get(c.coach_id) || { ...c, total_revenue: 0, total_sessions: 0, total_participants: 0 };
-        existing.total_revenue     += c.total_revenue || 0;
-        existing.total_sessions    += c.total_sessions || 0;
-        existing.total_participants += c.total_participants || 0;
-        coachMap.set(c.coach_id, existing);
+        const ex = coachMap.get(c.coach_id) || {
+          ...c, total_revenue: 0, total_sessions: 0,
+          total_participants: 0, total_training_hours: 0,
+        };
+        ex.total_revenue        += c.total_revenue || 0;
+        ex.total_sessions       += c.total_sessions || 0;
+        ex.total_participants   += c.total_participants || 0;
+        ex.total_training_hours += c.total_training_hours || 0;
+        coachMap.set(c.coach_id, ex);
       }
     }
-    const coaches = [...coachMap.values()].sort((a, b) => b.total_sessions - a.total_sessions);
+    const coaches = [...coachMap.values()]
+      .map(c => ({
+        ...c,
+        occupancy_rate: c.total_available_hours_for_coach
+          ? (c.total_training_hours / c.total_available_hours_for_coach * 100)
+          : (c.occupancy_rate ?? 0),
+        rate_per_hour: c.total_training_hours > 0
+          ? c.total_revenue / c.total_training_hours
+          : null,
+      }))
+      .sort((a, b) => b.occupancy_rate - a.occupancy_rate);
 
     let ch = '<div class="stats-table-wrap"><table class="stats-table"><thead><tr>';
-    ch += '<th>Coach</th><th class="num">Sessions</th><th class="num">Revenue</th><th class="num">Participants</th><th class="num">Occ. rate</th>';
+    ch += '<th>Coach</th><th class="num">Sessions</th><th class="num">Revenue</th><th class="num">Rate/hr</th><th class="num">Participants</th><th class="num">Occ. rate</th>';
     ch += '</tr></thead><tbody>';
     for (const c of coaches) {
+      const rph = c.rate_per_hour != null ? fmtGBP(c.rate_per_hour) : '-';
       ch += `<tr>
         <td>${esc(c.coach_name)}</td>
         <td class="num">${c.total_sessions}</td>
         <td class="num">${fmtGBP(c.total_revenue)}</td>
+        <td class="num">${rph}</td>
         <td class="num">${c.total_participants}</td>
-        <td class="num">${(c.occupancy_rate ?? 0).toFixed(1)}%</td>
+        <td class="num">${c.occupancy_rate.toFixed(1)}%</td>
       </tr>`;
     }
     ch += '</tbody></table></div>';
