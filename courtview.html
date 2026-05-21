@@ -1852,7 +1852,7 @@ function renderClubInfo(profile, members, credits, extras) {
 
   // Membership plans
   const plans = (members || [])
-    .filter(p => !p.hidden && (p.price || 0) > 0)
+    .filter(p => (p.price || 0) > 0)
     .sort((a,b) => (b.total_members || b.member_count || 0) - (a.total_members || a.member_count || 0));
   if (plans.length) {
     const mc = p => p.total_members || p.member_count || 0;
@@ -1878,7 +1878,7 @@ function renderClubInfo(profile, members, credits, extras) {
   }
 
   // Credit packages
-  const packs = (credits || []).filter(p => !p.hidden);
+  const packs = (credits || []).filter(p => (p.price || p.credits || p.amount));
   if (packs.length) {
     h += '<section class="sec"><div class="sec-hd"><h2 class="sec-title">Credit packages</h2></div>';
     h += '<div class="credit-grid">';
