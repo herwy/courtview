@@ -1484,9 +1484,41 @@ async function loadClubInfo() {
     await sleep(jitter(150, 350));
     const credits = await fetchCreditPackages().catch(() => []);
     out.innerHTML = renderClubInfo(profile, members, credits);
+    loadMemberCounts(CLUB);  // fan-out fills in counts + bars in place; no await
   } catch (e) {
     out.innerHTML = `<div class="empty">Could not load club info: ${esc(e.message)}</div>`;
     clubLoaded = false;
+  }
+}
+
+async function loadMemberCounts(clubId) {
+  let d;
+  try {
+    const r = await fetch(`/api/membership-members?club_id=${encodeURIComponent(clubId)}`);
+    if (!r.ok) return;
+    d = await r.json();
+  } catch (e) { return; }
+  if (!d || !d.counts) return;
+  // Guard against club switch mid-flight
+  if (clubId !== CLUB) return;
+
+  const ids    = Object.keys(d.counts);
+  const counts = ids.map(id => Number(d.counts[id]) || 0);
+  const maxC   = Math.max(1, ...counts);
+
+  for (const id of ids) {
+    if (!id) continue;
+    const escaped = (window.CSS && CSS.escape) ? CSS.escape(id) : id.replace(/"/g, '\\"');
+    const card = document.querySelector(`.plan[data-mid="${escaped}"]`);
+    if (!card) continue;
+    const c = Number(d.counts[id]) || 0;
+    const txt = card.querySelector('.mem-count');
+    if (txt) txt.textContent = c;
+    const fill = card.querySelector('.plan-bar-fill');
+    if (fill) {
+      const pct = c === 0 ? 0 : Math.max(3, Math.round((c / maxC) * 100));
+      fill.style.width = pct + '%';
+    }
   }
 }
 
@@ -1539,11 +1571,11 @@ function renderClubInfo(profile, members, credits) {
       const uspFields = ['usp_1','usp_2','usp_3','usp_4','usp_5','usp_6','usp_7','usp_8'];
       const usps = uspFields.map(k => p[k]).filter(v => v && v.trim()).slice(0, 3);
       const period = p.period || p.recurrence || 'month';
-      h += `<div class="plan">
+      h += `<div class="plan" data-mid="${esc(p._id || p.id || '')}">
         <div class="plan-name">${esc(p.name)}</div>
         <div class="plan-price">£${esc(p.price)}</div>
         <div class="plan-period">per ${esc(period)}</div>
-        <div class="plan-members">${mc(p)} members</div>
+        <div class="plan-members"><span class="mem-count">${mc(p) || '...'}</span> members</div>
         <div class="plan-bar"><div class="plan-bar-fill" style="width:${pct}%"></div></div>
         <div class="plan-usps">${usps.map(u => `<div class="plan-usp">${esc(String(u))}</div>`).join('')}</div>
       </div>`;

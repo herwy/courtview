@@ -86,6 +86,30 @@ Related unauthenticated endpoint: `/club/member/crud?club_id=X&player_id=Y` - re
 
 ---
 
+## Finding 5: /club/membership/member exposes member PII per tier with no auth
+
+**Severity:** HIGH
+
+**Endpoint:** `GET /club/membership/member?membership_id=<id>`
+
+**Auth required:** None
+
+**Discovery:** `membership_id` values are obtained from the unauthenticated `/club/membership/?club_id=X` listing (already proxied by CourtView). For any plan returned, calling `/club/membership/member?membership_id=<plan._id>` returns the full list of members on that tier, including name, email, and phone where present.
+
+**Impact:** Per-tier member rosters are enumerable for any club without authentication. Combined with Finding 1 (`/club/follower/crud`, 15,308+ records), an unauthenticated client can:
+
+1. List all clubs (`/player/player_booking/search_clubs`)
+2. Pull each club's membership plans (`/club/membership/?club_id=X`)
+3. Enumerate full member rosters per plan (`/club/membership/member?membership_id=Y`)
+
+Same severity pattern as Finding 4, but confirmed to return data (Finding 4 was 504 on full load and never fully verified). This finding documents the working PII path.
+
+**CourtView mitigation (already in place):** `/club/membership/member` is NOT in `ALLOWED_PATHS`. The new `/api/membership-members` server-side route in courtview.py fans out per-plan and returns only counts to the browser, never PII. The endpoint remains exposed at the Padelmates API itself.
+
+**Fix:** Require club manager/admin auth token on `/club/membership/member`.
+
+---
+
 ## Disclosure plan
 
 **Severity:** Critical (Finding 1 is a GDPR violation exposing tens of thousands of user records per club)
