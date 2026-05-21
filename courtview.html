@@ -675,16 +675,16 @@ nav {
       <section aria-labelledby="hm-title">
         <div class="sec-hd">
           <h2 class="sec-title" id="hm-title">Weekly Pattern</h2>
-          <span class="sec-meta">28-day avg · day of week · padel</span>
+          <span class="sec-meta" id="hmMeta">Real occupancy · past 7 days · padel</span>
         </div>
         <div class="card">
-          <div id="hmOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Fetching 4 weeks...</div></div>
+          <div id="hmOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Fetching occupancy data...</div></div>
           <div class="legend" aria-label="Heatmap legend">
-            <div class="leg"><div class="legdot" style="background:rgba(16,185,129,0.55)"></div>Very open</div>
-            <div class="leg"><div class="legdot" style="background:rgba(113,112,255,0.38)"></div>Moderate</div>
-            <div class="leg"><div class="legdot" style="background:rgba(245,158,11,0.38)"></div>Filling up</div>
-            <div class="leg"><div class="legdot" style="background:rgba(239,68,68,0.38)"></div>Busy</div>
-            <div class="leg"><div class="legdot" style="background:rgba(239,68,68,0.18)"></div>Fully booked</div>
+            <div class="leg"><div class="legdot" style="background:rgba(16,185,129,0.55)"></div>Quiet (&lt;25%)</div>
+            <div class="leg"><div class="legdot" style="background:rgba(113,112,255,0.38)"></div>Moderate (25-50%)</div>
+            <div class="leg"><div class="legdot" style="background:rgba(245,158,11,0.38)"></div>Busy (50-75%)</div>
+            <div class="leg"><div class="legdot" style="background:rgba(239,68,68,0.38)"></div>Very busy (75-99%)</div>
+            <div class="leg"><div class="legdot" style="background:rgba(239,68,68,0.18)"></div>Full (100%)</div>
           </div>
         </div>
       </section>
@@ -776,9 +776,9 @@ nav {
 <script>
 /* CONFIG */
 const CLUBS = [
-  { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer',           sub: 'North Acton, London' },
-  { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium Canary Wharf', sub: 'Canary Wharf, London' },
-  { id: '788fa2c66535421aabc60fd27f941c42',  name: 'Rocket Padel Ilford', sub: 'Ilford, London' }
+  { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer',           sub: 'North Acton, London',  courts: 11 },
+  { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium Canary Wharf', sub: 'Canary Wharf, London', courts: 7  },
+  { id: '788fa2c66535421aabc60fd27f941c42',  name: 'Rocket Padel Ilford', sub: 'Ilford, London',       courts: 12 }
 ];
 let CLUB = (localStorage.getItem('cv-club-id') && CLUBS.find(c => c.id === localStorage.getItem('cv-club-id')))
   ? localStorage.getItem('cv-club-id')
@@ -1070,71 +1070,93 @@ function renderB2B(courts, dur) {
   return h;
 }
 
-/* HEATMAP · 28-day aggregate by day of week */
-function buildDowMatrix(cache) {
-  // For each day-of-week (0=Mon..6=Sun) and hour, compute avg ratio of free courts
-  // across all cached dates that match that day-of-week.
-  const buckets = {};
-  for (let d = 0; d < 7; d++) {
-    buckets[d] = {};
-    for (const hr of HM_HRS) buckets[d][hr] = { availSum: 0, totalSum: 0, count: 0 };
-  }
-  for (const [dateStr, courts] of Object.entries(cache)) {
-    if (!courts || !courts.length) continue;
-    const dow = dayOfWeekIdx(dateStr);
-    const padel = courts.filter(c => c.sport_type === 'PADEL');
-    if (!padel.length) continue;
-    for (const hr of HM_HRS) {
-      let avail = 0;
-      for (const court of padel) {
-        const has = (court.available_slots || []).some(sl => localHour(sl.start_datetime) === hr);
-        if (has) avail++;
-      }
-      buckets[dow][hr].availSum += avail;
-      buckets[dow][hr].totalSum += padel.length;
-      buckets[dow][hr].count += 1;
-    }
-  }
-  return buckets;
+/* HEATMAP · real occupancy from get_booked_hours, past 7 days */
+
+let realHeatCache = {}; // { clubId: { dow: { hr: { sum, count } } } }
+
+function hmColor(occupancy) {
+  // occupancy: 0 = empty, 1 = fully booked
+  if (occupancy < 0.25) return 'rgba(16,185,129,0.55)';
+  if (occupancy < 0.50) return 'rgba(113,112,255,0.38)';
+  if (occupancy < 0.75) return 'rgba(245,158,11,0.38)';
+  if (occupancy < 1.00) return 'rgba(239,68,68,0.38)';
+  return 'rgba(239,68,68,0.18)';
 }
 
-function hmColor(ratio) {
-  if (ratio === 0)    return 'rgba(239,68,68,0.18)';
-  if (ratio < 0.25)  return 'rgba(239,68,68,0.38)';
-  if (ratio < 0.50)  return 'rgba(245,158,11,0.38)';
-  if (ratio < 0.75)  return 'rgba(113,112,255,0.38)';
-  return 'rgba(16,185,129,0.55)';
-}
+function renderRealHeatmap(buckets) {
+  const hasData = Object.values(buckets).some(d => Object.values(d).some(b => b.count > 0));
+  if (!hasData) return '<div class="empty">No occupancy data yet.</div>';
 
-function renderHeatmap(cache) {
-  const buckets = buildDowMatrix(cache);
-  const hasData = Object.values(buckets).some(d => Object.values(d).some(c => c.count > 0));
-  if (!hasData) return '<div class="empty">No data yet.</div>';
-
-  let h = '<div class="hm-scroll"><table class="hm-table" role="grid" aria-label="Weekly occupancy pattern across 28 days"><thead><tr>';
+  let h = '<div class="hm-scroll"><table class="hm-table" role="grid" aria-label="Real occupancy past 7 days"><thead><tr>';
   h += '<th class="rl" scope="col"></th>';
-  for (let d = 0; d < 7; d++) {
-    h += `<th scope="col">${WEEK_DAYS[d]}</th>`;
-  }
+  for (let d = 0; d < 7; d++) h += `<th scope="col">${WEEK_DAYS[d]}</th>`;
   h += '</tr></thead><tbody>';
 
   for (const hr of HM_HRS) {
     h += `<tr><th class="rl" scope="row">${hr}:00</th>`;
     for (let d = 0; d < 7; d++) {
       const b = buckets[d][hr];
-      const ratio = b.totalSum > 0 ? b.availSum / b.totalSum : 0;
-      const col = b.count ? hmColor(ratio) : 'rgba(255,255,255,0.025)';
-      const dayName = WEEK_DAYS[d];
-      const lbl = b.count ? `${dayName} ${hr}:00 - ${Math.round(ratio*100)}% courts free (avg of ${b.count} ${b.count===1?'day':'days'})` : `${dayName} ${hr}:00 - no data`;
+      const occ = b.count > 0 ? b.sum / b.count : null;
+      const col = occ !== null ? hmColor(occ) : 'rgba(255,255,255,0.025)';
+      const pct = occ !== null ? Math.round(occ * 100) : null;
+      const lbl = occ !== null
+        ? `${WEEK_DAYS[d]} ${hr}:00 - ${pct}% booked`
+        : `${WEEK_DAYS[d]} ${hr}:00 - no data`;
       h += `<td><div class="hm-cell" style="background:${col}"
         tabindex="0" role="gridcell"
-        title="${lbl}"
-        aria-label="${lbl}"></div></td>`;
+        title="${lbl}" aria-label="${lbl}"></div></td>`;
     }
     h += '</tr>';
   }
   h += '</tbody></table></div>';
   return h;
+}
+
+async function loadRealHeatmap() {
+  const clubId   = CLUB;
+  const nCourts  = clubInfo.courts || 11;
+  const hmOut    = document.getElementById('hmOut');
+
+  if (realHeatCache[clubId]) {
+    hmOut.innerHTML = renderRealHeatmap(realHeatCache[clubId]);
+    return;
+  }
+
+  // Init buckets: dow 0=Mon..6=Sun, each hour
+  const buckets = {};
+  for (let d = 0; d < 7; d++) {
+    buckets[d] = {};
+    for (const hr of HM_HRS) buckets[d][hr] = { sum: 0, count: 0 };
+  }
+
+  // Fetch past 7 days × 16 hours = 112 calls, staggered
+  for (let offset = 1; offset <= 7; offset++) {
+    const date = new Date();
+    date.setDate(date.getDate() - offset);
+    const dow = (date.getDay() + 6) % 7; // Sun=0 → Mon=0
+
+    for (const hr of HM_HRS) {
+      if (CLUB !== clubId) return; // club switched mid-fetch — abort
+
+      const dayBase = new Date(date);
+      dayBase.setHours(0, 0, 0, 0);
+      const start = dayBase.getTime() + hr * 3600000;
+      const end   = start + 3599000;
+
+      try {
+        const r  = await apiFetch(`${API}/home/activity/get_booked_hours?club_id=${clubId}&start_datetime=${start}&end_datetime=${end}`);
+        const dj = await r.json();
+        const occ = Math.min(1, (dj.total_booked_hours || 0) / nCourts);
+        buckets[dow][hr].sum   += occ;
+        buckets[dow][hr].count += 1;
+      } catch { /* skip on error */ }
+
+      await sleep(jitter(100, 180));
+    }
+  }
+
+  realHeatCache[clubId] = buckets;
+  if (CLUB === clubId) hmOut.innerHTML = renderRealHeatmap(buckets);
 }
 
 /* RECOMMENDATIONS · still based on next 7 days only */
@@ -1280,7 +1302,6 @@ async function loadMonth() {
   for (const k of Object.keys(monthCache)) {
     if (k.startsWith(prefix)) clubMonth[k.slice(prefix.length)] = monthCache[k];
   }
-  document.getElementById('hmOut').innerHTML  = renderHeatmap(clubMonth);
   document.getElementById('recOut').innerHTML = renderRecs(buildRecs(clubMonth));
 }
 
@@ -1857,7 +1878,7 @@ async function switchClub(id) {
   const clubOut = document.getElementById('clubOut');
   if (clubOut) clubOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading club info...</div>';
   // Reload availability + heatmap; other tabs lazy-load on activation
-  await Promise.all([loadDay(new Date()), loadMonth()]);
+  await Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]);
 }
 
 function setupClubSelector() {
@@ -1880,7 +1901,7 @@ setupTabs();
 buildDateTabs();
 setupNotifyPanel();
 setupClubSelector();
-Promise.all([loadDay(new Date()), loadMonth()]);
+Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]);
 setInterval(pollWatches, NOTIFY_POLL_MS);
 </script>
 </body>
