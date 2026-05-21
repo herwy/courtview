@@ -262,6 +262,8 @@ nav {
 .cell.op { background: var(--op-bg); border-color: var(--op-bd); }
 .cell.st { background: var(--st-bg); border-color: var(--st-bd); }
 .cell.pk { background: var(--pk-bg); border-color: var(--pk-bd); }
+.cell.bkd { border-color: rgba(255,255,255,0.08); cursor: pointer; }
+.cell.bkd:hover { filter: brightness(1.2); }
 .tt {
   display: none; position: absolute;
   bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
@@ -934,6 +936,26 @@ function normaliseV2(v2) {
       slot.interval_prices.push({ duration: s.duration, price: s.price });
     }
   }
+  // Build per-court bookedByCell map: cell index -> booker name
+  const courtBookings = new Map(); // courtId -> Map<cellIdx, name>
+  for (const bk of (v2.reservedBookings || [])) {
+    if (!bk || !bk.start_datetime) continue;
+    const name = (bk.title?.match(/PLAYER:\s*(.+)/i)?.[1] ||
+                  Object.values(bk.open_match?.players || {})[0]?.name || '').trim();
+    if (!name) continue;
+    const si = cellIdx(bk.start_datetime);
+    const span = (bk.end_datetime > bk.start_datetime)
+      ? Math.max(1, Math.ceil((bk.end_datetime - bk.start_datetime) / (SLOT_W * 60000)))
+      : 1;
+    for (const cid of (bk.court_ids || [])) {
+      let m = courtBookings.get(cid);
+      if (!m) { m = new Map(); courtBookings.set(cid, m); }
+      for (let k = si; k < Math.min(si + span, N_CELLS); k++) {
+        if (!m.has(k)) m.set(k, name);
+      }
+    }
+  }
+
   return Array.from(byCourt.values()).map(c => ({
     court_id:   c.court_id,
     court_name: c.court_name,
@@ -941,6 +963,7 @@ function normaliseV2(v2) {
     sport_type: c.sport_type,
     available_slots: Array.from(c.slotsByStart.values())
       .sort((a, b) => a.start_datetime - b.start_datetime),
+    bookedByCell: courtBookings.get(c.court_id) || null,
   }));
 }
 
@@ -1041,7 +1064,17 @@ function renderGrid(courts) {
           </div>
         </div>`;
       } else {
-        h += `<div class="cell" aria-label="${esc(court.name)} ${time} unavailable"></div>`;
+        const bookedBy = court.bookedByCell?.get(i);
+        if (bookedBy) {
+          h += `<div class="cell bkd" aria-label="${esc(court.name)} ${time} booked by ${esc(bookedBy)}">
+            <div class="tt" aria-hidden="true">
+              <span class="tt-t">${time} · ${esc(court.name)}</span>
+              <span class="tt-r">${esc(bookedBy)}</span>
+            </div>
+          </div>`;
+        } else {
+          h += `<div class="cell" aria-label="${esc(court.name)} ${time} unavailable"></div>`;
+        }
       }
     }
     h += '</div></div>';
