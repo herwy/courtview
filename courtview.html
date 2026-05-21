@@ -1109,7 +1109,7 @@ async function loadRealHeatmap() {
   const clubId = CLUB;
   const hmOut  = document.getElementById('hmOut');
   try {
-    const r = await apiFetch(`${API}/api/heatmap?club_id=${clubId}`);
+    const r = await fetch(`/api/heatmap?club_id=${clubId}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     if (CLUB === clubId) hmOut.innerHTML = renderRealHeatmap(d.buckets || {});
