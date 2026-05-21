@@ -2056,17 +2056,19 @@ async function loadStats() {
   document.getElementById('statsMonthLbl').textContent =
     now.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
-  const [curr, prev, mix] = await Promise.all([
+  // KPIs and activity mix are independent - render KPIs as soon as booked-hours resolves
+  const mixPromise = apiFetch(`/api/activity-summary?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
+    .then(r => r.ok ? r.json() : null).catch(() => null);
+
+  const [curr, prev] = await Promise.all([
     apiFetch(`/api/booked-hours?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
     apiFetch(`/api/booked-hours?club_id=${clubId}&start=${prevStart}&end=${prevEnd}`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
-    apiFetch(`/api/activity-summary?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
-      .then(r => r.ok ? r.json() : null).catch(() => null),
   ]);
   if (clubId !== CLUB) return;
 
-  // KPI cards
+  // KPI cards - render immediately without waiting for activity mix
   const kpis = [
     { label: 'Activities this month', cur: curr?.total_activities, prev: prev?.total_activities, fmt: n => n.toLocaleString('en-GB') },
     { label: 'Booked hours this month', cur: curr?.total_booked_hours, prev: prev?.total_booked_hours, fmt: n => n.toFixed(1) + 'h' },
@@ -2088,7 +2090,9 @@ async function loadStats() {
   kh += '</div>';
   document.getElementById('statsKpiOut').innerHTML = kh;
 
-  // Activity mix
+  // Activity mix - wait for the slower summary call
+  const mix = await mixPromise;
+  if (clubId !== CLUB) return;
   if (mix && mix.total > 0) {
     const sorted = Object.entries(mix.counts).sort((a,b) => b[1]-a[1]);
     let mh = '';

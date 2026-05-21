@@ -1013,12 +1013,12 @@ def api_activity_summary():
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
 
-    PAGE_SIZE = 100
+    PAGE_SIZE = 200
     counts: dict = {}
     total = 0
     skip = 0
     try:
-        for _ in range(10):
+        for _ in range(3):
             url = (
                 f"{TARGET}/home/activity/filtered_activities"
                 f"?club_id={club_id}&start={start}&end={end}"
