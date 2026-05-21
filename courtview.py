@@ -1063,32 +1063,54 @@ def api_activity_summary():
     PAGE_SIZE = 100
     counts: dict = {}
     total = 0
-    skip = 0
+    coach_rates: dict = {}  # coach_id -> {name, rates: [payment_per_person]}
     try:
-        for _ in range(1):
-            url = (
-                f"{TARGET}/home/activity/filtered_activities"
-                f"?club_id={club_id}&start={start}&end={end}"
-                f"&limit={PAGE_SIZE}&skip={skip}"
-            )
-            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
-            if r.status_code != 200:
-                break
-            data = r.json()
-            page = data.get("activities", [])
-            for act in page:
+        # General activity mix (1 page)
+        url = (
+            f"{TARGET}/home/activity/filtered_activities"
+            f"?club_id={club_id}&start={start}&end={end}&limit={PAGE_SIZE}"
+        )
+        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+        if r.status_code == 200:
+            for act in r.json().get("activities", []):
                 atype = act.get("activity_type") or "Other"
                 btype = act.get("booking_type") or ""
                 key = atype if atype != "Book Court" else ("Open Match" if btype == "OPEN_MATCH" else "Court Booking")
                 counts[key] = counts.get(key, 0) + 1
                 total += 1
-            if len(page) < PAGE_SIZE:
-                break
-            skip += PAGE_SIZE
+
+        # Training-specific fetch for per-coach rates (separate call, filtered)
+        t_url = (
+            f"{TARGET}/home/activity/filtered_activities"
+            f"?club_id={club_id}&start={start}&end={end}"
+            f"&activity_type=Training&limit=100"
+        )
+        rt = cffi_requests.get(t_url, headers=APP_HEADERS, timeout=15)
+        if rt.status_code == 200:
+            for act in rt.json().get("activities", []):
+                cid = act.get("coach_id")
+                if not cid:
+                    continue
+                entry = coach_rates.setdefault(cid, {"name": act.get("coach_name") or "", "rates": []})
+                ppp = act.get("payment_per_person")
+                if ppp is not None:
+                    try:
+                        entry["rates"].append(float(ppp))
+                    except (TypeError, ValueError):
+                        pass
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
-    payload = json.dumps({"total": total, "counts": counts})
+    # Summarise per-coach: avg rate, sample size
+    coach_rate_summary = {
+        cid: {
+            "avg_rate": round(sum(d["rates"]) / len(d["rates"]), 2) if d["rates"] else None,
+            "sample": len(d["rates"]),
+        }
+        for cid, d in coach_rates.items()
+    }
+
+    payload = json.dumps({"total": total, "counts": counts, "coach_rates": coach_rate_summary})
     set_stats_cached(ck, payload)
     resp = Response(payload, status=200, content_type="application/json")
     if via_query:

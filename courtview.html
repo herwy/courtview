@@ -2133,9 +2133,10 @@ async function loadStats() {
     document.getElementById('statsMixOut').innerHTML = '<div class="empty">No activity data.</div>';
   }
 
-  // Coaching section
+  // Coaching section - mix is already resolved above; coachPromise may still be in flight
   const coach = await coachPromise;
   if (clubId !== CLUB) return;
+  const coachRates = mix?.coach_rates || {};
   if (coach && (coach.group?.total_sessions || coach.private?.total_sessions || coach.course?.total_sessions)) {
     const overall = [
       { label: 'Total sessions', val: coach.total_sessions },
@@ -2166,22 +2167,22 @@ async function loadStats() {
         occupancy_rate: c.total_available_hours_for_coach
           ? (c.total_training_hours / c.total_available_hours_for_coach * 100)
           : (c.occupancy_rate ?? 0),
-        rate_per_hour: c.total_training_hours > 0
-          ? c.total_revenue / c.total_training_hours
-          : null,
       }))
       .sort((a, b) => b.occupancy_rate - a.occupancy_rate);
 
     let ch = '<div class="stats-table-wrap"><table class="stats-table"><thead><tr>';
-    ch += '<th>Coach</th><th class="num">Sessions</th><th class="num">Revenue</th><th class="num">Rate/hr</th><th class="num">Participants</th><th class="num">Occ. rate</th>';
+    ch += '<th>Coach</th><th class="num">Sessions</th><th class="num">Revenue</th><th class="num">Rate/pp</th><th class="num">Participants</th><th class="num">Occ. rate</th>';
     ch += '</tr></thead><tbody>';
     for (const c of coaches) {
-      const rph = c.rate_per_hour != null ? fmtGBP(c.rate_per_hour) : '-';
+      const cr = coachRates[c.coach_id];
+      const rpp = cr?.avg_rate != null
+        ? `${fmtGBP(cr.avg_rate)}<span style="color:var(--text-4);font-size:10px"> ×${cr.sample}</span>`
+        : '-';
       ch += `<tr>
         <td>${esc(c.coach_name)}</td>
         <td class="num">${c.total_sessions}</td>
         <td class="num">${fmtGBP(c.total_revenue)}</td>
-        <td class="num">${rph}</td>
+        <td class="num">${rpp}</td>
         <td class="num">${c.total_participants}</td>
         <td class="num">${c.occupancy_rate.toFixed(1)}%</td>
       </tr>`;
