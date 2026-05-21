@@ -1644,7 +1644,7 @@ function populateNotifyCourts(courts) {
   const padel = courts.filter(c => c.sport_type === 'PADEL');
   for (const c of padel) {
     const opt = document.createElement('option');
-    opt.value = c._id;
+    opt.value = c.court_id || c._id || '';
     opt.textContent = c.name;
     sel.appendChild(opt);
   }
@@ -1711,7 +1711,7 @@ async function pollWatches() {
     monthCache[key] = courts;
     const padel = courts.filter(c => c.sport_type === 'PADEL');
     for (const w of watches) {
-      const matchingCourts = w.courtId ? padel.filter(c => c._id === w.courtId) : padel;
+      const matchingCourts = w.courtId ? padel.filter(c => (c.court_id || c._id) === w.courtId) : padel;
       for (const court of matchingCourts) {
         for (const sl of (court.available_slots || [])) {
           if (localHour(sl.start_datetime) !== w.hour) continue;
@@ -2072,6 +2072,7 @@ let statsLoaded = false;
 async function loadStats() {
   if (statsLoaded) return;
   statsLoaded = true;
+  try {
   const clubId = CLUB;
   const now = new Date();
   const moStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
@@ -2229,6 +2230,10 @@ async function loadStats() {
   } else {
     document.getElementById('statsCoachOut').innerHTML = '<div class="empty">No coaching data this period.</div>';
   }
+  } catch (e) {
+    statsLoaded = false;  // allow retry on next tab activation
+    document.getElementById('statsKpiOut').innerHTML = `<div class="empty">Could not load stats: ${esc(e.message)}</div>`;
+  }
 }
 
 /* COURT POPULARITY */
@@ -2237,7 +2242,7 @@ function renderCourtPopularity(courts) {
     return '<div class="empty">Court popularity data building - check back shortly.</div>';
   let h = '<div class="cp-list">';
   for (const c of courts) {
-    const name = String(c.name).replace(/</g, '&lt;');
+    const name = esc(c.name);
     const pct  = Math.max(3, Number(c.pct) || 0);
     h += `<div class="cp-row">
             <div class="cp-name" title="${name}">${name}</div>
@@ -2535,6 +2540,8 @@ async function switchClub(id) {
   activeHmBuckets  = null;
   activeHourSignal = null;
   activeDowSignal  = null;
+  activitiesCache  = {};
+  compareCache     = {};
   localStorage.setItem('cv-club-id', id);
   setClubLabel();
   renderClubDrop();
