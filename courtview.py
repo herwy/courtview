@@ -399,6 +399,24 @@ def init_db() -> None:
                PRIMARY KEY (club_id, dow, hour)
            )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS heatmap_hour_signal (
+               club_id    TEXT,
+               hour       INTEGER,
+               norm       REAL,
+               fetched_at INTEGER,
+               PRIMARY KEY (club_id, hour)
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS heatmap_dow_signal (
+               club_id    TEXT,
+               dow        INTEGER,
+               norm       REAL,
+               fetched_at INTEGER,
+               PRIMARY KEY (club_id, dow)
+           )"""
+    )
     conn.commit()
     conn.close()
 
@@ -565,7 +583,7 @@ def api_heatmap():
         return jsonify({"error": str(exc)}), 500
 
     if not rows:
-        return jsonify({"club_id": club_id, "fetched_at": None, "buckets": {}}), 200
+        return jsonify({"club_id": club_id, "fetched_at": None, "buckets": {}, "hour_signal": {}, "dow_signal": {}}), 200
 
     buckets: dict = {}
     fetched_at = 0
@@ -574,8 +592,25 @@ def api_heatmap():
         if fa > fetched_at:
             fetched_at = fa
 
+    # Load raw signals
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        hour_rows = conn.execute(
+            "SELECT hour, norm FROM heatmap_hour_signal WHERE club_id=?", (club_id,)
+        ).fetchall()
+        dow_rows = conn.execute(
+            "SELECT dow, norm FROM heatmap_dow_signal WHERE club_id=?", (club_id,)
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        hour_rows, dow_rows = [], []
+
+    hour_signal = {str(h): round(n, 4) for h, n in hour_rows}
+    dow_signal  = {str(d): round(n, 4) for d, n in dow_rows}
+
     resp = Response(
-        json.dumps({"club_id": club_id, "fetched_at": fetched_at, "buckets": buckets}),
+        json.dumps({"club_id": club_id, "fetched_at": fetched_at,
+                    "buckets": buckets, "hour_signal": hour_signal, "dow_signal": dow_signal}),
         status=200, content_type="application/json",
     )
     if via_query:
@@ -820,15 +855,30 @@ def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
     now_ts = int(_now())
     try:
         conn = sqlite3.connect(DB_PATH)
+        # Product matrix
         for dow in range(7):
             dow_w = dow_counts.get(dow, 0.0) / max_dow
             for hr in HEATMAP_HOURS:
-                hr_w  = hour_counts.get(hr, 0.0) / max_hour
-                occ   = round(dow_w * hr_w, 4)
+                hr_w = hour_counts.get(hr, 0.0) / max_hour
+                occ  = round(dow_w * hr_w, 4)
                 conn.execute(
                     "INSERT OR REPLACE INTO heatmap_cache (club_id, dow, hour, avg_occ, samples, fetched_at) VALUES (?,?,?,?,?,?)",
                     (club_id, dow, hr, occ, 30, now_ts),
                 )
+        # Raw hour signal (all hours 0-23 for completeness, clipped to HEATMAP_HOURS)
+        for hr in HEATMAP_HOURS:
+            norm = round(hour_counts.get(hr, 0.0) / max_hour, 4)
+            conn.execute(
+                "INSERT OR REPLACE INTO heatmap_hour_signal (club_id, hour, norm, fetched_at) VALUES (?,?,?,?)",
+                (club_id, hr, norm, now_ts),
+            )
+        # Raw DOW signal
+        for dow in range(7):
+            norm = round(dow_counts.get(dow, 0.0) / max_dow, 4)
+            conn.execute(
+                "INSERT OR REPLACE INTO heatmap_dow_signal (club_id, dow, norm, fetched_at) VALUES (?,?,?,?)",
+                (club_id, dow, norm, now_ts),
+            )
         conn.commit()
         conn.close()
         print(f"[heatmap] stored 30-day operational data for club {club_id}")

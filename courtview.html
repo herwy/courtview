@@ -1109,8 +1109,10 @@ async function loadRealHeatmap() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     if (CLUB === clubId) {
-      hmOut.innerHTML = renderRealHeatmap(d.buckets || {});
-      activeHmBuckets = d.buckets || null;
+      hmOut.innerHTML  = renderRealHeatmap(d.buckets || {});
+      activeHmBuckets  = d.buckets      || null;
+      activeHourSignal = d.hour_signal  || null;
+      activeDowSignal  = d.dow_signal   || null;
       updateRecs();
     }
   } catch(e) {
@@ -1119,7 +1121,9 @@ async function loadRealHeatmap() {
   }
 }
 
-let activeHmBuckets = null; // set when heatmap loads, used by recs
+let activeHmBuckets  = null; // product matrix
+let activeHourSignal = null; // {hr: norm 0-1} how busy each hour vs peak
+let activeDowSignal  = null; // {dow: norm 0-1} how busy each DOW vs peak
 
 /* RECOMMENDATIONS · historical occupancy (heatmap) + upcoming price */
 
@@ -1174,8 +1178,10 @@ function buildRecs() {
     // Score: 50% quiet history, 30% price cheapness, 20% slots available this week
     const score = (1 - histOcc) * 0.5 + (1 - Math.min(avgP,100)/100) * 0.3 + Math.min(slots.length/3,1) * 0.2;
 
-    const dowName = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][dow];
-    cands.push({ dow, hr, histOcc, avgP, t, score, slots, nextSlot, dowName });
+    const dowName  = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][dow];
+    const dowPct   = activeDowSignal  ? Math.round((activeDowSignal[String(dow)]  ?? 0) * 100) : null;
+    const hourPct  = activeHourSignal ? Math.round((activeHourSignal[String(hr)]  ?? 0) * 100) : null;
+    cands.push({ dow, hr, histOcc, avgP, t, score, slots, nextSlot, dowName, dowPct, hourPct });
   }
 
   // Deduplicate: one result per DOW (keep best hour per day)
@@ -1189,18 +1195,44 @@ function buildRecs() {
 function renderRecs(recs) {
   if (!recs || !recs.length) return '<div class="empty">Loading recommendations...</div>';
   const ranks = ['Best pick','2nd','3rd','4th'];
+
+  function sigCol(pct) {
+    if (pct === null) return 'var(--text-2)';
+    if (pct < 25)  return 'var(--op-tx)';
+    if (pct < 50)  return 'var(--accent-v)';
+    if (pct < 75)  return 'var(--pk-tx)';
+    return '#ef4444';
+  }
+
   let h = '<div class="rec-list">';
   recs.forEach((r,i) => {
-    const sc  = Math.round(r.score * 100);
-    const occ = Math.round(r.histOcc * 100);
-    const occCol = r.histOcc < 0.25 ? 'var(--op-tx)' : r.histOcc < 0.50 ? 'var(--accent-v)' : r.histOcc < 0.75 ? 'var(--pk-tx)' : 'var(--text-2)';
+    const sc = Math.round(r.score * 100);
     h += `<div class="rec">
       <div class="rec-rank">${ranks[i]}</div>
       <div class="rec-time">${r.dowName}</div>
-      <div class="rec-day">${r.hr}:00</div>
-      <div class="rec-row"><span class="rec-k">Typically booked</span><span class="rec-v" style="color:${occCol}">${occ}%</span></div>
-      <div class="rec-row"><span class="rec-k">Avg 60 min</span><span class="rec-v" style="color:${tierColor(r.t)}">£${r.avgP}</span></div>
-      <div class="rec-row"><span class="rec-k">Next slot</span><span class="rec-v">${esc(r.nextSlot.dateLabel)}</span></div>
+      <div class="rec-day">${r.hr}:00</div>`;
+
+    if (r.dowPct !== null) {
+      h += `<div class="rec-row">
+        <span class="rec-k">Day busyness</span>
+        <span class="rec-v" style="color:${sigCol(r.dowPct)}">${r.dowPct}%</span>
+      </div>`;
+    }
+    if (r.hourPct !== null) {
+      h += `<div class="rec-row">
+        <span class="rec-k">Hour busyness</span>
+        <span class="rec-v" style="color:${sigCol(r.hourPct)}">${r.hourPct}%</span>
+      </div>`;
+    }
+
+    h += `<div class="rec-row">
+        <span class="rec-k">Avg 60 min</span>
+        <span class="rec-v" style="color:${tierColor(r.t)}">£${r.avgP}</span>
+      </div>
+      <div class="rec-row">
+        <span class="rec-k">Next slot</span>
+        <span class="rec-v">${esc(r.nextSlot.dateLabel)}</span>
+      </div>
       <div class="score-bar"><div class="score-fill" style="width:${sc}%"></div></div>
     </div>`;
   });
@@ -1856,7 +1888,9 @@ async function switchClub(id) {
   if (!next) return;
   CLUB = id;
   clubInfo = next;
-  activeHmBuckets = null;
+  activeHmBuckets  = null;
+  activeHourSignal = null;
+  activeDowSignal  = null;
   localStorage.setItem('cv-club-id', id);
   setClubLabel();
   renderClubDrop();
