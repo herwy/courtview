@@ -409,6 +409,11 @@ nav {
   content: '·'; position: absolute; left: 4px; top: 0;
   color: var(--accent-v); font-weight: 700;
 }
+.plan-toggle { font-size: 11px; color: var(--text-4); cursor: pointer; background: none; border: none; padding: 0; margin-top: 6px; text-align: left; }
+.plan-toggle:hover { color: var(--text-3); }
+.plan-member-list { display: none; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); max-height: 160px; overflow-y: auto; }
+.plan-member-list.open { display: block; }
+.plan-member-list .pml-row { font-size: 12px; color: var(--text-3); padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .credit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
 .credit {
@@ -1491,6 +1496,8 @@ async function loadClubInfo() {
   }
 }
 
+let membersByPlan = {};
+
 async function loadMemberCounts(clubId) {
   let d;
   try {
@@ -1499,8 +1506,9 @@ async function loadMemberCounts(clubId) {
     d = await r.json();
   } catch (e) { return; }
   if (!d || !d.counts) return;
-  // Guard against club switch mid-flight
   if (clubId !== CLUB) return;
+
+  membersByPlan = d.members || {};
 
   const ids    = Object.keys(d.counts);
   const counts = ids.map(id => Number(d.counts[id]) || 0);
@@ -1518,6 +1526,28 @@ async function loadMemberCounts(clubId) {
     if (fill) {
       const pct = c === 0 ? 0 : Math.max(3, Math.round((c / maxC) * 100));
       fill.style.width = pct + '%';
+    }
+
+    // Inject member list + toggle if not already present
+    if (c > 0 && !card.querySelector('.plan-toggle')) {
+      const names = membersByPlan[id] || [];
+      const toggle = document.createElement('button');
+      toggle.className = 'plan-toggle';
+      toggle.textContent = `Show ${c} member${c !== 1 ? 's' : ''}`;
+      const list = document.createElement('div');
+      list.className = 'plan-member-list';
+      names.forEach(m => {
+        const row = document.createElement('div');
+        row.className = 'pml-row';
+        row.textContent = m.name + (m.email ? ` · ${m.email}` : '');
+        list.appendChild(row);
+      });
+      toggle.addEventListener('click', () => {
+        const open = list.classList.toggle('open');
+        toggle.textContent = open ? `Hide members` : `Show ${c} member${c !== 1 ? 's' : ''}`;
+      });
+      card.appendChild(toggle);
+      card.appendChild(list);
     }
   }
 }

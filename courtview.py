@@ -726,14 +726,15 @@ def api_membership_members():
         return jsonify({"error": str(exc)}), 502
 
     counts: dict = {}
+    members_by_plan: dict = {}
     for plan in plans:
         pid = plan.get("_id") or plan.get("id")
         if not pid:
             continue
         pid = str(pid)
-        # Staggered requests to spread load on Padelmates backend
         time.sleep(random.uniform(0.15, 0.30))
         count = 0
+        names: list = []
         try:
             r = cffi_requests.get(
                 f"{TARGET}/club/membership/member?membership_id={pid}",
@@ -742,21 +743,28 @@ def api_membership_members():
             )
             if r.status_code == 200:
                 parsed = r.json()
+                raw_list: list = []
                 if isinstance(parsed, list):
-                    count = len(parsed)
+                    raw_list = parsed
                 elif isinstance(parsed, dict):
-                    # Try common list-shaped keys
                     for key in ("members", "results", "data", "items"):
                         val = parsed.get(key)
                         if isinstance(val, list):
-                            count = len(val)
+                            raw_list = val
                             break
+                count = len(raw_list)
+                names = sorted(
+                    [{"name": m.get("name", ""), "email": m.get("email", "")}
+                     for m in raw_list if m.get("name")],
+                    key=lambda x: x["name"].lower(),
+                )
         except Exception:
             count = 0
         counts[pid] = count
+        members_by_plan[pid] = names
 
     resp = Response(
-        json.dumps({"club_id": club_id, "counts": counts}),
+        json.dumps({"club_id": club_id, "counts": counts, "members": members_by_plan}),
         status=200,
         content_type="application/json",
     )
