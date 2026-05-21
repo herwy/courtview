@@ -515,6 +515,14 @@ nav {
   line-height: 1.55;
 }
 
+/* COURT POPULARITY */
+.cp-list { display: flex; flex-direction: column; gap: 8px; padding: 16px; }
+.cp-row { display: grid; grid-template-columns: 140px 1fr 56px; align-items: center; gap: 12px; font-size: 13px; }
+.cp-name { color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cp-bar-track { height: 8px; background: rgba(255,255,255,0.04); border-radius: 4px; overflow: hidden; }
+.cp-bar-fill { height: 100%; background: linear-gradient(90deg, #7170ff, #5b59ff); border-radius: 4px; transition: width 240ms ease; }
+.cp-count { color: var(--text-3); font-variant-numeric: tabular-nums; text-align: right; }
+
 /* LOADING / EMPTY */
 .spin-wrap { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 36px; color: var(--text-4); font-size: 12px; }
 .sp { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent-v); border-radius: 50%; animation: spin 0.6s linear infinite; }
@@ -767,6 +775,16 @@ nav {
         These endpoints require no authentication. This is a finding from API analysis of the Padelmates mobile app.
       </div>
     </section>
+
+    <section aria-labelledby="cp-title">
+      <div class="sec-hd">
+        <h2 class="sec-title" id="cp-title">Court Popularity</h2>
+        <span class="sec-meta" id="cpMeta">Per-court bookings · last 30 days</span>
+      </div>
+      <div class="card">
+        <div id="cpOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading court popularity...</div></div>
+      </div>
+    </section>
   </div>
 
 </main>
@@ -800,8 +818,7 @@ const WEEK_DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 const COMPARE_CLUBS = [
   { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer · North Acton' },
   { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium · Canary Wharf' },
-  { id: 'ec97429b51dc4e678fddb93ec02f751e', name: 'eBaTT · NW2' },
-  { id: 'd11965b0f8c24527bf36491e6c32a39f', name: 'House of Racquet' }
+  { id: '788fa2c66535421aabc60fd27f941c42', name: 'Rocket Padel · Ilford' }
 ];
 
 /* STATE */
@@ -1808,6 +1825,38 @@ function renderStats(fin, members) {
   document.getElementById('memRankOut').innerHTML = h;
 }
 
+/* COURT POPULARITY */
+function renderCourtPopularity(courts) {
+  if (!courts || !courts.length)
+    return '<div class="empty">Court popularity data building - check back shortly.</div>';
+  let h = '<div class="cp-list">';
+  for (const c of courts) {
+    const name = String(c.name).replace(/</g, '&lt;');
+    const pct  = Math.max(3, Number(c.pct) || 0);
+    h += `<div class="cp-row">
+            <div class="cp-name" title="${name}">${name}</div>
+            <div class="cp-bar-track"><div class="cp-bar-fill" style="width:${pct}%"></div></div>
+            <div class="cp-count">${c.count}</div>
+          </div>`;
+  }
+  h += '</div>';
+  return h;
+}
+
+async function loadCourtPopularity() {
+  const clubId = CLUB;
+  const out = document.getElementById('cpOut');
+  if (!out) return;
+  try {
+    const r = await fetch(`/api/court-popularity?club_id=${clubId}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if (CLUB === clubId) out.innerHTML = renderCourtPopularity(d.courts || []);
+  } catch (e) {
+    if (CLUB === clubId) out.innerHTML = `<div class="empty">Court popularity unavailable.</div>`;
+  }
+}
+
 /* TAB SWITCHING */
 function setupTabs() {
   const tabs = [...document.querySelectorAll('.tnav-btn')];
@@ -1825,7 +1874,7 @@ function setupTabs() {
     });
     if (tabName === 'club')    loadClubInfo();
     if (tabName === 'compare') loadCompare();
-    if (tabName === 'stats')   loadStats();
+    if (tabName === 'stats')   { loadStats(); loadCourtPopularity(); }
   }
 
   tabs.forEach((t) => {
@@ -1899,8 +1948,14 @@ async function switchClub(id) {
   clubLoaded = false;
   const clubOut = document.getElementById('clubOut');
   if (clubOut) clubOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading club info...</div>';
+  // Reset stats tab so it re-fetches on next activation
+  statsLoaded = false;
+  const cpOut = document.getElementById('cpOut');
+  if (cpOut) cpOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading court popularity...</div>';
   // Reload availability + heatmap; other tabs lazy-load on activation
   await Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]);
+  // If Stats tab is currently active, reload its data immediately
+  if (activeTab === 'stats') { loadStats(); loadCourtPopularity(); }
 }
 
 function setupClubSelector() {

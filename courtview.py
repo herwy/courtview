@@ -417,6 +417,15 @@ def init_db() -> None:
                PRIMARY KEY (club_id, dow)
            )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS court_popularity (
+               club_id    TEXT,
+               court_name TEXT,
+               count      INTEGER,
+               fetched_at INTEGER,
+               PRIMARY KEY (club_id, court_name)
+           )"""
+    )
     conn.commit()
     conn.close()
 
@@ -611,6 +620,43 @@ def api_heatmap():
     resp = Response(
         json.dumps({"club_id": club_id, "fetched_at": fetched_at,
                     "buckets": buckets, "hour_signal": hour_signal, "dow_signal": dow_signal}),
+        status=200, content_type="application/json",
+    )
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/court-popularity", methods=["GET"])
+def api_court_popularity():
+    """Per-court booking counts for a club, sorted desc with pct of max."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    if not club_id:
+        return jsonify({"error": "club_id required"}), 400
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT court_name, count, fetched_at FROM court_popularity WHERE club_id=? ORDER BY count DESC",
+            (club_id,),
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    if not rows:
+        return jsonify({"club_id": club_id, "fetched_at": None, "courts": []}), 200
+
+    max_count = max((r[1] for r in rows), default=0) or 1
+    fetched_at = max((r[2] for r in rows), default=0)
+    courts = [
+        {"name": name, "count": int(count), "pct": round(count / max_count * 100, 1)}
+        for name, count, _ in rows
+    ]
+    resp = Response(
+        json.dumps({"club_id": club_id, "fetched_at": fetched_at, "courts": courts}),
         status=200, content_type="application/json",
     )
     if via_query:
@@ -851,6 +897,18 @@ def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
                 pass
     max_dow = max(dow_counts.values()) if dow_counts else 1.0
 
+    # --- Per-court booking counts from court_wise_activity_count_combined_graph ---
+    court_rows: list = []
+    for entry in data.get("court_wise_activity_count_combined_graph", []):
+        name = entry.get("x")
+        if not name:
+            continue
+        try:
+            count = int(float(entry.get("y") or 0))
+        except (TypeError, ValueError):
+            continue
+        court_rows.append((str(name), count))
+
     # --- Build DOW x hour occupancy matrix (product of normalised signals) ---
     now_ts = int(_now())
     try:
@@ -879,9 +937,16 @@ def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
                 "INSERT OR REPLACE INTO heatmap_dow_signal (club_id, dow, norm, fetched_at) VALUES (?,?,?,?)",
                 (club_id, dow, norm, now_ts),
             )
+        # Court popularity - wipe-and-replace so renamed/removed courts disappear
+        conn.execute("DELETE FROM court_popularity WHERE club_id=?", (club_id,))
+        for name, count in court_rows:
+            conn.execute(
+                "INSERT OR REPLACE INTO court_popularity (club_id, court_name, count, fetched_at) VALUES (?,?,?,?)",
+                (club_id, name, count, now_ts),
+            )
         conn.commit()
         conn.close()
-        print(f"[heatmap] stored 30-day operational data for club {club_id}")
+        print(f"[heatmap] stored 30-day operational data for club {club_id} ({len(court_rows)} courts)")
     except sqlite3.Error as exc:
         print(f"[heatmap] db write error: {exc}")
 
