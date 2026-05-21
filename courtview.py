@@ -484,7 +484,7 @@ def init_db() -> None:
         conn.close()
 
 
-STATS_CACHE_TTL = 3600  # 1 hour
+STATS_CACHE_TTL = 21600  # 6 hours
 
 def get_stats_cached(key: str) -> str | None:
     cutoff = int(_now()) - STATS_CACHE_TTL
@@ -1065,7 +1065,7 @@ def api_activity_summary():
     total = 0
     skip = 0
     try:
-        for _ in range(3):
+        for _ in range(1):
             url = (
                 f"{TARGET}/home/activity/filtered_activities"
                 f"?club_id={club_id}&start={start}&end={end}"
