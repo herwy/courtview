@@ -2119,14 +2119,6 @@ async function loadStats() {
 
 function renderStats(members) {
   const plansOnSale = (members || []).filter(p => !p.hidden && (p.price||0) > 0);
-  const totalMembers = plansOnSale.reduce((s,p) => s + (p.total_members || p.member_count || 0), 0);
-  const avgPrice = plansOnSale.length
-    ? Math.round(plansOnSale.reduce((s,p) => s + (p.price||0), 0) / plansOnSale.length)
-    : 0;
-
-  document.getElementById('statMembers').textContent = totalMembers.toLocaleString('en-GB');
-  document.getElementById('statPlans').textContent   = plansOnSale.length;
-  document.getElementById('statAvg').textContent     = avgPrice ? `£${avgPrice}` : '-';
 
   // Ranking table
   const mCount = p => p.total_members || p.member_count || 0;
