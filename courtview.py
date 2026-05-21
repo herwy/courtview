@@ -3,7 +3,7 @@
 courtview.py - Padelmates API proxy server for RPi.
 
 Serves the Racketeer dashboard HTML at / and proxies allowed Padelmates API
-paths at /api/* using an iOS Safari TLS fingerprint. Includes token auth,
+paths at /api/* using Android OkHttp headers. Includes token auth,
 per-IP rate limiting, SQLite availability cache, and a 6-hour refresh thread.
 
 Run: python3 courtview.py
@@ -33,17 +33,17 @@ from curl_cffi import requests as cffi_requests
 TARGET      = "https://fastapi-production-fargate.padelmates.io"
 APP_VERSION = "8.5.9"
 BUILD       = "1031"
-IOS_UA      = f"com.padelmates/{APP_VERSION} CFNetwork/1568.300.101 Darwin/25.5.0"
-# No TLS impersonation - URLSession apps don't send Sec-Fetch-* browser headers
+ANDROID_UA  = f"com.padelmates/{APP_VERSION} (Linux; Android 14) OkHttp/4.9.0"
+# Headers derived from Android APK analysis (reverse-engineered via jadx)
 
 APP_HEADERS = {
-    "User-Agent":           IOS_UA,
+    "User-Agent":           ANDROID_UA,
     "Accept":               "application/json",
     "Accept-Language":      "en-GB,en;q=0.9",
-    "Accept-Encoding":      "gzip, deflate, br",
+    "Accept-Encoding":      "gzip, deflate",
     "X-Client-App-Version": APP_VERSION,
     "X-Build-Number":       BUILD,
-    "X-Platform":           "ios",
+    "X-Platform":           "android",
 }
 
 # Endpoints allowed to proxy - whitelist prevents open proxy abuse
@@ -1031,8 +1031,8 @@ def _startup() -> None:
     _STARTUP_DONE = True
 
     print(f"[startup] courtview on 0.0.0.0:8766")
-    print(f"[startup] TLS profile : none (raw URLSession headers)")
-    print(f"[startup] User-Agent  : {IOS_UA}")
+    print(f"[startup] UA profile  : Android OkHttp (from APK analysis)")
+    print(f"[startup] User-Agent  : {ANDROID_UA}")
     print(f"[startup] DB path     : {DB_PATH}")
 
     init_db()
