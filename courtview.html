@@ -2136,9 +2136,10 @@ async function loadStats() {
     document.getElementById('statsMixOut').innerHTML = '<div class="empty">No activity data.</div>';
   }
 
-  // Coaching section - mix is already resolved above; coachPromise may still be in flight
+  // Coaching renders as soon as coach-stats resolves - no longer blocks on activity-mix
   const coach = await coachPromise;
   if (clubId !== CLUB) return;
+  // mix may or may not be resolved yet - use what we have, patch rates in after
   const coachRates = mix?.coach_rates || {};
   if (coach && (coach.group?.total_sessions || coach.private?.total_sessions || coach.course?.total_sessions)) {
     const overall = [
@@ -2197,6 +2198,19 @@ async function loadStats() {
       btn.addEventListener('click', () => {
         const bioRow = document.getElementById('bio-' + btn.dataset.cid);
         if (bioRow) bioRow.hidden = !bioRow.hidden;
+      });
+    });
+
+    // If mix hadn't resolved yet when coaching rendered, patch rate/pp cells now
+    mixPromise.then(lateMix => {
+      if (!lateMix?.coach_rates) return;
+      document.querySelectorAll('#coachTable tbody tr[data-coach-id]').forEach(row => {
+        const cid = row.dataset.coachId;
+        const cr = lateMix.coach_rates[cid];
+        if (cr?.avg_rate != null) {
+          const cells = row.querySelectorAll('td');
+          if (cells[3]) cells[3].textContent = fmtGBP(cr.avg_rate);
+        }
       });
     });
 

@@ -1064,14 +1064,24 @@ def api_activity_summary():
     PAGE_SIZE = 100
     counts: dict = {}
     total = 0
-    coach_rates: dict = {}  # coach_id -> {name, rates: [payment_per_person]}
+    coach_rates: dict = {}
+    def _fetch_mix():
+        url = (f"{TARGET}/home/activity/filtered_activities"
+               f"?club_id={club_id}&start={start}&end={end}&limit={PAGE_SIZE}")
+        return cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+
+    def _fetch_training():
+        url = (f"{TARGET}/home/activity/filtered_activities"
+               f"?club_id={club_id}&start={start}&end={end}&activity_type=Training&limit=100")
+        return cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+
     try:
-        # General activity mix (1 page)
-        url = (
-            f"{TARGET}/home/activity/filtered_activities"
-            f"?club_id={club_id}&start={start}&end={end}&limit={PAGE_SIZE}"
-        )
-        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            f_mix = ex.submit(_fetch_mix)
+            f_train = ex.submit(_fetch_training)
+            r  = f_mix.result()
+            rt = f_train.result()
+
         if r.status_code == 200:
             for act in r.json().get("activities", []):
                 atype = act.get("activity_type") or "Other"
@@ -1080,13 +1090,6 @@ def api_activity_summary():
                 counts[key] = counts.get(key, 0) + 1
                 total += 1
 
-        # Training-specific fetch for per-coach rates (separate call, filtered)
-        t_url = (
-            f"{TARGET}/home/activity/filtered_activities"
-            f"?club_id={club_id}&start={start}&end={end}"
-            f"&activity_type=Training&limit=100"
-        )
-        rt = cffi_requests.get(t_url, headers=APP_HEADERS, timeout=15)
         if rt.status_code == 200:
             for act in rt.json().get("activities", []):
                 cid = act.get("coach_id")
