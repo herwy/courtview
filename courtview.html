@@ -2060,12 +2060,24 @@ async function runCompare() {
         try {
           if (!compareCache[ck]) {
             if (isTPCClub(club.id)) {
-              let data = monthCache[cacheKey(club.id, dateKey)];
-              if (!data || data.length === 0) {
-                for (let i = 1; i <= 14; i++) {
+              const scanMonthCache = (id) => {
+                for (let i = 0; i <= 14; i++) {
                   const d = new Date(compareDate); d.setDate(d.getDate() + i);
-                  const candidate = monthCache[cacheKey(club.id, isoDate(d))];
-                  if (candidate && candidate.length > 0) { data = candidate; break; }
+                  const c = monthCache[cacheKey(id, isoDate(d))];
+                  if (c && c.length > 0) return c;
+                }
+                return null;
+              };
+              let data = scanMonthCache(club.id);
+              if (!data) {
+                // monthCache not yet populated — fetch directly and populate
+                const r = await fetch(`/api/month?club_id=${encodeURIComponent(club.id)}`);
+                if (r.ok) {
+                  const m = await r.json();
+                  for (const [ds, courts] of Object.entries(m.days || {})) {
+                    if (courts !== null) monthCache[cacheKey(club.id, ds)] = normaliseV2(courts);
+                  }
+                  data = scanMonthCache(club.id);
                 }
               }
               compareCache[ck] = data || [];
