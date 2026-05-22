@@ -2694,17 +2694,17 @@ setInterval(pollWatches, NOTIFY_POLL_MS);
     _activeCell = cell;
     const tt = cell.querySelector('.tt');
     if (!tt) return;
+    tt.style.top = '-9999px';
+    tt.style.left = '-9999px';
     tt.style.display = 'block';
-    requestAnimationFrame(function() {
-      const cr = cell.getBoundingClientRect();
-      const tr = tt.getBoundingClientRect();
-      let top = cr.top - tr.height - 6;
-      let left = cr.left + cr.width / 2 - tr.width / 2;
-      left = Math.max(8, Math.min(left, window.innerWidth - tr.width - 8));
-      if (top < 8) top = cr.bottom + 6;
-      tt.style.top = top + 'px';
-      tt.style.left = left + 'px';
-    });
+    const cr = cell.getBoundingClientRect();
+    const tr = tt.getBoundingClientRect();
+    let top = cr.top - tr.height - 6;
+    let left = cr.left + cr.width / 2 - tr.width / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - tr.width - 8));
+    if (top < 8) top = cr.bottom + 6;
+    tt.style.top = top + 'px';
+    tt.style.left = left + 'px';
   });
   document.addEventListener('mouseout', function(e) {
     const cell = e.target.closest('.cell');
