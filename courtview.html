@@ -847,7 +847,8 @@ nav {
 const CLUBS = [
   { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer',           sub: 'North Acton, London',  courts: 11 },
   { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium Canary Wharf', sub: 'Canary Wharf, London', courts: 7  },
-  { id: '788fa2c66535421aabc60fd27f941c42',  name: 'Rocket Padel Ilford', sub: 'Ilford, London',       courts: 12 }
+  { id: '788fa2c66535421aabc60fd27f941c42',  name: 'Rocket Padel Ilford', sub: 'Ilford, London',       courts: 12 },
+  { id: 'stratfordpadelclub',               name: 'Stratford Padel Club', sub: 'Stratford, London',   courts: 9,  platform: 'tpc' }
 ];
 let CLUB = (localStorage.getItem('cv-club-id') && CLUBS.find(c => c.id === localStorage.getItem('cv-club-id')))
   ? localStorage.getItem('cv-club-id')
@@ -871,8 +872,11 @@ const WEEK_DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 const COMPARE_CLUBS = [
   { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer · North Acton' },
   { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium · Canary Wharf' },
-  { id: '788fa2c66535421aabc60fd27f941c42', name: 'Rocket Padel · Ilford' }
+  { id: '788fa2c66535421aabc60fd27f941c42', name: 'Rocket Padel · Ilford' },
+  { id: 'stratfordpadelclub',               name: 'Stratford Padel · Stratford' }
 ];
+
+function isTPCClub(id) { return id === 'stratfordpadelclub'; }
 
 /* STATE */
 let dayData     = null;
@@ -2130,11 +2134,23 @@ async function loadStats() {
   document.getElementById('statsMonthLbl').textContent =
     now.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
+  // For TPC clubs, activity mix and coach stats are not available
+  if (isTPCClub(clubId)) {
+    document.getElementById('statsMixOut').innerHTML =
+      '<div class="empty">Activity mix not available for this club.</div>';
+    document.getElementById('statsCoachOut').innerHTML =
+      '<div class="empty">Coach stats not available for this club.</div>';
+  }
+
   // Fire all three slow fetches in parallel; render each section as it arrives
-  const mixPromise   = apiFetch(`/api/activity-summary?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
-    .then(r => r.ok ? r.json() : null).catch(() => null);
-  const coachPromise = apiFetch(`/api/coach-stats?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
-    .then(r => r.ok ? r.json() : null).catch(() => null);
+  const mixPromise   = isTPCClub(clubId)
+    ? Promise.resolve(null)
+    : apiFetch(`/api/activity-summary?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
+        .then(r => r.ok ? r.json() : null).catch(() => null);
+  const coachPromise = isTPCClub(clubId)
+    ? Promise.resolve(null)
+    : apiFetch(`/api/coach-stats?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
+        .then(r => r.ok ? r.json() : null).catch(() => null);
 
   const [curr, prev] = await Promise.all([
     apiFetch(`/api/booked-hours?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
