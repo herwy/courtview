@@ -1075,30 +1075,7 @@ function attachBookedByCell(courts, reservedBookings) {
   return courts.map(c => ({ ...c, bookedByCell: courtBookings.get(c.court_id) || null }));
 }
 
-async function fetchClubProfile() {
-  const r = await apiFetch(`${API}/club/?club_id=${CLUB}`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
-async function fetchMembership() {
-  const r = await apiFetch(`${API}/club/membership/?club_id=${CLUB}`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const data = await r.json();
-  return Array.isArray(data) ? data : (data.memberships || []);
-}
-async function fetchCreditPackages() {
-  const r = await apiFetch(`${API}/club/creditpackage/?club_id=${CLUB}`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
-async function fetchFinancialStats() {
-  const now = Date.now();
-  const start = now - (30 * 24 * 60 * 60 * 1000);
-  const url = `${API}/club/statistics/financial?club_id=${CLUB}&selected_duration=month&start_time=${start}&end_time=${now}&user_timezone=Europe/London`;
-  const r = await apiFetch(url);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
+
 
 /* PRICE HELPERS */
 const p60  = s => s.interval_prices?.find(x=>x.duration===60)?.price  ?? 0;
