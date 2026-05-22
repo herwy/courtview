@@ -2618,15 +2618,27 @@ async function switchClub(id) {
   if (mixOut) mixOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div></div>';
   const coachOut = document.getElementById('statsCoachOut');
   if (coachOut) coachOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
-  // Reset revenue + compare tabs so they re-fetch for the new club
+  // Clear booking grid immediately so old club's data doesn't linger
+  document.getElementById('gridOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+  document.getElementById('b2bOut').innerHTML = '';
+  // Clear revenue tab immediately
   revLoaded = false;
   compareLoaded = false;
+  const revSummaryOut = document.getElementById('revSummaryOut');
+  if (revSummaryOut) revSummaryOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+  const revPayOut2 = document.getElementById('revPayOut');
+  if (revPayOut2) revPayOut2.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+  const revLMW = document.getElementById('revLoadMoreWrap');
+  if (revLMW) revLMW.hidden = true;
+  const revDowOut = document.getElementById('revDowOut');
+  if (revDowOut) revDowOut.innerHTML = '';
+  const revSubOut = document.getElementById('revSubOut');
+  if (revSubOut) revSubOut.innerHTML = '';
   // Reload availability + heatmap; then pre-load all other tabs in background
   await Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]);
-  loadStats(); loadCourtPopularity();
+  loadStats(); loadCourtPopularity(); loadRevenue();
   setTimeout(() => { if (!clubLoaded) loadClubInfo(); }, 200);
   setTimeout(() => { if (!compareLoaded) loadCompare(); }, 300);
-  setTimeout(() => { if (!revLoaded) loadRevenue(); }, 2000);
 }
 
 function setupClubSelector() {
