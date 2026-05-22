@@ -19,6 +19,7 @@ last_updated: "2026-05-23T00:33:00Z"
 | 7 | Fix CLAUDE.md: http://lab.doxx -> https://labs.doxx, remove incorrect Bitwarden token reference | 2026-05-23 | 56ee4be | inline |
 | 8 | Fix Compare tab timing race: fetch /api/month directly for TPC if monthCache not yet populated | 2026-05-23 | 75bdb87 | inline |
 | 9 | Remove dead code: fetchClubProfile, fetchMembership, fetchCreditPackages, fetchFinancialStats | 2026-05-23 | ebce753 | inline |
+| 10 | Fix stale statsCoachMeta on club switch + booked-hours null for TPC + CLAUDE.md Stratford entry | 2026-05-23 | 6d959b3 | inline |
 
 ## Session Continuity
 
