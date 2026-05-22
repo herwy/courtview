@@ -1135,23 +1135,26 @@ def api_activity_summary():
 
 
 def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
-    """Fetch and aggregate activity summary from upstream. Returns payload str or error tuple."""
+    """Fetch and aggregate activity summary from upstream. Returns payload str or error tuple.
+    Falls back to a 14-day window if the full range times out (large clubs like Rocket)."""
     PAGE_SIZE = 100
-    counts: dict = {}
-    total = 0
-    coach_rates: dict = {}
+    FALLBACK_MS = 14 * 24 * 60 * 60 * 1000
 
-    def _fetch_mix():
-        url = (f"{TARGET}/home/activity/filtered_activities"
-               f"?club_id={club_id}&start={start}&end={end}&limit={PAGE_SIZE}")
-        return cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+    def _attempt(s: str, e: str):
+        counts: dict = {}
+        total = 0
+        coach_rates: dict = {}
 
-    def _fetch_training():
-        url = (f"{TARGET}/home/activity/filtered_activities"
-               f"?club_id={club_id}&start={start}&end={end}&activity_type=Training&limit=100")
-        return cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+        def _fetch_mix():
+            url = (f"{TARGET}/home/activity/filtered_activities"
+                   f"?club_id={club_id}&start={s}&end={e}&limit={PAGE_SIZE}")
+            return cffi_requests.get(url, headers=APP_HEADERS, timeout=12)
 
-    try:
+        def _fetch_training():
+            url = (f"{TARGET}/home/activity/filtered_activities"
+                   f"?club_id={club_id}&start={s}&end={e}&activity_type=Training&limit=100")
+            return cffi_requests.get(url, headers=APP_HEADERS, timeout=12)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             f_mix = ex.submit(_fetch_mix)
             f_train = ex.submit(_fetch_training)
@@ -1178,8 +1181,20 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
                         entry["rates"].append(float(ppp))
                     except (TypeError, ValueError):
                         pass
-    except Exception as exc:
-        return (jsonify({"error": str(exc)}), 502)
+
+        return counts, total, coach_rates
+
+    used_start = start
+    try:
+        counts, total, coach_rates = _attempt(start, end)
+    except Exception:
+        # Full range timed out - retry with last 14 days
+        fallback_start = str(int(end) - FALLBACK_MS)
+        try:
+            counts, total, coach_rates = _attempt(fallback_start, end)
+            used_start = fallback_start
+        except Exception as exc:
+            return (jsonify({"error": str(exc)}), 502)
 
     coach_rate_summary = {
         cid: {
@@ -1189,7 +1204,8 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
         for cid, d in coach_rates.items()
     }
 
-    payload = json.dumps({"total": total, "counts": counts, "coach_rates": coach_rate_summary})
+    range_days = round((int(end) - int(used_start)) / (24 * 60 * 60 * 1000))
+    payload = json.dumps({"total": total, "counts": counts, "coach_rates": coach_rate_summary, "range_days": range_days})
     if ck:
         set_stats_cached(ck, payload)
     return payload

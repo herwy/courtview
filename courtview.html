@@ -2171,7 +2171,10 @@ async function loadStats() {
   if (clubId !== CLUB) return;
   if (mix && mix.total > 0) {
     const metaMix = document.getElementById('statsMixMeta');
-    if (metaMix) metaMix.textContent = now.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: TZ }) + ' · ' + mix.total + ' sampled';
+    const mixPeriod = mix.range_days && mix.range_days < 20
+      ? `Last ${mix.range_days} days`
+      : now.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: TZ });
+    if (metaMix) metaMix.textContent = mixPeriod + ' · ' + mix.total + ' sampled';
     const sorted = Object.entries(mix.counts).sort((a,b) => b[1]-a[1]);
     let mh = '';
     for (const [type, count] of sorted) {
@@ -2616,6 +2619,8 @@ async function switchClub(id) {
   if (kpiOut) kpiOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
   const mixOut = document.getElementById('statsMixOut');
   if (mixOut) mixOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div></div>';
+  const mixMeta = document.getElementById('statsMixMeta');
+  if (mixMeta) mixMeta.textContent = '';
   const coachOut = document.getElementById('statsCoachOut');
   if (coachOut) coachOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
   // Clear booking grid immediately so old club's data doesn't linger
