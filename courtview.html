@@ -2324,7 +2324,6 @@ async function loadCourtPopularity() {
 let revMonth = new Date();
 revMonth.setDate(1);
 let revLoaded = false;
-let revPaySkip = 0;
 let revPayWindowEnd = new Date();
 let revPayWindowStart = new Date(revPayWindowEnd);
 revPayWindowStart.setHours(0, 0, 0, 0);
@@ -2354,7 +2353,6 @@ async function loadRevenue(resetPay = true) {
     && revMonth.getFullYear() === new Date().getFullYear();
 
   if (resetPay) {
-    revPaySkip = 0;
     revPayWindowEnd = new Date();
     revPayWindowStart = new Date(revPayWindowEnd);
     revPayWindowStart.setHours(0, 0, 0, 0);
@@ -2444,10 +2442,7 @@ function renderPayments(data, reset) {
   }
   const payments = (data.payments || []).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   revPayHasMore = data.has_more;
-  if (reset) { revPaySkip = payments.length; } else { revPaySkip += payments.length; }
-
   const metaEl = document.getElementById('revPayMeta');
-  if (metaEl) metaEl.textContent = payments.length || !reset ? `${revPaySkip} loaded` : '';
 
   if (reset) {
     if (!payments.length) {
@@ -2468,7 +2463,10 @@ function renderPayments(data, reset) {
   }
 
   document.getElementById('revLoadMoreWrap').hidden = !revPayHasMore;
-  if (metaEl) metaEl.textContent = `${revPaySkip} loaded`;
+  if (metaEl) {
+    const rowCount = document.getElementById('revPayBody')?.querySelectorAll('tr').length ?? payments.length;
+    metaEl.textContent = `${rowCount} loaded`;
+  }
 }
 
 function payRow(p) {
