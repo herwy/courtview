@@ -1793,8 +1793,9 @@ async function loadClubInfo() {
       : (membershipsRaw && Array.isArray(membershipsRaw.memberships) ? membershipsRaw.memberships : []);
     const credits = data.credits || [];
     const extras = Array.isArray(data.extras) ? data.extras : [];
+    const activities = Array.isArray(data.activities) ? data.activities : [];
     membershipCache[CLUB] = memberships;
-    out.innerHTML = renderClubInfo(profile, memberships, credits, extras);
+    out.innerHTML = renderClubInfo(profile, memberships, credits, extras, activities);
     loadMemberCounts(CLUB);  // fan-out fills in counts + bars in place; no await
   } catch (e) {
     out.innerHTML = `<div class="empty">Could not load club info: ${esc(e.message)}</div>`;
@@ -1858,7 +1859,7 @@ async function loadMemberCounts(clubId) {
   }
 }
 
-function renderClubInfo(profile, members, credits, extras) {
+function renderClubInfo(profile, members, credits, extras, activities) {
   const c = profile || {};
   let h = '';
 
@@ -1951,7 +1952,28 @@ function renderClubInfo(profile, members, credits, extras) {
     h += '</div></section>';
   }
 
-  if (!plans.length && !packs.length && !hours && !extrasList.length) {
+  // Activities & Programs
+  const actList = Array.isArray(activities) ? activities : [];
+  if (actList.length) {
+    const groupMap = new Map();
+    for (const a of actList) {
+      const gname = a.group_name || 'Other';
+      if (!groupMap.has(gname)) groupMap.set(gname, []);
+      groupMap.get(gname).push(a);
+    }
+    h += '<section class="sec"><div class="sec-hd"><h2 class="sec-title">Activities &amp; Programs</h2><span class="sec-meta">' + actList.length + ' activities</span></div>';
+    for (const [gname, gacts] of groupMap) {
+      h += `<div class="sec-hd" style="margin-top:8px"><h2 class="sec-title" style="font-size:13px;opacity:0.8">${esc(gname)}</h2><span class="sec-meta">${gacts.length} ${gacts.length === 1 ? 'activity' : 'activities'}</span></div>`;
+      h += '<ul class="activity-list" style="list-style:none;padding:0;margin:0 0 12px 0">';
+      for (const a of gacts) {
+        h += `<li class="activity-item" style="padding:4px 0;font-size:13px;color:var(--text-2,#ccc)">${esc(a.name)}</li>`;
+      }
+      h += '</ul>';
+    }
+    h += '</section>';
+  }
+
+  if (!plans.length && !packs.length && !hours && !extrasList.length && !actList.length) {
     h += '<div class="empty">No additional club info available.</div>';
   }
   return h;

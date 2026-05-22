@@ -861,19 +861,105 @@ def _fetch_tpc_heatmap() -> None:
 
 
 def _api_club_info_tpc(club_id: str, via_query: str) -> Response:
-    """Return static club info for Stratford Padel Club (TPC platform)."""
+    """Fetch live club info for Stratford Padel Club from the TPC Matchpoint API."""
+    GROUP_NAMES = {
+        1:  "Group Training",
+        2:  "Private Classes",
+        3:  "SPC Tournament",
+        4:  "Social / Community",
+        6:  "Competitive Training",
+        8:  "Kids Programs",
+        12: "Starter / Taster Sessions",
+        19: "Physiotherapy & Wellness",
+    }
+
+    _FALLBACK_PROFILE = {
+        "name":        "Stratford Padel Club",
+        "address":     "Stratford, London",
+        "phone":       "00447365809000",
+        "email":       "info@stratfordpadelclub.org",
+        "sport_types": ["PADEL"],
+    }
+
+    # --- Fetch club profile ---
+    try:
+        info_resp = _tpc_post(
+            "/services/mobi/appservices/v1/club.svc/ObtenerInformacionCentro",
+            {"idCentro": TPC_CENTRO_ID},
+        )
+        resp_data = info_resp.get("Respuesta", {})
+        if not resp_data:
+            raise ValueError("empty Respuesta")
+
+        horario = resp_data.get("Horario", "08:00-23:00") or "08:00-23:00"
+        try:
+            open_t, close_t = horario.split("-", 1)
+            open_t = open_t.strip()
+            close_t = close_t.strip()
+            if len(open_t) != 5 or len(close_t) != 5:
+                raise ValueError("bad format")
+        except Exception:
+            open_t, close_t = "08:00", "23:00"
+        opening_hours = [{"open": open_t, "close": close_t} for _ in range(7)]
+
+        facilities = [
+            p.get("Texto", "")
+            for p in (resp_data.get("PastillasInformacionInfoGeneral") or [])
+            if p.get("Texto")
+        ]
+
+        profile = {
+            "name":          resp_data.get("Nombre", _FALLBACK_PROFILE["name"]),
+            "address":       resp_data.get("Direccion", _FALLBACK_PROFILE["address"]),
+            "email":         resp_data.get("Email", _FALLBACK_PROFILE["email"]),
+            "courts":        resp_data.get("NumeroPistas"),
+            "twitter":       resp_data.get("CuentaTwitter"),
+            "facilities":    facilities,
+            "opening_hours": opening_hours,
+        }
+    except Exception as exc:
+        print(f"[club-info-tpc] ObtenerInformacionCentro error: {exc}")
+        profile = _FALLBACK_PROFILE
+
+    # --- Fetch activity catalog ---
+    try:
+        acts_resp = _tpc_post(
+            "/services/mobi/appservices/v1/club.svc/ObtenerConfiguracionSistemaReservaPlazas",
+            {},
+        )
+        acts_raw = (acts_resp.get("Respuesta") or {}).get("Actividades") or []
+        if not isinstance(acts_raw, list):
+            raise ValueError("Actividades is not a list")
+
+        # Build flat list; sort groups by id, activities within each group by name
+        groups: dict = {}
+        for act in acts_raw:
+            gid = act.get("Id_Grupo", 0)
+            if gid not in groups:
+                groups[gid] = []
+            groups[gid].append({
+                "id":         act.get("Id"),
+                "name":       act.get("Nombre", ""),
+                "group_id":   gid,
+                "group_name": GROUP_NAMES.get(gid, f"Group {gid}"),
+            })
+
+        activities = []
+        for gid in sorted(groups.keys()):
+            for act in sorted(groups[gid], key=lambda a: a["name"]):
+                activities.append(act)
+    except Exception as exc:
+        print(f"[club-info-tpc] ObtenerConfiguracionSistemaReservaPlazas error: {exc}")
+        activities = []
+
     payload = json.dumps({
-        "profile": {
-            "name":        "Stratford Padel Club",
-            "address":     "Stratford, London",
-            "phone":       "00447365809000",
-            "email":       "info@stratfordpadelclub.org",
-            "sport_types": ["PADEL"],
-        },
+        "profile":     profile,
         "memberships": [],
         "credits":     [],
         "extras":      [],
+        "activities":  activities,
     })
+
     try:
         conn = _db_connect()
         conn.execute(
@@ -884,6 +970,7 @@ def _api_club_info_tpc(club_id: str, via_query: str) -> Response:
         conn.close()
     except sqlite3.Error:
         pass
+
     resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
