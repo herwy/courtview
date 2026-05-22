@@ -42,9 +42,9 @@ The grep count must be > 0 AND pgrep must show gunicorn/courtview.py running bef
 
 | URL | Purpose |
 |-----|---------|
-| `http://lab.doxx:8766/` | Dashboard (token required) |
-| `http://lab.doxx:8766/access` | Access log page |
-| `http://lab.doxx:8766/api/*` | Padelmates API proxy (whitelist in `ALLOWED_PATHS` in courtview.py) |
+| `https://labs.doxx:8766/` | Dashboard (token required) |
+| `https://labs.doxx:8766/access` | Access log page |
+| `https://labs.doxx:8766/api/*` | Padelmates API proxy (whitelist in `ALLOWED_PATHS` in courtview.py) |
 
 Token: in Bitwarden under "courtview". Pass via `?token=...` (sets cookie) or with the cookie set.
 
