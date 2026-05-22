@@ -1433,7 +1433,7 @@ function buildRecs() {
       for (const court of courts) {
         for (const sl of (court.available_slots || [])) {
           if (localHour(sl.start_datetime) === hr) {
-            const q = p60(sl);
+            const q = p60(sl) || Math.round((sl.price_90 ?? 0) * 2 / 3);
             if (q > 0) prices.push(q);
           }
         }
