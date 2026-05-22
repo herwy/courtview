@@ -69,7 +69,7 @@ HEATMAP_CLUBS = [
     {"id": "5111764d9bb14be3adbdb8e133e8bd80", "courts": 11},  # Racketeer
     {"id": "47d2eb0db7194a9dbd29783c3a2a82ad", "courts": 7},   # Padium Canary Wharf
     {"id": "788fa2c66535421aabc60fd27f941c42",  "courts": 12},  # Rocket Padel Ilford
-    {"id": "stratfordpadelclub", "courts": 9, "platform": "tpc"},  # Stratford Padel Club
+    {"id": "stratfordpadelclub", "courts": 11, "platform": "tpc"},  # Stratford Padel Club
 ]
 
 # ---------------------------------------------------------------------------
