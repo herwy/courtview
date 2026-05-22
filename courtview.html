@@ -931,6 +931,7 @@ function fmtGBP(n) {
 
 /* API */
 async function fetchDay(date, clubId = CLUB) {
+  if (isTPCClub(clubId)) return [];
   const url = `${API}/player/player_booking/all_courts_slot_prices_v3?club_id=${clubId}&start_datetime=${dayStart(date)}&end_datetime=${dayEnd(date)}`;
   const r = await apiFetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
