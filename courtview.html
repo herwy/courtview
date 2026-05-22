@@ -2060,7 +2060,15 @@ async function runCompare() {
         try {
           if (!compareCache[ck]) {
             if (isTPCClub(club.id)) {
-              compareCache[ck] = monthCache[cacheKey(club.id, dateKey)] || await fetchDay(compareDate, club.id);
+              let data = monthCache[cacheKey(club.id, dateKey)];
+              if (!data || data.length === 0) {
+                for (let i = 1; i <= 14; i++) {
+                  const d = new Date(compareDate); d.setDate(d.getDate() + i);
+                  const candidate = monthCache[cacheKey(club.id, isoDate(d))];
+                  if (candidate && candidate.length > 0) { data = candidate; break; }
+                }
+              }
+              compareCache[ck] = data || [];
             } else {
               compareCache[ck] = await fetchDay(compareDate, club.id);
             }
