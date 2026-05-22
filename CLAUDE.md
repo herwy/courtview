@@ -52,13 +52,16 @@ Token: stored in `/root/.courtview_token` on the RPi. Pass via `?token=...` (set
 
 ## Clubs
 
-| Club | UUID | Courts |
-|------|------|--------|
-| Racketeer | `5111764d9bb14be3adbdb8e133e8bd80` | 11 |
-| Padium Canary Wharf | `47d2eb0db7194a9dbd29783c3a2a82ad` | 7 |
-| Rocket Padel Ilford | `788fa2c66535421aabc60fd27f941c42` | 12 |
+| Club | ID | Platform | Courts |
+|------|------|--------|--------|
+| Racketeer | `5111764d9bb14be3adbdb8e133e8bd80` | Padelmates | 11 |
+| Padium Canary Wharf | `47d2eb0db7194a9dbd29783c3a2a82ad` | Padelmates | 7 |
+| Rocket Padel Ilford | `788fa2c66535421aabc60fd27f941c42` | Padelmates | 12 |
+| Stratford Padel Club | `stratfordpadelclub` | TPC Matchpoint | 11 |
 
-Selector lives in the dashboard nav (localStorage key `cv-club-id`). All three clubs are in both the main `CLUBS` array and `COMPARE_CLUBS` in courtview.html.
+Selector lives in the dashboard nav (localStorage key `cv-club-id`). All four clubs are in both the main `CLUBS` array and `COMPARE_CLUBS` in courtview.html.
+
+TPC Matchpoint API base: `https://stratfordpadelclub.matchpoint.com.es`. Auth token: static `"autorizado"` (from APK, never rotates). All TPC calls use `urllib.request` with no Android headers.
 
 ---
 

@@ -2666,6 +2666,8 @@ async function switchClub(id) {
   if (mixMeta) mixMeta.textContent = '';
   const coachOut = document.getElementById('statsCoachOut');
   if (coachOut) coachOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+  const coachMeta = document.getElementById('statsCoachMeta');
+  if (coachMeta) coachMeta.textContent = '';
   // Clear booking grid immediately so old club's data doesn't linger
   document.getElementById('gridOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
   document.getElementById('b2bOut').innerHTML = '';

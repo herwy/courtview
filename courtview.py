@@ -1457,7 +1457,7 @@ def api_booked_hours():
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
     if club_id == TPC_CLUB_ID:
-        resp = Response(json.dumps({"club_id": club_id, "total_activities": 0, "total_booked_hours": 0.0}), status=200, content_type="application/json")
+        resp = Response(json.dumps({"club_id": club_id, "total_activities": None, "total_booked_hours": None}), status=200, content_type="application/json")
         if via_query: _set_cookie(resp, via_query)
         return resp
     ck = _stats_key("booked-hours", club_id, start, end)
