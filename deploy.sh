@@ -61,7 +61,13 @@ done
 
 # Start gunicorn and wait for it to appear
 cd /root/projects/courtview
-nohup gunicorn --workers 1 --worker-class gthread --threads 4 --bind 0.0.0.0:8766 --timeout 60 --log-level warning courtview:app \
+TLS_FLAGS=""
+if [ -f /root/labs/certs/labs.doxx.crt ] && [ -f /root/labs/certs/labs.doxx.key ]; then
+    TLS_FLAGS="--certfile /root/labs/certs/labs.doxx.crt --keyfile /root/labs/certs/labs.doxx.key"
+else
+    echo "WARNING: cert files not found, starting without TLS" >&2
+fi
+nohup gunicorn --workers 1 --worker-class gthread --threads 4 --bind 0.0.0.0:8766 --timeout 60 --log-level warning $TLS_FLAGS courtview:app \
     >> /root/projects/courtview/courtview.log 2>&1 &
 for i in 1 2 3 4 5; do
     pgrep -f "gunicorn.*courtview" > /dev/null 2>&1 && break
