@@ -1232,6 +1232,10 @@ def api_membership_members():
     club_id = request.args.get("club_id", "")
     if not club_id:
         return jsonify({"error": "club_id required"}), 400
+    if club_id == TPC_CLUB_ID:
+        resp = Response(json.dumps({"club_id": club_id, "counts": {}}), status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
 
     force_refresh = request.args.get("refresh") == "1"
     empty_resp = json.dumps({"club_id": club_id, "counts": {}})
@@ -1452,6 +1456,10 @@ def api_booked_hours():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
+    if club_id == TPC_CLUB_ID:
+        resp = Response(json.dumps({"club_id": club_id, "total_activities": 0, "total_booked_hours": 0.0}), status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
     ck = _stats_key("booked-hours", club_id, start, end)
     if ck:
         cached = get_stats_cached(ck)
@@ -1635,6 +1643,10 @@ def api_day_activities():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
+    if club_id == TPC_CLUB_ID:
+        resp = Response(json.dumps({"activities": []}), status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
 
     PAGE_SIZE = 50
     MAX_PAGES = 20  # cap at 1000 activities to prevent runaway upstream
@@ -1744,6 +1756,10 @@ def api_payment_history():
     club_id = request.args.get("club_id", "")
     start   = request.args.get("start", "")
     end     = request.args.get("end", "")
+    if club_id == TPC_CLUB_ID:
+        resp = Response(json.dumps([]), status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
     try:
         limit = min(int(request.args.get("limit", "100")), 200)
         skip  = int(request.args.get("skip", "0"))
@@ -1784,6 +1800,10 @@ def api_coach_stats():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
+    if club_id == TPC_CLUB_ID:
+        resp = Response(json.dumps({"coaches": []}), status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
     ck = _stats_key("coach-stats", club_id, start, end)
     if ck:
         cached = get_stats_cached(ck)
@@ -1832,6 +1852,10 @@ def api_coach_bios():
     names_raw = request.args.get("names", "")
     if not club_id or not names_raw:
         return jsonify({"error": "club_id and names required"}), 400
+    if club_id == TPC_CLUB_ID:
+        resp = Response(json.dumps({}), status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
 
     ck = f"coach-bios:{club_id}:{names_raw}"
     cached = get_stats_cached(ck)
