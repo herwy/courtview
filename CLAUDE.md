@@ -46,7 +46,7 @@ The grep count must be > 0 AND pgrep must show gunicorn/courtview.py running bef
 | `https://labs.doxx:8766/access` | Access log page |
 | `https://labs.doxx:8766/api/*` | Padelmates API proxy (whitelist in `ALLOWED_PATHS` in courtview.py) |
 
-Token: in Bitwarden under "courtview". Pass via `?token=...` (sets cookie) or with the cookie set.
+Token: stored in `/root/.courtview_token` on the RPi. Pass via `?token=...` (sets cookie) or with the cookie set.
 
 ---
 
