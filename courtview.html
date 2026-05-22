@@ -309,8 +309,7 @@ nav {
 .cell.bkd { border-color: rgba(255,255,255,0.08); cursor: pointer; }
 .cell.bkd:hover { filter: brightness(1.2); }
 .tt {
-  display: none; position: absolute;
-  bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  display: none; position: fixed;
   background: var(--bg-2); border: 1px solid var(--border);
   border-radius: 6px; padding: 8px 10px;
   white-space: normal; max-width: 200px; z-index: 100;
@@ -318,7 +317,6 @@ nav {
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
   pointer-events: none;
 }
-.cell:hover .tt { display: block; }
 .tt-t { display: block; font-weight: 600; color: var(--text-1); margin-bottom: 5px; }
 .tt-r { display: block; color: var(--text-3); margin-bottom: 1px; font-variant-numeric: tabular-nums; }
 
@@ -2324,6 +2322,8 @@ let revMonth = new Date();
 revMonth.setDate(1);
 let revLoaded = false;
 let revPaySkip = 0;
+let revPayWindowEnd = new Date();
+let revPayWindowStart = new Date(revPayWindowEnd.getTime() - 14 * 24 * 60 * 60 * 1000);
 let revPayHasMore = false;
 
 function revMonthBounds(d) {
@@ -2351,6 +2351,8 @@ async function loadRevenue(resetPay = true) {
 
   if (resetPay) {
     revPaySkip = 0;
+    revPayWindowEnd = new Date();
+    revPayWindowStart = new Date(revPayWindowEnd.getTime() - 14 * 24 * 60 * 60 * 1000);
     document.getElementById('revPayOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
     document.getElementById('revLoadMoreWrap').hidden = true;
     document.getElementById('revSummaryOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
@@ -2361,7 +2363,7 @@ async function loadRevenue(resetPay = true) {
   const [sumData, payData] = await Promise.all([
     fetch(`/api/revenue-summary?club_id=${clubId}&start=${start}&end=${end}`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
-    fetch(`/api/payment-history?club_id=${clubId}&start=${start}&end=${end}&limit=50&skip=${revPaySkip}`)
+    fetch(`/api/payment-history?club_id=${clubId}&start=${revPayWindowStart.getTime()}&end=${revPayWindowEnd.getTime()}&limit=50&skip=0`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
   ]);
 
@@ -2437,7 +2439,7 @@ function renderPayments(data, reset) {
   }
   const payments = (data.payments || []).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   revPayHasMore = data.has_more;
-  revPaySkip += payments.length;
+  if (reset) { revPaySkip = payments.length; } else { revPaySkip += payments.length; }
 
   const metaEl = document.getElementById('revPayMeta');
   if (metaEl) metaEl.textContent = payments.length || !reset ? `${revPaySkip} loaded` : '';
@@ -2497,8 +2499,10 @@ function setupRevenue() {
   });
   document.getElementById('revLoadMore').addEventListener('click', async () => {
     const clubId = CLUB;
-    const { start, end } = revMonthBounds(revMonth);
-    const data = await fetch(`/api/payment-history?club_id=${clubId}&start=${start}&end=${end}&limit=50&skip=${revPaySkip}`)
+    const prevStart = revPayWindowStart;
+    revPayWindowEnd = new Date(prevStart.getTime() - 1);
+    revPayWindowStart = new Date(revPayWindowEnd.getTime() - 14 * 24 * 60 * 60 * 1000);
+    const data = await fetch(`/api/payment-history?club_id=${clubId}&start=${revPayWindowStart.getTime()}&end=${revPayWindowEnd.getTime()}&limit=50&skip=0`)
       .then(r => r.ok ? r.json() : null).catch(() => null);
     if (clubId === CLUB) renderPayments(data, false);
   });
@@ -2677,6 +2681,40 @@ Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]).then(() => {
   setTimeout(() => warmOtherClubs(), 6000);
 });
 setInterval(pollWatches, NOTIFY_POLL_MS);
+
+(function() {
+  let _activeCell = null;
+  document.addEventListener('mouseover', function(e) {
+    const cell = e.target.closest('.cell');
+    if (!cell || cell === _activeCell) return;
+    if (_activeCell) {
+      const prev = _activeCell.querySelector('.tt');
+      if (prev) prev.style.display = 'none';
+    }
+    _activeCell = cell;
+    const tt = cell.querySelector('.tt');
+    if (!tt) return;
+    tt.style.display = 'block';
+    requestAnimationFrame(function() {
+      const cr = cell.getBoundingClientRect();
+      const tr = tt.getBoundingClientRect();
+      let top = cr.top - tr.height - 6;
+      let left = cr.left + cr.width / 2 - tr.width / 2;
+      left = Math.max(8, Math.min(left, window.innerWidth - tr.width - 8));
+      if (top < 8) top = cr.bottom + 6;
+      tt.style.top = top + 'px';
+      tt.style.left = left + 'px';
+    });
+  });
+  document.addEventListener('mouseout', function(e) {
+    const cell = e.target.closest('.cell');
+    if (!cell) return;
+    if (cell.contains(e.relatedTarget)) return;
+    const tt = cell.querySelector('.tt');
+    if (tt) tt.style.display = 'none';
+    if (_activeCell === cell) _activeCell = null;
+  });
+})();
 </script>
 </body>
 </html>
