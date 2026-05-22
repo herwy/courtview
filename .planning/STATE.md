@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: active
-last_updated: "2026-05-22T22:08:00Z"
+last_updated: "2026-05-22T22:50:00Z"
 ---
 
 ## Quick Tasks
@@ -16,4 +16,4 @@ last_updated: "2026-05-22T22:08:00Z"
 
 | Area | Stopped At | Resume File |
 |------|-----------|-------------|
-| ul6 | Completed 260522-ul6: tooltip clipping + payment history sliding window | None |
+| ul6 | Session 2026-05-22: tooltip portal fix, payment 1-day window, Rocket activity fallback, club switch UX, activity type renames | None |
