@@ -2683,36 +2683,37 @@ Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]).then(() => {
 setInterval(pollWatches, NOTIFY_POLL_MS);
 
 (function() {
+  const _tip = document.createElement('div');
+  _tip.className = 'tt';
+  _tip.style.display = 'none';
+  document.body.appendChild(_tip);
   let _activeCell = null;
+
   document.addEventListener('mouseover', function(e) {
     const cell = e.target.closest('.cell');
     if (!cell || cell === _activeCell) return;
-    if (_activeCell) {
-      const prev = _activeCell.querySelector('.tt');
-      if (prev) prev.style.display = 'none';
-    }
     _activeCell = cell;
-    const tt = cell.querySelector('.tt');
-    if (!tt) return;
-    tt.style.top = '-9999px';
-    tt.style.left = '-9999px';
-    tt.style.display = 'block';
+    const src = cell.querySelector('.tt');
+    if (!src) { _tip.style.display = 'none'; return; }
+    _tip.innerHTML = src.innerHTML;
+    _tip.style.top = '-9999px';
+    _tip.style.left = '-9999px';
+    _tip.style.display = 'block';
     const cr = cell.getBoundingClientRect();
-    const tr = tt.getBoundingClientRect();
+    const tr = _tip.getBoundingClientRect();
     let top = cr.top - tr.height - 6;
     let left = cr.left + cr.width / 2 - tr.width / 2;
     left = Math.max(8, Math.min(left, window.innerWidth - tr.width - 8));
     if (top < 8) top = cr.bottom + 6;
-    tt.style.top = top + 'px';
-    tt.style.left = left + 'px';
+    _tip.style.top = top + 'px';
+    _tip.style.left = left + 'px';
   });
+
   document.addEventListener('mouseout', function(e) {
     const cell = e.target.closest('.cell');
     if (!cell) return;
     if (cell.contains(e.relatedTarget)) return;
-    const tt = cell.querySelector('.tt');
-    if (tt) tt.style.display = 'none';
-    if (_activeCell === cell) _activeCell = null;
+    if (_activeCell === cell) { _tip.style.display = 'none'; _activeCell = null; }
   });
 })();
 </script>
