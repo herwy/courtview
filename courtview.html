@@ -848,7 +848,7 @@ const CLUBS = [
   { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer',           sub: 'North Acton, London',  courts: 11 },
   { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium Canary Wharf', sub: 'Canary Wharf, London', courts: 7  },
   { id: '788fa2c66535421aabc60fd27f941c42',  name: 'Rocket Padel Ilford', sub: 'Ilford, London',       courts: 12 },
-  { id: 'stratfordpadelclub',               name: 'Stratford Padel Club', sub: 'Stratford, London',   courts: 9,  platform: 'tpc' }
+  { id: 'stratfordpadelclub',               name: 'Stratford Padel Club', sub: 'Stratford, London',   courts: 11, platform: 'tpc' }
 ];
 let CLUB = (localStorage.getItem('cv-club-id') && CLUBS.find(c => c.id === localStorage.getItem('cv-club-id')))
   ? localStorage.getItem('cv-club-id')
@@ -2058,7 +2058,13 @@ async function runCompare() {
     await Promise.all([
       (async () => {
         try {
-          if (!compareCache[ck]) compareCache[ck] = await fetchDay(compareDate, club.id);
+          if (!compareCache[ck]) {
+            if (isTPCClub(club.id)) {
+              compareCache[ck] = monthCache[cacheKey(club.id, dateKey)] || await fetchDay(compareDate, club.id);
+            } else {
+              compareCache[ck] = await fetchDay(compareDate, club.id);
+            }
+          }
         } catch (_) { compareCache[ck] = []; }
         updateCompareRow(club);
       })(),
@@ -2090,14 +2096,17 @@ function updateCompareRow(club) {
   const row = document.querySelector(`tr[data-club="${club.id}"]`);
   if (!row) return;
 
+  const clubDef = CLUBS.find(c => c.id === club.id);
+  const courtCount = padel.length || (clubDef?.courts ?? 0);
+
   const prices60 = [];
   for (const court of padel) {
     for (const sl of (court.available_slots || [])) {
-      const q = p60(sl);
+      const q = p60(sl) || Math.round((sl.price_90 ?? 0) * 2 / 3);
       if (q > 0) prices60.push(q);
     }
   }
-  row.dataset.padel   = padel.length;
+  row.dataset.padel   = courtCount;
   row.dataset.offpeak = prices60.length ? Math.min(...prices60) : '';
   row.dataset.peak    = prices60.length ? Math.max(...prices60) : '';
 }
