@@ -1165,7 +1165,12 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
             for act in r.json().get("activities", []):
                 atype = act.get("activity_type") or "Other"
                 btype = act.get("booking_type") or ""
-                key = atype if atype != "Book Court" else ("Open Match" if btype == "OPEN_MATCH" else "Court Booking")
+                if atype == "Book Court":
+                    key = "Open Match" if btype == "OPEN_MATCH" else "Private Booking"
+                elif atype == "Match":
+                    key = "Club Match"
+                else:
+                    key = atype
                 counts[key] = counts.get(key, 0) + 1
                 total += 1
 
