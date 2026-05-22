@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: active
-last_updated: "2026-05-23T00:20:00Z"
+last_updated: "2026-05-23T00:33:00Z"
 ---
 
 ## Quick Tasks
@@ -17,10 +17,11 @@ last_updated: "2026-05-23T00:20:00Z"
 | 5 | Add TPC early-exit stubs to 6 unguarded backend endpoints (membership, booked-hours, day-activities, payment, coach-stats, coach-bios) | 2026-05-23 | d97d96c | inline |
 | 6 | TLS on port 8766 via labs.doxx cert (watchdog.sh + deploy.sh, graceful fallback) | 2026-05-23 | b776a06 | inline |
 | 7 | Fix CLAUDE.md: http://lab.doxx -> https://labs.doxx, remove incorrect Bitwarden token reference | 2026-05-23 | 56ee4be | inline |
+| 8 | Fix Compare tab timing race: fetch /api/month directly for TPC if monthCache not yet populated | 2026-05-23 | 75bdb87 | inline |
 
 ## Session Continuity
 
 | Area | Stopped At | Resume File |
 |------|-----------|-------------|
 | ul6 | Session 2026-05-22: tooltip portal fix, payment 1-day window, Rocket activity fallback, club switch UX, activity type renames | None |
-| wfp | Session 2026-05-23: Stratford fully integrated - Availability, Stats heatmap, Club Info, Compare all working. TLS live. All TPC endpoint stubs in place. | None |
+| wfp | Session 2026-05-23: All fixes complete. Compare race fixed. HEATMAP_CLUBS courts corrected. Checklist clean. | None |
