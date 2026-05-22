@@ -2323,7 +2323,8 @@ revMonth.setDate(1);
 let revLoaded = false;
 let revPaySkip = 0;
 let revPayWindowEnd = new Date();
-let revPayWindowStart = new Date(revPayWindowEnd.getTime() - 14 * 24 * 60 * 60 * 1000);
+let revPayWindowStart = new Date(revPayWindowEnd);
+revPayWindowStart.setHours(0, 0, 0, 0);
 let revPayHasMore = false;
 
 function revMonthBounds(d) {
@@ -2352,7 +2353,8 @@ async function loadRevenue(resetPay = true) {
   if (resetPay) {
     revPaySkip = 0;
     revPayWindowEnd = new Date();
-    revPayWindowStart = new Date(revPayWindowEnd.getTime() - 14 * 24 * 60 * 60 * 1000);
+    revPayWindowStart = new Date(revPayWindowEnd);
+    revPayWindowStart.setHours(0, 0, 0, 0);
     document.getElementById('revPayOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
     document.getElementById('revLoadMoreWrap').hidden = true;
     document.getElementById('revSummaryOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
@@ -2363,7 +2365,7 @@ async function loadRevenue(resetPay = true) {
   const [sumData, payData] = await Promise.all([
     fetch(`/api/revenue-summary?club_id=${clubId}&start=${start}&end=${end}`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
-    fetch(`/api/payment-history?club_id=${clubId}&start=${revPayWindowStart.getTime()}&end=${revPayWindowEnd.getTime()}&limit=50&skip=0`)
+    fetch(`/api/payment-history?club_id=${clubId}&start=${revPayWindowStart.getTime()}&end=${revPayWindowEnd.getTime()}&limit=100&skip=0`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
   ]);
 
@@ -2501,8 +2503,9 @@ function setupRevenue() {
     const clubId = CLUB;
     const prevStart = revPayWindowStart;
     revPayWindowEnd = new Date(prevStart.getTime() - 1);
-    revPayWindowStart = new Date(revPayWindowEnd.getTime() - 14 * 24 * 60 * 60 * 1000);
-    const data = await fetch(`/api/payment-history?club_id=${clubId}&start=${revPayWindowStart.getTime()}&end=${revPayWindowEnd.getTime()}&limit=50&skip=0`)
+    revPayWindowStart = new Date(revPayWindowEnd);
+    revPayWindowStart.setHours(0, 0, 0, 0);
+    const data = await fetch(`/api/payment-history?club_id=${clubId}&start=${revPayWindowStart.getTime()}&end=${revPayWindowEnd.getTime()}&limit=100&skip=0`)
       .then(r => r.ok ? r.json() : null).catch(() => null);
     if (clubId === CLUB) renderPayments(data, false);
   });

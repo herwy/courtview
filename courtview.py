@@ -1309,7 +1309,7 @@ def api_payment_history():
     start   = request.args.get("start", "")
     end     = request.args.get("end", "")
     try:
-        limit = min(int(request.args.get("limit", "50")), 100)
+        limit = min(int(request.args.get("limit", "100")), 200)
         skip  = int(request.args.get("skip", "0"))
     except (TypeError, ValueError):
         return jsonify({"error": "limit and skip must be integers"}), 400
