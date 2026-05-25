@@ -8,8 +8,8 @@ CV_DIR=/root/projects/courtview
 ts() { date '+%Y-%m-%dT%H:%M:%S'; }
 
 TLS_FLAGS=""
-if [ -f /root/labs/certs/labs.doxx.crt ] && [ -f /root/labs/certs/labs.doxx.key ]; then
-    TLS_FLAGS="--certfile /root/labs/certs/labs.doxx.crt --keyfile /root/labs/certs/labs.doxx.key"
+if [ -f /root/projects/courtview/certs/labs.doxx.crt ] && [ -f /root/projects/courtview/certs/labs.doxx.key ]; then
+    TLS_FLAGS="--certfile /root/projects/courtview/certs/labs.doxx.crt --keyfile /root/projects/courtview/certs/labs.doxx.key"
 else
     echo "[$(ts)] WARNING: cert files not found, starting without TLS" >> "$LOG"
 fi
