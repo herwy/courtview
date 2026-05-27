@@ -84,7 +84,7 @@ Stale threshold: 24h. Background thread refreshes on startup (if stale) then eve
 
 ## Headers
 
-Android OkHttp headers, derived from Android APK reverse engineering (jadx). No TLS impersonation.
+Android OkHttp headers, derived from Android APK reverse engineering (jadx). TLS fingerprint: `impersonate="chrome110"` on all cffi_requests calls (BoringSSL JA3, matches Android OkHttp 4.9.0).
 ```
 User-Agent: com.padelmates/8.5.9 (Linux; Android 14) OkHttp/4.9.0
 X-Platform: android
