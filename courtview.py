@@ -998,8 +998,8 @@ def _load_dashboard() -> None:
 
 
 def _get_client_ip() -> str:
-    """Return the real client IP (no proxy in front of this server)."""
-    return request.remote_addr or "0.0.0.0"
+    """Return real client IP forwarded by Caddy via X-Real-IP, with remote_addr fallback."""
+    return request.headers.get("X-Real-IP") or request.remote_addr or "0.0.0.0"
 
 
 def _forbidden() -> Response:
