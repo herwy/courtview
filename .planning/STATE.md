@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: active
-last_updated: "2026-05-23T00:33:00Z"
+last_updated: "2026-05-27T00:00:00Z"
 ---
 
 ## Quick Tasks
@@ -20,6 +20,7 @@ last_updated: "2026-05-23T00:33:00Z"
 | 8 | Fix Compare tab timing race: fetch /api/month directly for TPC if monthCache not yet populated | 2026-05-23 | 75bdb87 | inline |
 | 9 | Remove dead code: fetchClubProfile, fetchMembership, fetchCreditPackages, fetchFinancialStats | 2026-05-23 | ebce753 | inline |
 | 10 | Fix stale statsCoachMeta on club switch + booked-hours null for TPC + CLAUDE.md Stratford entry | 2026-05-23 | 6d959b3 | inline |
+| 11 | Fix /access page always showing 127.0.0.1 - add X-Real-IP forwarding in Caddy, read in Flask | 2026-05-27 | 5437239 | [260527-mp8-fix-client-ip-x-real-ip-caddy-flask](.planning/quick/260527-mp8-fix-client-ip-x-real-ip-caddy-flask/) |
 
 ## Session Continuity
 
