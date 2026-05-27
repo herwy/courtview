@@ -1288,6 +1288,7 @@ def api_membership_members():
                 f"{TARGET}/club/membership/?club_id={club_id}",
                 headers=APP_HEADERS,
                 timeout=15,
+                impersonate="chrome110",
             )
             if plans_r.status_code != 200:
                 resp = Response(empty_resp, status=200, content_type="application/json")
@@ -1327,6 +1328,7 @@ def api_membership_members():
                     f"{TARGET}/club/membership/member?membership_id={pid}",
                     headers=APP_HEADERS,
                     timeout=15,
+                    impersonate="chrome110",
                 )
                 if r.status_code == 200:
                     parsed = r.json()
@@ -1411,7 +1413,7 @@ def api_club_info():
 
     def _fetch(key: str, path: str) -> None:
         try:
-            r = cffi_requests.get(TARGET + path, headers=APP_HEADERS, timeout=15)
+            r = cffi_requests.get(TARGET + path, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
             if r.status_code == 200:
                 d = r.json()
                 if key == "extras" and isinstance(d, dict):
@@ -1478,7 +1480,7 @@ def api_booked_hours():
                 return resp
             try:
                 url = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start}&end_datetime={end}"
-                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
                 payload = r.content.decode("utf-8", errors="replace")
                 if r.status_code == 200:
                     set_stats_cached(ck, payload)
@@ -1487,7 +1489,7 @@ def api_booked_hours():
     else:
         try:
             url = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start}&end_datetime={end}"
-            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
             payload = r.content.decode("utf-8", errors="replace")
         except Exception as exc:
             return jsonify({"error": str(exc)}), 502
@@ -1563,12 +1565,12 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
         def _fetch_mix():
             url = (f"{TARGET}/home/activity/filtered_activities"
                    f"?club_id={club_id}&start={s}&end={e}&limit={PAGE_SIZE}")
-            return cffi_requests.get(url, headers=APP_HEADERS, timeout=12)
+            return cffi_requests.get(url, headers=APP_HEADERS, timeout=12, impersonate="chrome110")
 
         def _fetch_training():
             url = (f"{TARGET}/home/activity/filtered_activities"
                    f"?club_id={club_id}&start={s}&end={e}&activity_type=Training&limit=100")
-            return cffi_requests.get(url, headers=APP_HEADERS, timeout=12)
+            return cffi_requests.get(url, headers=APP_HEADERS, timeout=12, impersonate="chrome110")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             f_mix = ex.submit(_fetch_mix)
@@ -1659,7 +1661,7 @@ def api_day_activities():
                 f"?club_id={club_id}&start={start}&end={end}"
                 f"&limit={PAGE_SIZE}&skip={skip}"
             )
-            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
             if r.status_code != 200:
                 break
             data = r.json()
@@ -1721,7 +1723,7 @@ def api_revenue_summary():
                     f"{TARGET}/club/statistics/financial/v2"
                     f"?club_ids={club_id}&start_time={start}&end_time={end}"
                 )
-                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
                 payload = r.content.decode("utf-8", errors="replace")
                 if r.status_code == 200:
                     set_stats_cached(ck, payload)
@@ -1733,7 +1735,7 @@ def api_revenue_summary():
                 f"{TARGET}/club/statistics/financial/v2"
                 f"?club_ids={club_id}&start_time={start}&end_time={end}"
             )
-            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
             payload = r.content.decode("utf-8", errors="replace")
         except Exception as exc:
             return jsonify({"error": str(exc)}), 502
@@ -1774,7 +1776,7 @@ def api_payment_history():
             f"?club_id={club_id}&start_datetime={start}&end_datetime={end}"
             f"&limit={limit}&skip={skip}"
         )
-        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
         items = r.json() if r.status_code == 200 else []
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
@@ -1821,7 +1823,7 @@ def api_coach_stats():
                 return resp
             try:
                 url = f"{TARGET}/club/statistics/coach?club_ids={club_id}&start_time={start}&end_time={end}"
-                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
                 payload = r.content.decode("utf-8", errors="replace")
                 if r.status_code == 200:
                     set_stats_cached(ck, payload)
@@ -1830,7 +1832,7 @@ def api_coach_stats():
     else:
         try:
             url = f"{TARGET}/club/statistics/coach?club_ids={club_id}&start_time={start}&end_time={end}"
-            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
             payload = r.content.decode("utf-8", errors="replace")
         except Exception as exc:
             return jsonify({"error": str(exc)}), 502
@@ -1879,7 +1881,7 @@ def api_coach_bios():
         def fetch_bio(name: str) -> dict:
             try:
                 url = f"{TARGET}/club/global_search?club_id={club_id}&query={name}&limit=5"
-                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=10)
+                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=10, impersonate="chrome110")
                 if r.status_code != 200:
                     return {}
                 coaches = r.json().get("coaches", [])
@@ -1953,12 +1955,14 @@ def proxy(p):
                 json=request.get_json(silent=True),
                 headers=APP_HEADERS,
                 timeout=15,
+                impersonate="chrome110",
             )
         else:
             upstream = cffi_requests.get(
                 url,
                 headers=APP_HEADERS,
                 timeout=15,
+                impersonate="chrome110",
             )
 
         # Store in cache if this is the availability path
@@ -2103,7 +2107,7 @@ def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
         f"&user_timezone=Europe/London"
     )
     try:
-        r    = cffi_requests.get(url, headers=APP_HEADERS, timeout=15)
+        r    = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
         data = r.json()
     except Exception as exc:
         print(f"[heatmap] fetch error for club {club_id}: {exc}")
@@ -2253,7 +2257,8 @@ def _refresh_loop() -> None:
                 r = cffi_requests.get(
                     url,
                     headers=APP_HEADERS,
-                        timeout=15,
+                    timeout=15,
+                    impersonate="chrome110",
                 )
                 if r.status_code == 200:
                     store_cached(club_id, start, end, r.content.decode("utf-8", errors="replace"))
