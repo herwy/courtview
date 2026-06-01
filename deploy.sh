@@ -59,21 +59,15 @@ for i in 1 2 3 4 5; do
     sleep 1
 done
 
-# Start gunicorn and wait for it to appear
+# Start gunicorn (--daemon double-forks internally; foreground process exits immediately)
 cd /root/projects/courtview
-nohup gunicorn --workers 1 --worker-class gthread --threads 4 --bind 127.0.0.1:8766 --timeout 60 --log-level warning courtview:app \
-    >> /root/projects/courtview/courtview.log 2>&1 &
-for i in 1 2 3 4 5; do
-    pgrep -f "gunicorn.*courtview" > /dev/null 2>&1 && break
-    sleep 1
-done
+gunicorn --daemon --workers 1 --worker-class gthread --threads 4 --bind 127.0.0.1:8766 --timeout 60 --log-level warning \
+    --error-logfile /root/projects/courtview/courtview.log courtview:app
+sleep 1
 
-# Start watchdog and wait for it to appear
-nohup zsh /root/projects/courtview/watchdog.sh > /dev/null 2>&1 &
-for i in 1 2 3; do
-    pgrep -f watchdog.sh > /dev/null 2>&1 && break
-    sleep 1
-done
+# Start watchdog via Python Popen (exits immediately, no wait4 hang)
+python3 -c "import subprocess; subprocess.Popen(['zsh','/root/projects/courtview/watchdog.sh'],stdin=open('/dev/null'),stdout=open('/dev/null','w'),stderr=subprocess.STDOUT,close_fds=True,start_new_session=True)"
+sleep 1
 
 # Report status
 CV_PID=$(pgrep -fa "gunicorn.*courtview" | head -1)
