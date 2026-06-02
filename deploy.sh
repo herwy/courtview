@@ -29,13 +29,42 @@ log "=== CourtView deploy -> $RPI_HOST ==="
 # 1. Ensure remote dir exists (one SSH call before scp)
 ssh "$RPI_HOST" "mkdir -p /root/projects/courtview" || { err "mkdir failed"; exit 1; }
 
+# 1b. pip-audit security gate
+log ""
+log "--- pip-audit: checking for known vulnerabilities ---"
+_audit_rc=0
+_audit_out=$(ssh "$RPI_HOST" 'bash -s' << 'REMOTE'
+if [[ ! -f /root/projects/courtview/requirements.txt ]]; then
+    echo "SKIP: /root/projects/courtview/requirements.txt not found (first deploy)"
+    exit 2
+fi
+python3 -m pip install pip-audit -q --break-system-packages 2>/dev/null
+if ! python3 -c "import pip_audit" 2>/dev/null; then
+    echo "SKIP: pip-audit unavailable after install attempt"
+    exit 2
+fi
+python3 -m pip_audit -r /root/projects/courtview/requirements.txt 2>&1
+REMOTE
+) || _audit_rc=$?
+if [[ $_audit_rc -eq 0 ]]; then
+    ok "pip-audit: no known vulnerabilities found"
+elif [[ $_audit_rc -eq 1 ]]; then
+    err "pip-audit: vulnerabilities found - blocking deploy"
+    echo "$_audit_out"
+    exit 1
+else
+    log "pip-audit: audit skipped or tool unavailable (rc=$_audit_rc) - continuing"
+    [[ -n "$_audit_out" ]] && echo "$_audit_out" | sed 's/^/  /'
+fi
+
 # 2. Copy all files in one scp connection
 scp -q \
     "$SCRIPT_DIR/courtview.py" \
     "$SCRIPT_DIR/courtview.html" \
     "$SCRIPT_DIR/watchdog.sh" \
+    "$SCRIPT_DIR/requirements.txt" \
     "${RPI_HOST}:/root/projects/courtview/" \
-    && ok "  courtview.py courtview.html watchdog.sh" \
+    && ok "  courtview.py courtview.html watchdog.sh requirements.txt" \
     || { err "  FAILED: scp"; exit 1; }
 
 # 3. All remote operations in one SSH call
