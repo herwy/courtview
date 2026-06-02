@@ -22,6 +22,7 @@ last_updated: "2026-05-27T00:00:00Z"
 | 10 | Fix stale statsCoachMeta on club switch + booked-hours null for TPC + CLAUDE.md Stratford entry | 2026-05-23 | 6d959b3 | inline |
 | 11 | Fix /access page always showing 127.0.0.1 - add X-Real-IP forwarding in Caddy, read in Flask | 2026-05-27 | 5437239 | [260527-mp8-fix-client-ip-x-real-ip-caddy-flask](.planning/quick/260527-mp8-fix-client-ip-x-real-ip-caddy-flask/) |
 | 12 | Add impersonate=chrome110 to all 18 cffi_requests calls for TLS fingerprint impersonation | 2026-05-27 | bd15fd6 | [260527-n14-add-tls-impersonation-cffi-requests](.planning/quick/260527-n14-add-tls-impersonation-cffi-requests/) |
+| 13 | Add pip-audit security gate to deploy.sh + requirements.txt (curl-cffi, flask, gunicorn) | 2026-06-02 | c821fc2 | [260602-3k7-pip-audit-gate-deploy-sh](.planning/quick/260602-3k7-pip-audit-gate-deploy-sh/) |
 
 ## Session Continuity
 
