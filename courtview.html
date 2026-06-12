@@ -1765,6 +1765,12 @@ async function populateArchiveSelect(selectEl, table) {
     const r = await fetch(`/api/archive/snapshots?club_id=${RACKETEER_CLUB_ID}&table=${table}`);
     const snaps = r.ok ? await r.json() : [];
     selectEl.innerHTML = '<option value="">Live</option>';
+    if (snaps.length === 0) {
+      const hint = document.createElement('option');
+      hint.disabled = true;
+      hint.textContent = 'No snapshots yet - check back after the next refresh';
+      selectEl.appendChild(hint);
+    }
     for (const snap of snaps) {
       const opt = document.createElement('option');
       opt.value = snap.captured_at;
