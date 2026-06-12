@@ -2832,6 +2832,11 @@ async function switchClub(id) {
   if (revDowOut) revDowOut.innerHTML = '';
   const revSubOut = document.getElementById('revSubOut');
   if (revSubOut) revSubOut.innerHTML = '';
+  // Hide archive selectors — only shown for Racketeer; re-shown by load* functions if needed
+  ['club', 'stats', 'revenue'].forEach(t => {
+    const el = document.getElementById(`archive-selector-${t}`);
+    if (el) el.style.display = 'none';
+  });
   // Reload availability + heatmap; then pre-load all other tabs in background
   await Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]);
   loadStats(); loadCourtPopularity(); loadRevenue();
