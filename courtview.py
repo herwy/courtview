@@ -85,6 +85,9 @@ TPC_CLUB_ID   = "stratfordpadelclub"
 HEATMAP_HOURS      = list(range(7, 23))   # 07:00-22:00
 HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h (1 API call per club)
 
+# Racketeer is the primary research target; its club_id is used to guard archive writes
+RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80"
+
 # Runtime paths on RPi
 TOKEN_PATH      = "/root/.courtview_token"
 DB_PATH         = "/root/projects/courtview/courtview_cache.db"
@@ -495,6 +498,38 @@ def init_db() -> None:
                    cache_key  TEXT PRIMARY KEY,
                    payload    TEXT,
                    fetched_at INTEGER
+               )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS archive_heatmap (
+                   id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                   club_id     TEXT,
+                   dow         INTEGER,
+                   hour        INTEGER,
+                   avg_occ     REAL,
+                   samples     INTEGER,
+                   hour_norm   REAL,
+                   dow_norm    REAL,
+                   captured_at INTEGER
+               )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS archive_club_info (
+                   id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                   club_id     TEXT,
+                   payload     TEXT,
+                   captured_at INTEGER
+               )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS archive_financial (
+                   id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                   club_id     TEXT,
+                   start_time  TEXT,
+                   end_time    TEXT,
+                   payload     TEXT,
+                   endpoint    TEXT,
+                   captured_at INTEGER
                )"""
         )
         conn.commit()
