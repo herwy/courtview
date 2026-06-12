@@ -1885,10 +1885,18 @@ def api_archive_snapshots():
     try:
         conn = _db_connect()
         try:
-            rows = conn.execute(
-                f"SELECT DISTINCT captured_at FROM archive_{table} WHERE club_id=? ORDER BY captured_at DESC LIMIT 50",
-                (club_id,),
-            ).fetchall()
+            if table == "financial":
+                rows = conn.execute(
+                    "SELECT DISTINCT captured_at FROM archive_financial"
+                    " WHERE club_id=? AND endpoint='revenue-summary'"
+                    " ORDER BY captured_at DESC LIMIT 50",
+                    (club_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT DISTINCT captured_at FROM archive_{table} WHERE club_id=? ORDER BY captured_at DESC LIMIT 50",
+                    (club_id,),
+                ).fetchall()
         finally:
             conn.close()
     except sqlite3.Error as exc:
