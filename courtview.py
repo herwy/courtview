@@ -532,6 +532,9 @@ def init_db() -> None:
                    captured_at INTEGER
                )"""
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_heatmap_club   ON archive_heatmap   (club_id, captured_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_club_info_club  ON archive_club_info  (club_id, captured_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_financial_club  ON archive_financial  (club_id, captured_at)")
         conn.commit()
     finally:
         conn.close()
@@ -1858,6 +1861,160 @@ def api_payment_history():
         status=200,
         content_type="application/json",
     )
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# Archive read endpoints
+# ---------------------------------------------------------------------------
+
+@app.route("/api/archive/snapshots", methods=["GET"])
+def api_archive_snapshots():
+    """List distinct captured_at timestamps for a given archive table and club."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    table   = request.args.get("table", "")
+    if not club_id:
+        return jsonify({"error": "club_id required"}), 400
+    if table not in ("heatmap", "club_info", "financial"):
+        return jsonify({"error": "invalid table"}), 400
+    try:
+        conn = _db_connect()
+        try:
+            rows = conn.execute(
+                f"SELECT DISTINCT captured_at FROM archive_{table} WHERE club_id=? ORDER BY captured_at DESC LIMIT 50",
+                (club_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+    snapshots = [
+        {
+            "captured_at": row[0],
+            "label": datetime.utcfromtimestamp(row[0]).strftime("%Y-%m-%d %H:%M UTC"),
+        }
+        for row in rows
+    ]
+    resp = Response(json.dumps(snapshots), status=200, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/archive/heatmap", methods=["GET"])
+def api_archive_heatmap():
+    """Return archived heatmap snapshot in same shape as /api/heatmap."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    if not club_id:
+        return jsonify({"error": "club_id required"}), 400
+    try:
+        captured_at = int(request.args.get("captured_at", ""))
+    except (TypeError, ValueError):
+        return jsonify({"error": "captured_at must be an integer"}), 400
+    try:
+        conn = _db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT dow, hour, avg_occ, samples, hour_norm, dow_norm FROM archive_heatmap"
+                " WHERE club_id=? AND captured_at=?",
+                (club_id, captured_at),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+    if not rows:
+        return jsonify({"error": "no snapshot"}), 404
+    buckets: dict = {}
+    hour_signal: dict = {}
+    dow_signal: dict = {}
+    for dow, hour, avg_occ, _samples, hour_norm, dow_norm in rows:
+        buckets.setdefault(str(dow), {})[str(hour)] = round(avg_occ, 4)
+        hour_signal[str(hour)] = round(hour_norm, 4)
+        dow_signal[str(dow)]   = round(dow_norm, 4)
+    payload = json.dumps({
+        "club_id": club_id,
+        "fetched_at": captured_at,
+        "buckets": buckets,
+        "hour_signal": hour_signal,
+        "dow_signal": dow_signal,
+    })
+    resp = Response(payload, status=200, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/archive/club-info", methods=["GET"])
+def api_archive_club_info():
+    """Return archived club-info snapshot payload."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    if not club_id:
+        return jsonify({"error": "club_id required"}), 400
+    try:
+        captured_at = int(request.args.get("captured_at", ""))
+    except (TypeError, ValueError):
+        return jsonify({"error": "captured_at must be an integer"}), 400
+    try:
+        conn = _db_connect()
+        try:
+            row = conn.execute(
+                "SELECT payload FROM archive_club_info WHERE club_id=? AND captured_at=? LIMIT 1",
+                (club_id, captured_at),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+    if not row:
+        return jsonify({"error": "no snapshot"}), 404
+    resp = Response(row[0], status=200, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/archive/financial", methods=["GET"])
+def api_archive_financial():
+    """Return archived financial snapshot payload."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    if not club_id:
+        return jsonify({"error": "club_id required"}), 400
+    try:
+        captured_at = int(request.args.get("captured_at", ""))
+    except (TypeError, ValueError):
+        return jsonify({"error": "captured_at must be an integer"}), 400
+    endpoint = request.args.get("endpoint", "")
+    if endpoint not in ("revenue-summary", "payment-history"):
+        return jsonify({"error": "invalid endpoint"}), 400
+    try:
+        conn = _db_connect()
+        try:
+            row = conn.execute(
+                "SELECT payload FROM archive_financial WHERE club_id=? AND captured_at=? AND endpoint=? LIMIT 1",
+                (club_id, captured_at, endpoint),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+    if not row:
+        return jsonify({"error": "no snapshot"}), 404
+    resp = Response(row[0], status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
