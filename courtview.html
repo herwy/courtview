@@ -586,7 +586,7 @@ nav {
   *,*::before,*::after { transition: none !important; animation: none !important; }
   .live-dot { animation: none !important; }
 }
-.archive-selector { display:none; margin-bottom:12px; font-size:0.85rem; color:var(--text-3); }
+.archive-selector { display:none; align-items:center; margin-bottom:12px; font-size:0.85rem; color:var(--text-3); }
 .archive-selector label { margin-right:6px; }
 .archive-selector select { background:var(--bg-2); border:1px solid var(--border); border-radius:6px; color:var(--text-2); font-size:0.82rem; padding:3px 8px; cursor:pointer; }
 .archive-selector select:focus { outline:none; border-color:var(--accent-v); }
@@ -1818,7 +1818,7 @@ function showArchiveSelector(tabName, table, onSnapshotLoad, onLive) {
     const sel = document.getElementById(`archive-select-${tabName}`);
     if (sel) populateArchiveSelect(sel, table);
   }
-  div.style.display = '';
+  div.style.display = 'flex';
 }
 
 /* CLUB INFO TAB */
