@@ -25,6 +25,7 @@ last_updated: "2026-06-12T00:00:00Z"
 | 13 | Add pip-audit security gate to deploy.sh + requirements.txt (curl-cffi, flask, gunicorn) | 2026-06-02 | c821fc2 | [260602-3k7-pip-audit-gate-deploy-sh](.planning/quick/260602-3k7-pip-audit-gate-deploy-sh/) |
 | 14 | Archive Racketeer data permanently for offline dashboard viewing | 2026-06-12 | 1429594 | [260612-vxi-archive-racketeer-data-permanently-for-o](.planning/quick/260612-vxi-archive-racketeer-data-permanently-for-o/) |
 | 15 | Wire up archive data to dashboard UI and add DB indexes | 2026-06-12 | 5674e19 | [260612-we4-wire-up-archive-data-to-dashboard-ui-and](.planning/quick/260612-we4-wire-up-archive-data-to-dashboard-ui-and/) |
+| 16 | Add background archive refresh thread for Racketeer club info and revenue | 2026-06-12 | 12279c7 | [260612-wym-add-background-archive-refresh-thread-fo](.planning/quick/260612-wym-add-background-archive-refresh-thread-fo/) |
 
 ## Session Continuity
 
