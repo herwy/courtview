@@ -866,6 +866,11 @@ def _fetch_tpc_heatmap() -> None:
                     "INSERT OR REPLACE INTO heatmap_cache (club_id, dow, hour, avg_occ, samples, fetched_at) VALUES (?,?,?,?,?,?)",
                     (TPC_CLUB_ID, dow, hr, cell_occ, 14, now_ts),
                 )
+                conn.execute(
+                    "INSERT INTO archive_heatmap (club_id, dow, hour, avg_occ, samples, captured_at)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (TPC_CLUB_ID, dow, hr, cell_occ, 14, now_ts),
+                )
         # Hour signal
         for hr in HEATMAP_HOURS:
             norm = round(hour_avg.get(hr, 0.0) / max_hour, 4)
@@ -999,6 +1004,10 @@ def _api_club_info_tpc(club_id: str, via_query: str) -> Response:
         conn = _db_connect()
         conn.execute(
             "INSERT OR REPLACE INTO club_info_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
+            (club_id, payload, int(_now())),
+        )
+        conn.execute(
+            "INSERT INTO archive_club_info (club_id, payload, captured_at) VALUES (?,?,?)",
             (club_id, payload, int(_now())),
         )
         conn.commit()
@@ -1471,6 +1480,10 @@ def api_club_info():
             "INSERT OR REPLACE INTO club_info_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
             (club_id, payload, int(_now())),
         )
+        conn.execute(
+            "INSERT INTO archive_club_info (club_id, payload, captured_at) VALUES (?,?,?)",
+            (club_id, payload, int(_now())),
+        )
         conn.commit()
         conn.close()
     except sqlite3.Error:
@@ -1777,6 +1790,17 @@ def api_revenue_summary():
 
     if r.status_code != 200:
         return jsonify({"error": "upstream error"}), 502
+    try:
+        _arc = _db_connect()
+        _arc.execute(
+            "INSERT INTO archive_financial (club_id, start_time, end_time, payload, endpoint, captured_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (club_id, start, end, payload, "revenue-summary", int(_now())),
+        )
+        _arc.commit()
+        _arc.close()
+    except sqlite3.Error as exc:
+        print(f"[archive] financial write error: {exc}")
     resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
@@ -1815,6 +1839,19 @@ def api_payment_history():
         items = r.json() if r.status_code == 200 else []
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
+
+    if r.status_code == 200:
+        try:
+            _arc = _db_connect()
+            _arc.execute(
+                "INSERT INTO archive_financial (club_id, start_time, end_time, payload, endpoint, captured_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (club_id, start, end, json.dumps(items), "payment-history", int(_now())),
+            )
+            _arc.commit()
+            _arc.close()
+        except sqlite3.Error as exc:
+            print(f"[archive] financial write error: {exc}")
 
     resp = Response(
         json.dumps({"payments": items, "skip": skip, "limit": limit, "has_more": len(items) == limit}),
@@ -2199,6 +2236,11 @@ def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
                 occ  = round(dow_w * hr_w, 4)
                 conn.execute(
                     "INSERT OR REPLACE INTO heatmap_cache (club_id, dow, hour, avg_occ, samples, fetched_at) VALUES (?,?,?,?,?,?)",
+                    (club_id, dow, hr, occ, 30, now_ts),
+                )
+                conn.execute(
+                    "INSERT INTO archive_heatmap (club_id, dow, hour, avg_occ, samples, captured_at)"
+                    " VALUES (?,?,?,?,?,?)",
                     (club_id, dow, hr, occ, 30, now_ts),
                 )
         # Raw hour signal (all hours 0-23 for completeness, clipped to HEATMAP_HOURS)
