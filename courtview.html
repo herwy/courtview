@@ -586,6 +586,10 @@ nav {
   *,*::before,*::after { transition: none !important; animation: none !important; }
   .live-dot { animation: none !important; }
 }
+.archive-selector { display:none; margin-bottom:12px; font-size:0.85rem; color:var(--text-3); }
+.archive-selector label { margin-right:6px; }
+.archive-selector select { background:var(--bg-2); border:1px solid var(--border); border-radius:6px; color:var(--text-2); font-size:0.82rem; padding:3px 8px; cursor:pointer; }
+.archive-selector select:focus { outline:none; border-color:var(--accent-v); }
 </style>
 </head>
 <body>
@@ -859,6 +863,7 @@ const API = '/api';
 async function apiFetch(url, opts) {
   return fetch(url, opts);
 }
+const RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80";
 const TZ      = 'Europe/London';
 const H_START = 6;
 const H_END   = 24;
@@ -1753,27 +1758,114 @@ function fireNotification(w, court, slot, price) {
   try { new Notification(title, { body, tag: lastKey }); } catch (_) {}
 }
 
+/* ARCHIVE SELECTOR HELPERS */
+
+async function populateArchiveSelect(selectEl, table) {
+  try {
+    const r = await fetch(`/api/archive/snapshots?club_id=${RACKETEER_CLUB_ID}&table=${table}`);
+    const snaps = r.ok ? await r.json() : [];
+    selectEl.innerHTML = '<option value="">Live</option>';
+    for (const snap of snaps) {
+      const opt = document.createElement('option');
+      opt.value = snap.captured_at;
+      opt.textContent = snap.label;
+      selectEl.appendChild(opt);
+    }
+  } catch (_) {
+    selectEl.innerHTML = '<option value="">Live</option>';
+  }
+}
+
+function buildArchiveSelector(tabName, table, onSnapshotLoad, onLive) {
+  const div = document.createElement('div');
+  div.className = 'archive-selector';
+  div.id = `archive-selector-${tabName}`;
+  const label = document.createElement('label');
+  label.htmlFor = `archive-select-${tabName}`;
+  label.textContent = 'Archive: ';
+  const sel = document.createElement('select');
+  sel.id = `archive-select-${tabName}`;
+  sel.innerHTML = '<option value="">Live</option>';
+  populateArchiveSelect(sel, table);
+  sel.addEventListener('change', () => {
+    if (sel.value === '') {
+      onLive();
+    } else {
+      onSnapshotLoad(sel.value);
+    }
+  });
+  div.appendChild(label);
+  div.appendChild(sel);
+  return div;
+}
+
+function showArchiveSelector(tabName, table, onSnapshotLoad, onLive) {
+  const containerId = `archive-selector-${tabName}`;
+  let div = document.getElementById(containerId);
+  const tabEl = document.getElementById(`tab-${tabName}`);
+  if (!tabEl) return;
+  if (!div) {
+    div = buildArchiveSelector(tabName, table, onSnapshotLoad, onLive);
+    tabEl.insertAdjacentElement('afterbegin', div);
+  } else {
+    // Re-populate on each tab focus
+    const sel = document.getElementById(`archive-select-${tabName}`);
+    if (sel) populateArchiveSelect(sel, table);
+  }
+  div.style.display = '';
+}
+
 /* CLUB INFO TAB */
 let clubLoaded = false;
+
+function renderClubInfoData(data, clubId) {
+  const out = document.getElementById('clubOut');
+  if (!out) return;
+  const profile = data.profile || null;
+  const membershipsRaw = data.memberships;
+  const memberships = Array.isArray(membershipsRaw)
+    ? membershipsRaw
+    : (membershipsRaw && Array.isArray(membershipsRaw.memberships) ? membershipsRaw.memberships : []);
+  const credits = data.credits || [];
+  const extras = Array.isArray(data.extras) ? data.extras : [];
+  const activities = Array.isArray(data.activities) ? data.activities : [];
+  membershipCache[clubId] = memberships;
+  out.innerHTML = renderClubInfo(profile, memberships, credits, extras, activities);
+  loadMemberCounts(clubId);
+}
+
 async function loadClubInfo() {
   if (clubLoaded) return;
   clubLoaded = true;
   const out = document.getElementById('clubOut');
+
+  if (CLUB === RACKETEER_CLUB_ID) {
+    showArchiveSelector(
+      'club',
+      'club_info',
+      async (ts) => {
+        try {
+          out.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
+          const r = await fetch(`/api/archive/club-info?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}`);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const data = await r.json();
+          renderClubInfoData(data, RACKETEER_CLUB_ID);
+        } catch (e) {
+          out.innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
+        }
+      },
+      () => {
+        clubLoaded = false;
+        loadClubInfo();
+      }
+    );
+  }
+
   try {
     const r = await fetch(`${API}/club-info?club_id=${encodeURIComponent(CLUB)}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    const profile = data.profile || null;
-    const membershipsRaw = data.memberships;
-    const memberships = Array.isArray(membershipsRaw)
-      ? membershipsRaw
-      : (membershipsRaw && Array.isArray(membershipsRaw.memberships) ? membershipsRaw.memberships : []);
-    const credits = data.credits || [];
-    const extras = Array.isArray(data.extras) ? data.extras : [];
-    const activities = Array.isArray(data.activities) ? data.activities : [];
-    membershipCache[CLUB] = memberships;
-    out.innerHTML = renderClubInfo(profile, memberships, credits, extras, activities);
-    loadMemberCounts(CLUB);  // fan-out fills in counts + bars in place; no await
+    renderClubInfoData(data, CLUB);
   } catch (e) {
     out.innerHTML = `<div class="empty">Could not load club info: ${esc(e.message)}</div>`;
     clubLoaded = false;
@@ -2152,6 +2244,30 @@ let statsLoaded = false;
 async function loadStats() {
   if (statsLoaded) return;
   statsLoaded = true;
+
+  if (CLUB === RACKETEER_CLUB_ID) {
+    showArchiveSelector(
+      'stats',
+      'heatmap',
+      async (ts) => {
+        const dowOut = document.getElementById('statsDowOut');
+        if (dowOut) dowOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
+        try {
+          const r = await fetch(`/api/archive/heatmap?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}`);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const d = await r.json();
+          if (dowOut) dowOut.innerHTML = renderDowChart(d.dow_signal) || '<div class="empty">No occupancy data in snapshot.</div>';
+        } catch (e) {
+          if (dowOut) dowOut.innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
+        }
+      },
+      () => {
+        statsLoaded = false;
+        loadStats();
+      }
+    );
+  }
+
   try {
   const clubId = CLUB;
   const now = new Date();
@@ -2387,10 +2503,92 @@ function fmtRevPct(raw) {
   return n;
 }
 
+async function renderRevenueSummary(sumData) {
+  if (!sumData) {
+    document.getElementById('revSummaryOut').innerHTML = '<div class="empty">Revenue data unavailable.</div>';
+    return;
+  }
+  const cats = [
+    { key: 'total_combined_payments',              pct: 'total_combined_payments_diff_percentage',              label: 'Total revenue' },
+    { key: 'total_combined_booking_payments',      pct: 'total_combined_booking_payments_diff_percentage',      label: 'Court bookings' },
+    { key: 'total_combined_training_payments',     pct: 'total_combined_training_payments_diff_percentage',     label: 'Training' },
+    { key: 'total_combined_tournament_payments',   pct: 'total_combined_tournament_payments_diff_percentage',   label: 'Tournaments' },
+    { key: 'total_combined_subscription_payments', pct: 'total_combined_subscription_payments_diff_percentage', label: 'Subscriptions' },
+    { key: 'total_combined_match_payments',        pct: 'total_combined_match_payments_diff_percentage',        label: 'Open matches' },
+  ];
+  let h = '<div class="rev-cards">';
+  for (const cat of cats) {
+    const val = sumData[cat.key];
+    const pct = fmtRevPct(sumData[cat.pct]);
+    const pctHtml = pct != null
+      ? `<div class="rev-card-t ${pct >= 0 ? 'up' : 'down'}">${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% vs prior</div>`
+      : '';
+    h += `<div class="rev-card">
+      <div class="rev-card-v">${val != null ? fmtGBP(val) : '-'}</div>
+      <div class="rev-card-l">${esc(cat.label)}</div>
+      ${pctHtml}
+    </div>`;
+  }
+  h += '</div>';
+  document.getElementById('revSummaryOut').innerHTML = h;
+
+  const dow = sumData.revenue_data || [];
+  if (dow.length) {
+    const max = Math.max(...dow.map(d => parseFloat(d.y) || 0));
+    let dh = '';
+    for (const d of dow) {
+      const val = parseFloat(d.y) || 0;
+      const pct = max > 0 ? (val / max * 100).toFixed(1) : 0;
+      dh += `<div class="rev-dow-row">
+        <div class="rev-dow-day">${esc(String(d.x).slice(0,3))}</div>
+        <div class="rev-dow-bar-track"><div class="rev-dow-bar-fill" style="width:${pct}%"></div></div>
+        <div class="rev-dow-val">${fmtGBP(val)}</div>
+      </div>`;
+    }
+    document.getElementById('revDowOut').innerHTML = dh;
+  }
+
+  const subs = sumData.membership_subscription || [];
+  if (subs.length) {
+    let sh = '';
+    for (const s of subs) {
+      sh += `<div class="rev-sub-row">
+        <span class="rev-sub-name">${esc(String(s.x))}</span>
+        <span class="rev-sub-val">${fmtGBP(parseFloat(s.y) || 0)}</span>
+      </div>`;
+    }
+    document.getElementById('revSubOut').innerHTML = sh;
+  }
+}
+
 async function loadRevenue(resetPay = true) {
   revLoaded = true;
   const clubId = CLUB;
   const { start, end } = revMonthBounds(revMonth);
+
+  if (CLUB === RACKETEER_CLUB_ID) {
+    showArchiveSelector(
+      'revenue',
+      'financial',
+      async (ts) => {
+        document.getElementById('revSummaryOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
+        document.getElementById('revDowOut').innerHTML = '';
+        document.getElementById('revSubOut').innerHTML = '';
+        try {
+          const r = await fetch(`/api/archive/financial?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}&endpoint=revenue-summary`);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const data = await r.json();
+          await renderRevenueSummary(data);
+        } catch (e) {
+          document.getElementById('revSummaryOut').innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
+        }
+      },
+      () => {
+        revLoaded = false;
+        loadRevenue();
+      }
+    );
+  }
 
   document.getElementById('revMonthLbl').textContent =
     revMonth.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
@@ -2417,64 +2615,8 @@ async function loadRevenue(resetPay = true) {
 
   if (clubId !== CLUB) return;
 
-  // Summary cards
-  if (sumData) {
-    const cats = [
-      { key: 'total_combined_payments',              pct: 'total_combined_payments_diff_percentage',              label: 'Total revenue' },
-      { key: 'total_combined_booking_payments',      pct: 'total_combined_booking_payments_diff_percentage',      label: 'Court bookings' },
-      { key: 'total_combined_training_payments',     pct: 'total_combined_training_payments_diff_percentage',     label: 'Training' },
-      { key: 'total_combined_tournament_payments',   pct: 'total_combined_tournament_payments_diff_percentage',   label: 'Tournaments' },
-      { key: 'total_combined_subscription_payments', pct: 'total_combined_subscription_payments_diff_percentage', label: 'Subscriptions' },
-      { key: 'total_combined_match_payments',        pct: 'total_combined_match_payments_diff_percentage',        label: 'Open matches' },
-    ];
-    let h = '<div class="rev-cards">';
-    for (const cat of cats) {
-      const val = sumData[cat.key];
-      const pct = fmtRevPct(sumData[cat.pct]);
-      const pctHtml = pct != null
-        ? `<div class="rev-card-t ${pct >= 0 ? 'up' : 'down'}">${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% vs prior</div>`
-        : '';
-      h += `<div class="rev-card">
-        <div class="rev-card-v">${val != null ? fmtGBP(val) : '-'}</div>
-        <div class="rev-card-l">${esc(cat.label)}</div>
-        ${pctHtml}
-      </div>`;
-    }
-    h += '</div>';
-    document.getElementById('revSummaryOut').innerHTML = h;
-
-    // Day-of-week bars
-    const dow = sumData.revenue_data || [];
-    if (dow.length) {
-      const max = Math.max(...dow.map(d => parseFloat(d.y) || 0));
-      let dh = '';
-      for (const d of dow) {
-        const val = parseFloat(d.y) || 0;
-        const pct = max > 0 ? (val / max * 100).toFixed(1) : 0;
-        dh += `<div class="rev-dow-row">
-          <div class="rev-dow-day">${esc(String(d.x).slice(0,3))}</div>
-          <div class="rev-dow-bar-track"><div class="rev-dow-bar-fill" style="width:${pct}%"></div></div>
-          <div class="rev-dow-val">${fmtGBP(val)}</div>
-        </div>`;
-      }
-      document.getElementById('revDowOut').innerHTML = dh;
-    }
-
-    // Subscription breakdown
-    const subs = sumData.membership_subscription || [];
-    if (subs.length) {
-      let sh = '';
-      for (const s of subs) {
-        sh += `<div class="rev-sub-row">
-          <span class="rev-sub-name">${esc(String(s.x))}</span>
-          <span class="rev-sub-val">${fmtGBP(parseFloat(s.y) || 0)}</span>
-        </div>`;
-      }
-      document.getElementById('revSubOut').innerHTML = sh;
-    }
-  } else {
-    document.getElementById('revSummaryOut').innerHTML = '<div class="empty">Revenue data unavailable.</div>';
-  }
+  // Summary cards and DOW/subscription breakdown
+  await renderRevenueSummary(sumData);
 
   // Payment history
   renderPayments(payData, resetPay);
