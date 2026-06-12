@@ -24,6 +24,7 @@ last_updated: "2026-06-12T00:00:00Z"
 | 12 | Add impersonate=chrome110 to all 18 cffi_requests calls for TLS fingerprint impersonation | 2026-05-27 | bd15fd6 | [260527-n14-add-tls-impersonation-cffi-requests](.planning/quick/260527-n14-add-tls-impersonation-cffi-requests/) |
 | 13 | Add pip-audit security gate to deploy.sh + requirements.txt (curl-cffi, flask, gunicorn) | 2026-06-02 | c821fc2 | [260602-3k7-pip-audit-gate-deploy-sh](.planning/quick/260602-3k7-pip-audit-gate-deploy-sh/) |
 | 14 | Archive Racketeer data permanently for offline dashboard viewing | 2026-06-12 | 1429594 | [260612-vxi-archive-racketeer-data-permanently-for-o](.planning/quick/260612-vxi-archive-racketeer-data-permanently-for-o/) |
+| 15 | Wire up archive data to dashboard UI and add DB indexes | 2026-06-12 | 5674e19 | [260612-we4-wire-up-archive-data-to-dashboard-ui-and](.planning/quick/260612-we4-wire-up-archive-data-to-dashboard-ui-and/) |
 
 ## Session Continuity
 
