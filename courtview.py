@@ -85,6 +85,9 @@ TPC_CLUB_ID   = "stratfordpadelclub"
 HEATMAP_HOURS      = list(range(7, 23))   # 07:00-22:00
 HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h (1 API call per club)
 
+ARCHIVE_REFRESH_INITIAL_DELAY = 60        # seconds before first archive snapshot
+ARCHIVE_REFRESH_CYCLE_SECS    = 24 * 3600 # 24 hours between snapshots
+
 # Racketeer is the primary research target; its club_id is used to guard archive writes
 RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80"
 
@@ -2462,6 +2465,63 @@ def _heatmap_refresh_loop() -> None:
                 print(f"[heatmap] daily refresh failed for club {club['id']}: {exc}")
 
 
+def _archive_refresh_loop() -> None:
+    """60s after startup, then every 24h: snapshot Racketeer club info + revenue into archive tables."""
+    time.sleep(ARCHIVE_REFRESH_INITIAL_DELAY)
+    while True:
+        # --- club info ---
+        try:
+            paths = [
+                f"/club/?club_id={RACKETEER_CLUB_ID}",
+                f"/club/membership/?club_id={RACKETEER_CLUB_ID}",
+                f"/club/creditpackage/?club_id={RACKETEER_CLUB_ID}",
+                f"/club/club_extras?club_id={RACKETEER_CLUB_ID}",
+            ]
+            results = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                futs = {pool.submit(cffi_requests.get, TARGET + p, headers=APP_HEADERS, timeout=15, impersonate="chrome110"): p for p in paths}
+                for fut in concurrent.futures.as_completed(futs):
+                    path = futs[fut]
+                    try:
+                        r = fut.result()
+                        results[path] = r.json() if r.status_code == 200 else {"error": r.status_code}
+                    except Exception as exc:
+                        results[path] = {"error": str(exc)}
+            payload = json.dumps(results)
+            conn = _db_connect()
+            conn.execute(
+                "INSERT INTO archive_club_info (club_id, payload, captured_at) VALUES (?, ?, ?)",
+                (RACKETEER_CLUB_ID, payload, int(_now())),
+            )
+            conn.commit()
+            conn.close()
+            print(f"[archive-refresh] club_info snapshot saved for {RACKETEER_CLUB_ID}")
+        except Exception as exc:
+            print(f"[archive-refresh] club_info error: {exc}")
+
+        # --- revenue ---
+        try:
+            now_dt = datetime.utcnow()
+            month_start = datetime(now_dt.year, now_dt.month, 1)
+            start_ms = int(month_start.timestamp() * 1000)
+            end_ms = int(_now() * 1000)
+            rev_path = f"/club/statistics/financial/v2?club_ids={RACKETEER_CLUB_ID}&start_time={start_ms}&end_time={end_ms}"
+            r = cffi_requests.get(TARGET + rev_path, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+            payload = r.text if r.status_code == 200 else json.dumps({"error": r.status_code})
+            conn = _db_connect()
+            conn.execute(
+                "INSERT INTO archive_financial (club_id, start_time, end_time, payload, endpoint, captured_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (RACKETEER_CLUB_ID, str(start_ms), str(end_ms), payload, "revenue-summary", int(_now())),
+            )
+            conn.commit()
+            conn.close()
+            print(f"[archive-refresh] revenue snapshot saved for {RACKETEER_CLUB_ID} ({start_ms}-{end_ms})")
+        except Exception as exc:
+            print(f"[archive-refresh] revenue error: {exc}")
+
+        time.sleep(ARCHIVE_REFRESH_CYCLE_SECS)
+
+
 # ---------------------------------------------------------------------------
 # Background cache refresh thread
 # ---------------------------------------------------------------------------
@@ -2588,6 +2648,10 @@ def _startup() -> None:
     heatmap_thread = threading.Thread(target=_heatmap_refresh_loop, daemon=True)
     heatmap_thread.start()
     print(f"[startup] heatmap refresh thread started ({len(HEATMAP_CLUBS)} clubs, 24h cycle)")
+
+    archive_thread = threading.Thread(target=_archive_refresh_loop, daemon=True)
+    archive_thread.start()
+    print("[startup] archive refresh thread started (60s delay, 24h cycle, Racketeer only)")
 
 
 _startup()
