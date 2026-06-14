@@ -3,4 +3,5 @@ Description=Telegram failure notification for %i
 
 [Service]
 Type=oneshot
+TimeoutStartSec=30
 ExecStart=/usr/bin/python3 /root/projects/courtview/cv_notify_fail.py %i
