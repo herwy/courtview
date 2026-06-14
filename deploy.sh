@@ -63,9 +63,10 @@ scp -q \
     "$SCRIPT_DIR/courtview.html" \
     "$SCRIPT_DIR/courtview.service" \
     "$SCRIPT_DIR/notify-telegram@.service" \
+    "$SCRIPT_DIR/cv_notify_fail.py" \
     "$SCRIPT_DIR/requirements.txt" \
     "${RPI_HOST}:/root/projects/courtview/" \
-    && ok "  courtview.py courtview.html courtview.service notify-telegram@.service requirements.txt" \
+    && ok "  courtview.py courtview.html courtview.service notify-telegram@.service cv_notify_fail.py requirements.txt" \
     || { err "  FAILED: scp"; exit 1; }
 
 # 3. All remote operations in one SSH call

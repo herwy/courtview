@@ -3,4 +3,4 @@ Description=Telegram failure notification for %i
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 -c "import sys; sys.path.insert(0,'/root/labs'); from notify import send_telegram; send_telegram('<b>%i</b> failed on RPi - check: journalctl -u %i')"
+ExecStart=/usr/bin/python3 /root/projects/courtview/cv_notify_fail.py %i
