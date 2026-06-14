@@ -2469,6 +2469,24 @@ def _archive_refresh_loop() -> None:
     """60s after startup, then every 24h: snapshot Racketeer club info + revenue into archive tables."""
     time.sleep(ARCHIVE_REFRESH_INITIAL_DELAY)
     while True:
+        # Skip if a snapshot was already saved within the last 24h (prevents duplicates on restart)
+        try:
+            conn = _db_connect()
+            row = conn.execute(
+                "SELECT MAX(captured_at) FROM archive_club_info WHERE club_id=?",
+                (RACKETEER_CLUB_ID,),
+            ).fetchone()
+            conn.close()
+            last = row[0] if row and row[0] else 0
+            age = int(_now()) - last
+            if age < ARCHIVE_REFRESH_CYCLE_SECS:
+                remaining = ARCHIVE_REFRESH_CYCLE_SECS - age
+                print(f"[archive-refresh] snapshot is {age//3600:.1f}h old, sleeping {remaining//3600:.1f}h until next")
+                time.sleep(remaining)
+                continue
+        except Exception as exc:
+            print(f"[archive-refresh] staleness check error: {exc}")
+
         # --- club info ---
         try:
             paths = [

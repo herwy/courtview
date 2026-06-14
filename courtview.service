@@ -13,6 +13,7 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=courtview
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
