@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: active
-last_updated: "2026-06-12T00:00:00Z"
+last_updated: "2026-06-14T00:00:00Z"
 ---
 
 ## Quick Tasks
@@ -26,7 +26,7 @@ last_updated: "2026-06-12T00:00:00Z"
 | 14 | Archive Racketeer data permanently for offline dashboard viewing | 2026-06-12 | 1429594 | [260612-vxi-archive-racketeer-data-permanently-for-o](.planning/quick/260612-vxi-archive-racketeer-data-permanently-for-o/) |
 | 15 | Wire up archive data to dashboard UI and add DB indexes | 2026-06-12 | 5674e19 | [260612-we4-wire-up-archive-data-to-dashboard-ui-and](.planning/quick/260612-we4-wire-up-archive-data-to-dashboard-ui-and/) |
 | 16 | Add background archive refresh thread for Racketeer club info and revenue | 2026-06-12 | 12279c7 | [260612-wym-add-background-archive-refresh-thread-fo](.planning/quick/260612-wym-add-background-archive-refresh-thread-fo/) |
-| 17 | Migrate CourtView process supervision from watchdog to systemd (Restart=always, boot persistence, @reboot removed) | 2026-06-14 | 7607ef7 | [260614-wjl-fix-courtview-process-supervision-migrat](.planning/quick/260614-wjl-fix-courtview-process-supervision-migrat/) |
+| 17 | Fix CourtView process supervision: migrate to systemd, fix watchdog false positive, update deploy.sh | 2026-06-14 | e393636 | [260614-wjl-fix-courtview-process-supervision-migrat](.planning/quick/260614-wjl-fix-courtview-process-supervision-migrat/) |
 
 ## Session Continuity
 
@@ -34,4 +34,3 @@ last_updated: "2026-06-12T00:00:00Z"
 |------|-----------|-------------|
 | ul6 | Session 2026-05-22: tooltip portal fix, payment 1-day window, Rocket activity fallback, club switch UX, activity type renames | None |
 | wfp | Session 2026-05-23: All fixes complete. Compare race fixed. HEATMAP_CLUBS courts corrected. Checklist clean. | None |
-| wjl | Session 2026-06-14: systemd migration complete. courtview supervised by systemd Restart=always. @reboot crontab clean. watchdog.sh no longer deployed. | None |
