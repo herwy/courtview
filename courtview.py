@@ -85,8 +85,8 @@ TPC_CLUB_ID   = "stratfordpadelclub"
 HEATMAP_HOURS      = list(range(7, 23))   # 07:00-22:00
 HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h (1 API call per club)
 
-ARCHIVE_REFRESH_INITIAL_DELAY = 60        # seconds before first archive snapshot
-ARCHIVE_REFRESH_CYCLE_SECS    = 24 * 3600 # 24 hours between snapshots
+ARCHIVE_REFRESH_HOUR_UTC   = 22  # 23:30 BST — capture after a full day of payments
+ARCHIVE_REFRESH_MINUTE_UTC = 30
 
 # Racketeer is the primary research target; its club_id is used to guard archive writes
 RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80"
@@ -2465,27 +2465,21 @@ def _heatmap_refresh_loop() -> None:
                 print(f"[heatmap] daily refresh failed for club {club['id']}: {exc}")
 
 
+def _secs_until_archive_run() -> float:
+    """Seconds until next daily archive run at ARCHIVE_REFRESH_HOUR_UTC:ARCHIVE_REFRESH_MINUTE_UTC UTC."""
+    now = datetime.utcnow()
+    target = now.replace(hour=ARCHIVE_REFRESH_HOUR_UTC, minute=ARCHIVE_REFRESH_MINUTE_UTC, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
 def _archive_refresh_loop() -> None:
-    """60s after startup, then every 24h: snapshot Racketeer club info + revenue into archive tables."""
-    time.sleep(ARCHIVE_REFRESH_INITIAL_DELAY)
+    """Daily at 22:30 UTC (23:30 BST): snapshot Racketeer club info, revenue, and payment history."""
     while True:
-        # Skip if a snapshot was already saved within the last 24h (prevents duplicates on restart)
-        try:
-            conn = _db_connect()
-            row = conn.execute(
-                "SELECT MAX(captured_at) FROM archive_club_info WHERE club_id=?",
-                (RACKETEER_CLUB_ID,),
-            ).fetchone()
-            conn.close()
-            last = row[0] if row and row[0] else 0
-            age = int(_now()) - last
-            if age < ARCHIVE_REFRESH_CYCLE_SECS:
-                remaining = ARCHIVE_REFRESH_CYCLE_SECS - age
-                print(f"[archive-refresh] snapshot is {age//3600:.1f}h old, sleeping {remaining//3600:.1f}h until next")
-                time.sleep(remaining)
-                continue
-        except Exception as exc:
-            print(f"[archive-refresh] staleness check error: {exc}")
+        wait = _secs_until_archive_run()
+        print(f"[archive-refresh] next run in {wait/3600:.1f}h (22:30 UTC daily)")
+        time.sleep(wait)
 
         # --- club info ---
         try:
@@ -2517,7 +2511,7 @@ def _archive_refresh_loop() -> None:
         except Exception as exc:
             print(f"[archive-refresh] club_info error: {exc}")
 
-        # --- revenue ---
+        # --- revenue summary (current month to now) ---
         try:
             now_dt = datetime.utcnow()
             month_start = datetime(now_dt.year, now_dt.month, 1)
@@ -2533,11 +2527,33 @@ def _archive_refresh_loop() -> None:
             )
             conn.commit()
             conn.close()
-            print(f"[archive-refresh] revenue snapshot saved for {RACKETEER_CLUB_ID} ({start_ms}-{end_ms})")
+            print(f"[archive-refresh] revenue snapshot saved for {RACKETEER_CLUB_ID}")
         except Exception as exc:
             print(f"[archive-refresh] revenue error: {exc}")
 
-        time.sleep(ARCHIVE_REFRESH_CYCLE_SECS)
+        # --- payment history (last 24h — captures the day's transactions before midnight) ---
+        try:
+            end_ms = int(_now() * 1000)
+            start_ms = end_ms - 86400 * 1000
+            pay_url = (
+                f"{TARGET}/club/statistics/online_payment_history"
+                f"?club_id={RACKETEER_CLUB_ID}&start_datetime={start_ms}&end_datetime={end_ms}"
+                f"&limit=200&skip=0"
+            )
+            r = cffi_requests.get(pay_url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+            items = r.json() if r.status_code == 200 else []
+            payload = json.dumps({"payments": items, "skip": 0, "limit": 200, "has_more": False})
+            conn = _db_connect()
+            conn.execute(
+                "INSERT INTO archive_financial (club_id, start_time, end_time, payload, endpoint, captured_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (RACKETEER_CLUB_ID, str(start_ms), str(end_ms), payload, "payment-history", int(_now())),
+            )
+            conn.commit()
+            conn.close()
+            n = len(items) if isinstance(items, list) else "?"
+            print(f"[archive-refresh] payment-history snapshot saved ({n} payments)")
+        except Exception as exc:
+            print(f"[archive-refresh] payment-history error: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -2669,7 +2685,7 @@ def _startup() -> None:
 
     archive_thread = threading.Thread(target=_archive_refresh_loop, daemon=True)
     archive_thread.start()
-    print("[startup] archive refresh thread started (60s delay, 24h cycle, Racketeer only)")
+    print("[startup] archive refresh thread started (daily at 22:30 UTC, Racketeer only)")
 
 
 _startup()
