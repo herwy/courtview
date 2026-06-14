@@ -16,10 +16,10 @@ After any change to courtview.py or courtview.html: `cv-deploy`, then verify the
 
 ```bash
 rpi 'grep -c "<expected_string>" /root/projects/courtview/courtview.html'
-rpi 'pgrep -fa "gunicorn.*courtview\|courtview.py"'
+rpi 'systemctl is-active courtview'
 ```
 
-The grep count must be > 0 AND pgrep must show gunicorn/courtview.py running before reporting done.
+The grep count must be > 0 AND systemctl must return `active` before reporting done.
 
 ---
 
@@ -31,8 +31,8 @@ The grep count must be > 0 AND pgrep must show gunicorn/courtview.py running bef
 | `/root/projects/courtview/courtview.html` | Dashboard HTML |
 | `/root/projects/courtview/courtview_cache.db` | SQLite cache: availability (28-day TTL), heatmap, court popularity, membership_members (6h TTL), club_info (10-min TTL) |
 | `/root/projects/courtview/access.log` | JSONL access log |
-| `/root/projects/courtview/courtview.log` | gunicorn stdout/stderr |
-| `/root/projects/courtview/watchdog.sh` | Crash recovery watchdog (loops every 60s) |
+| `/root/projects/courtview/courtview.log` | gunicorn stderr (warnings only; crashes go to journal) |
+| `/etc/systemd/system/courtview.service` | systemd unit - Restart=always, WantedBy=multi-user.target |
 | `/root/.courtview_token` | Auth token (cookie: courtview_token) |
 | `/root/labs/web/` | Shared with nightwatch dashboard - access.html, access.js, dashboard.css loaded at startup |
 
@@ -119,4 +119,5 @@ All Padelmates requests are made server-side by Flask. The browser never contact
 - Web assets in `/root/labs/web/` are shared with the nightwatch dashboard (separate repo: doxxnet-labs). Do not edit them from here; CourtView only consumes them.
 - No nightwatch session concept here - the Flask server is killable and restartable at any time.
 - Gunicorn is the process manager; Flask is still the app. Gunicorn replaced `app.run()`, not Flask. All routing, proxy logic, and header injection happen inside Flask.
-- `cv-deploy` installs gunicorn if not present and starts it. Gunicorn + watchdog also start automatically on RPi reboot via `@reboot` crontab entries (sleep 15s / 18s to let networking come up).
+- systemd manages the process lifecycle: `systemctl restart courtview` to restart, `journalctl -u courtview` to view logs. Boot persistence via WantedBy=multi-user.target - no @reboot crontab.
+- `cv-deploy` deploys the service file to `/etc/systemd/system/courtview.service`, runs `systemctl daemon-reload && systemctl enable && systemctl restart`, then verifies with `systemctl is-active`.
