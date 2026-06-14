@@ -1,7 +1,7 @@
 [Unit]
 Description=CourtView Flask/gunicorn server
 After=network.target
-OnFailure=notify-telegram@%n.service
+OnFailure=notify-telegram@%p.service
 
 [Service]
 Type=simple
