@@ -62,9 +62,10 @@ scp -q \
     "$SCRIPT_DIR/courtview.py" \
     "$SCRIPT_DIR/courtview.html" \
     "$SCRIPT_DIR/courtview.service" \
+    "$SCRIPT_DIR/notify-telegram@.service" \
     "$SCRIPT_DIR/requirements.txt" \
     "${RPI_HOST}:/root/projects/courtview/" \
-    && ok "  courtview.py courtview.html courtview.service requirements.txt" \
+    && ok "  courtview.py courtview.html courtview.service notify-telegram@.service requirements.txt" \
     || { err "  FAILED: scp"; exit 1; }
 
 # 3. All remote operations in one SSH call
@@ -80,8 +81,9 @@ if [[ ! -x /usr/local/bin/gunicorn ]]; then
     fi
 fi
 
-# Install service file and enable
+# Install service files and enable
 cp /root/projects/courtview/courtview.service /etc/systemd/system/courtview.service
+cp /root/projects/courtview/notify-telegram@.service /etc/systemd/system/notify-telegram@.service
 systemctl daemon-reload
 systemctl enable courtview
 
