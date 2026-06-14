@@ -2500,7 +2500,8 @@ def _archive_refresh_loop() -> None:
             )
             r = cffi_requests.get(pay_url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
             items = r.json() if r.status_code == 200 else []
-            payload = json.dumps({"payments": items, "skip": 0, "limit": 200, "has_more": False})
+            has_more = isinstance(items, list) and len(items) == 200
+            payload = json.dumps({"payments": items, "skip": 0, "limit": 200, "has_more": has_more})
             conn = _db_connect()
             conn.execute(
                 "INSERT INTO archive_financial (club_id, start_time, end_time, payload, endpoint, captured_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -2509,6 +2510,8 @@ def _archive_refresh_loop() -> None:
             conn.commit()
             conn.close()
             n = len(items) if isinstance(items, list) else "?"
+            if has_more:
+                print(f"[archive-refresh] WARNING: payment-history hit limit=200 - snapshot may be incomplete")
             print(f"[archive-refresh] payment-history snapshot saved ({n} payments)")
         except Exception as exc:
             print(f"[archive-refresh] payment-history error: {exc}")
