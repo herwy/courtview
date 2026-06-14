@@ -61,55 +61,52 @@ fi
 scp -q \
     "$SCRIPT_DIR/courtview.py" \
     "$SCRIPT_DIR/courtview.html" \
-    "$SCRIPT_DIR/watchdog.sh" \
+    "$SCRIPT_DIR/courtview.service" \
     "$SCRIPT_DIR/requirements.txt" \
     "${RPI_HOST}:/root/projects/courtview/" \
-    && ok "  courtview.py courtview.html watchdog.sh requirements.txt" \
+    && ok "  courtview.py courtview.html courtview.service requirements.txt" \
     || { err "  FAILED: scp"; exit 1; }
 
 # 3. All remote operations in one SSH call
 remote_out=$(ssh "$RPI_HOST" 'bash -s' << 'REMOTE'
 set -e
-chmod +x /root/projects/courtview/watchdog.sh
 
-# Install gunicorn only if missing
-python3 -c "import gunicorn" 2>/dev/null \
-    || pip3 install gunicorn -q --break-system-packages 2>/dev/null \
-    || pip3 install gunicorn -q
+# Verify gunicorn binary exists
+if [[ ! -x /usr/local/bin/gunicorn ]]; then
+    _gc=$(which gunicorn 2>/dev/null)
+    if [[ -z "$_gc" ]]; then
+        echo "ERROR: gunicorn not found at /usr/local/bin/gunicorn and not on PATH - aborting" >&2
+        exit 1
+    fi
+fi
 
-# Stop watchdog first (avoids respawn race)
+# Install service file and enable
+cp /root/projects/courtview/courtview.service /etc/systemd/system/courtview.service
+systemctl daemon-reload
+systemctl enable courtview
+
+# One-time cleanup: stop legacy watchdog and gunicorn (idempotent)
 pkill -f /root/projects/courtview/watchdog.sh 2>/dev/null || true
-
-# Stop courtview and wait for it to actually exit
 pkill -f "gunicorn.*courtview" 2>/dev/null || true
-pkill -f "/root/projects/courtview/courtview.py" 2>/dev/null || true
-for i in 1 2 3 4 5; do
-    pgrep -f "gunicorn.*courtview" > /dev/null 2>&1 || break
-    sleep 1
-done
+sleep 2
 
-# Start gunicorn (--daemon double-forks internally; foreground process exits immediately)
-cd /root/projects/courtview
-gunicorn --daemon --workers 1 --worker-class gthread --threads 4 --bind 127.0.0.1:8766 --timeout 60 --log-level warning \
-    --error-logfile /root/projects/courtview/courtview.log courtview:app
-sleep 1
+# Restart via systemctl
+systemctl restart courtview
+sleep 2
 
-# Start watchdog via Python Popen (exits immediately, no wait4 hang)
-python3 -c "import subprocess; subprocess.Popen(['zsh','/root/projects/courtview/watchdog.sh'],stdin=open('/dev/null'),stdout=open('/dev/null','w'),stderr=subprocess.STDOUT,close_fds=True,start_new_session=True)"
-sleep 1
+# Remove @reboot crontab entries for courtview (idempotent)
+crontab -l 2>/dev/null | grep -v "projects/courtview" | crontab -
 
 # Report status
-CV_PID=$(pgrep -fa "gunicorn.*courtview" | head -1)
-WD_PID=$(pgrep -fa watchdog.sh | head -1)
-echo "CV:${CV_PID}"
-echo "WD:${WD_PID}"
+echo "ACTIVE:$(systemctl is-active courtview)"
+echo "ENABLED:$(systemctl is-enabled courtview)"
 REMOTE
 )
 
-cv_pid=$(echo "$remote_out" | grep "^CV:" | sed 's/^CV://')
-wd_pid=$(echo "$remote_out" | grep "^WD:" | sed 's/^WD://')
+cv_active=$(echo "$remote_out" | grep "^ACTIVE:" | sed 's/^ACTIVE://')
+cv_enabled=$(echo "$remote_out" | grep "^ENABLED:" | sed 's/^ENABLED://')
 
-[[ -n "$cv_pid" ]] && ok "courtview: $cv_pid" || { err "courtview did not start"; exit 1; }
-[[ -n "$wd_pid" ]] && ok "watchdog:   $wd_pid" || { err "watchdog did not start"; exit 1; }
+[[ "$cv_active" == "active" ]] && ok "courtview: systemd active" || { err "courtview systemd unit not active (got: $cv_active)"; exit 1; }
+[[ "$cv_enabled" == "enabled" ]] && ok "courtview: enabled on boot" || err "courtview not enabled (got: $cv_enabled)"
 
 log "=== CourtView deploy complete ==="

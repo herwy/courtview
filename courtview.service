@@ -1,0 +1,17 @@
+[Unit]
+Description=CourtView Flask/gunicorn server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/projects/courtview
+ExecStart=/usr/local/bin/gunicorn --workers 1 --worker-class gthread --threads 4 --bind 127.0.0.1:8766 --timeout 60 courtview:app
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=courtview
+
+[Install]
+WantedBy=multi-user.target
