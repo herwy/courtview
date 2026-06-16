@@ -2648,6 +2648,7 @@ function renderPayments(data, reset) {
   const metaEl = document.getElementById('revPayMeta');
 
   if (reset) {
+    if (metaEl) metaEl.textContent = '';
     if (!payments.length) {
       document.getElementById('revPayOut').innerHTML = '<div class="empty">No payments this period.</div>';
       document.getElementById('revLoadMoreWrap').hidden = true;

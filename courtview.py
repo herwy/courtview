@@ -2502,6 +2502,13 @@ def _archive_refresh_loop() -> None:
             )
             r = cffi_requests.get(pay_url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
             items = r.json() if r.status_code == 200 else []
+            if not items:
+                # Retry once - empty result may be a transient API hiccup
+                time.sleep(30)
+                r2 = cffi_requests.get(pay_url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+                items = r2.json() if r2.status_code == 200 else []
+                if not items:
+                    print(f"[archive-refresh] WARNING: payment-history returned 0 results after retry - snapshot will be empty")
             has_more = isinstance(items, list) and len(items) == 200
             payload = json.dumps({"payments": items, "skip": 0, "limit": 200, "has_more": has_more})
             conn = _db_connect()
