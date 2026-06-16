@@ -1804,7 +1804,7 @@ def api_payment_history():
         if via_query: _set_cookie(resp, via_query)
         return resp
     try:
-        limit = min(int(request.args.get("limit", "100")), 200)
+        limit = min(int(request.args.get("limit", "100")), 100)
         skip  = int(request.args.get("skip", "0"))
     except (TypeError, ValueError):
         return jsonify({"error": "limit and skip must be integers"}), 400
@@ -2491,26 +2491,38 @@ def _archive_refresh_loop() -> None:
         except Exception as exc:
             print(f"[archive-refresh] revenue error: {exc}")
 
-        # --- payment history (last 24h — captures the day's transactions before midnight) ---
+        # --- payment history (last 24h — paginates at limit=100, API rejects >100) ---
         try:
             end_ms = int(_now() * 1000)
             start_ms = end_ms - 86400 * 1000
-            pay_url = (
-                f"{TARGET}/club/statistics/online_payment_history"
-                f"?club_id={RACKETEER_CLUB_ID}&start_datetime={start_ms}&end_datetime={end_ms}"
-                f"&limit=200&skip=0"
-            )
-            r = cffi_requests.get(pay_url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-            items = r.json() if r.status_code == 200 else []
-            if not items:
+            all_items: list = []
+            skip = 0
+            while True:
+                pay_url = (
+                    f"{TARGET}/club/statistics/online_payment_history"
+                    f"?club_id={RACKETEER_CLUB_ID}&start_datetime={start_ms}&end_datetime={end_ms}"
+                    f"&limit=100&skip={skip}"
+                )
+                r = cffi_requests.get(pay_url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+                page = r.json() if r.status_code == 200 else []
+                if not isinstance(page, list) or not page:
+                    break
+                all_items.extend(page)
+                if len(page) < 100:
+                    break
+                skip += 100
+            if not all_items:
                 # Retry once - empty result may be a transient API hiccup
                 time.sleep(30)
-                r2 = cffi_requests.get(pay_url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-                items = r2.json() if r2.status_code == 200 else []
-                if not items:
-                    print(f"[archive-refresh] WARNING: payment-history returned 0 results after retry - snapshot will be empty")
-            has_more = isinstance(items, list) and len(items) == 200
-            payload = json.dumps({"payments": items, "skip": 0, "limit": 200, "has_more": has_more})
+                r2 = cffi_requests.get(
+                    f"{TARGET}/club/statistics/online_payment_history"
+                    f"?club_id={RACKETEER_CLUB_ID}&start_datetime={start_ms}&end_datetime={end_ms}&limit=100&skip=0",
+                    headers=APP_HEADERS, timeout=15, impersonate="chrome110"
+                )
+                all_items = r2.json() if r2.status_code == 200 and isinstance(r2.json(), list) else []
+                if not all_items:
+                    print(f"[archive-refresh] WARNING: payment-history returned 0 results after retry")
+            payload = json.dumps({"payments": all_items, "skip": 0, "limit": len(all_items), "has_more": False})
             conn = _db_connect()
             conn.execute(
                 "INSERT INTO archive_financial (club_id, start_time, end_time, payload, endpoint, captured_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -2518,10 +2530,7 @@ def _archive_refresh_loop() -> None:
             )
             conn.commit()
             conn.close()
-            n = len(items) if isinstance(items, list) else "?"
-            if has_more:
-                print(f"[archive-refresh] WARNING: payment-history hit limit=200 - snapshot may be incomplete")
-            print(f"[archive-refresh] payment-history snapshot saved ({n} payments)")
+            print(f"[archive-refresh] payment-history snapshot saved ({len(all_items)} payments)")
         except Exception as exc:
             print(f"[archive-refresh] payment-history error: {exc}")
 
