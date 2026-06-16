@@ -2519,7 +2519,8 @@ def _archive_refresh_loop() -> None:
                     f"?club_id={RACKETEER_CLUB_ID}&start_datetime={start_ms}&end_datetime={end_ms}&limit=100&skip=0",
                     headers=APP_HEADERS, timeout=15, impersonate="chrome110"
                 )
-                all_items = r2.json() if r2.status_code == 200 and isinstance(r2.json(), list) else []
+                _retry = r2.json() if r2.status_code == 200 else []
+                all_items = _retry if isinstance(_retry, list) else []
                 if not all_items:
                     print(f"[archive-refresh] WARNING: payment-history returned 0 results after retry")
             payload = json.dumps({"payments": all_items, "skip": 0, "limit": len(all_items), "has_more": False})
