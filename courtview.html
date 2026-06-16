@@ -2580,13 +2580,23 @@ async function loadRevenue(resetPay = true) {
         document.getElementById('revSummaryOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
         document.getElementById('revDowOut').innerHTML = '';
         document.getElementById('revSubOut').innerHTML = '';
+        document.getElementById('revPayOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
+        document.getElementById('revLoadMoreWrap').hidden = true;
+        const [sumR, payR] = await Promise.allSettled([
+          fetch(`/api/archive/financial?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}&endpoint=revenue-summary`),
+          fetch(`/api/archive/financial?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}&endpoint=payment-history`),
+        ]);
         try {
-          const r = await fetch(`/api/archive/financial?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}&endpoint=revenue-summary`);
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          const data = await r.json();
-          await renderRevenueSummary(data);
+          if (!sumR.value?.ok) throw new Error(`HTTP ${sumR.value?.status}`);
+          await renderRevenueSummary(await sumR.value.json());
         } catch (e) {
           document.getElementById('revSummaryOut').innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
+        }
+        try {
+          const payData = payR.value?.ok ? await payR.value.json() : null;
+          renderPayments(payData, true);
+        } catch (e) {
+          document.getElementById('revPayOut').innerHTML = `<div class="empty">Payment history unavailable for this snapshot.</div>`;
         }
       },
       () => {

@@ -2439,6 +2439,8 @@ def _archive_refresh_loop() -> None:
         print(f"[archive-refresh] next run in {wait/3600:.1f}h (22:30 UTC daily)")
         time.sleep(wait)
 
+        captured_at = int(_now())  # shared timestamp for all four writes this run
+
         # --- club info ---
         try:
             paths = [
@@ -2461,7 +2463,7 @@ def _archive_refresh_loop() -> None:
             conn = _db_connect()
             conn.execute(
                 "INSERT INTO archive_club_info (club_id, payload, captured_at) VALUES (?, ?, ?)",
-                (RACKETEER_CLUB_ID, payload, int(_now())),
+                (RACKETEER_CLUB_ID, payload, captured_at),
             )
             conn.commit()
             conn.close()
@@ -2481,7 +2483,7 @@ def _archive_refresh_loop() -> None:
             conn = _db_connect()
             conn.execute(
                 "INSERT INTO archive_financial (club_id, start_time, end_time, payload, endpoint, captured_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (RACKETEER_CLUB_ID, str(start_ms), str(end_ms), payload, "revenue-summary", int(_now())),
+                (RACKETEER_CLUB_ID, str(start_ms), str(end_ms), payload, "revenue-summary", captured_at),
             )
             conn.commit()
             conn.close()
@@ -2505,7 +2507,7 @@ def _archive_refresh_loop() -> None:
             conn = _db_connect()
             conn.execute(
                 "INSERT INTO archive_financial (club_id, start_time, end_time, payload, endpoint, captured_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (RACKETEER_CLUB_ID, str(start_ms), str(end_ms), payload, "payment-history", int(_now())),
+                (RACKETEER_CLUB_ID, str(start_ms), str(end_ms), payload, "payment-history", captured_at),
             )
             conn.commit()
             conn.close()
@@ -2518,7 +2520,6 @@ def _archive_refresh_loop() -> None:
 
         # --- heatmap (read from live cache, no extra API call) ---
         try:
-            captured_at = int(_now())
             conn = _db_connect()
             rows = conn.execute(
                 "SELECT dow, hour, avg_occ, samples FROM heatmap_cache WHERE club_id=?",
