@@ -1910,8 +1910,11 @@ def api_archive_heatmap():
     dow_signal: dict = {}
     for dow, hour, avg_occ, _samples, hour_norm, dow_norm in rows:
         buckets.setdefault(str(dow), {})[str(hour)] = round(avg_occ, 4)
-        hour_signal[str(hour)] = round(hour_norm, 4)
-        dow_signal[str(dow)]   = round(dow_norm, 4)
+        # hour_norm/dow_norm are unset on snapshots archived before this data was captured
+        if hour_norm is not None:
+            hour_signal[str(hour)] = round(hour_norm, 4)
+        if dow_norm is not None:
+            dow_signal[str(dow)] = round(dow_norm, 4)
     payload = json.dumps({
         "club_id": club_id,
         "fetched_at": captured_at,
