@@ -28,7 +28,7 @@ last_updated: "2026-07-10T23:46:00Z"
 | 16 | Add background archive refresh thread for Racketeer club info and revenue | 2026-06-12 | 12279c7 | [260612-wym-add-background-archive-refresh-thread-fo](.planning/quick/260612-wym-add-background-archive-refresh-thread-fo/) |
 | 17 | Fix CourtView process supervision: migrate to systemd, fix watchdog false positive, update deploy.sh | 2026-06-14 | e393636 | [260614-wjl-fix-courtview-process-supervision-migrat](.planning/quick/260614-wjl-fix-courtview-process-supervision-migrat/) |
 | 18 | Stop background polling for Racketeer (migrated off Padelmates to a different app): removed from HEATMAP_CLUBS, excluded from availability refresh loop, removed archive refresh thread + dead helper code. Kept polling for other 3 clubs and on-demand /api/* proxying for Racketeer. | 2026-07-10 | 1b7b33c | inline |
-| 19 | Fix /api/archive/heatmap 500 error: archive_heatmap rows have always had NULL hour_norm/dow_norm (writer never populated them since 2026-06-12); endpoint now skips signal entries instead of crashing on round(None) | 2026-07-10 | TBD | inline |
+| 19 | Fix /api/archive/heatmap 500 error: archive_heatmap rows have always had NULL hour_norm/dow_norm (writer never populated them since 2026-06-12); endpoint now skips signal entries instead of crashing on round(None) | 2026-07-10 | 9db59db | inline |
 
 ## Session Continuity
 
