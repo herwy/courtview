@@ -54,12 +54,14 @@ Token: stored in `/root/.courtview_token` on the RPi. Pass via `?token=...` (set
 
 | Club | ID | Platform | Courts |
 |------|------|--------|--------|
-| Racketeer | `5111764d9bb14be3adbdb8e133e8bd80` | Padelmates | 11 |
+| Racketeer | `5111764d9bb14be3adbdb8e133e8bd80` | Padelmates (inactive since 2026-07-01) | 11 |
 | Padium Canary Wharf | `47d2eb0db7194a9dbd29783c3a2a82ad` | Padelmates | 7 |
 | Rocket Padel Ilford | `788fa2c66535421aabc60fd27f941c42` | Padelmates | 12 |
 | Stratford Padel Club | `stratfordpadelclub` | TPC Matchpoint | 11 |
 
 Selector lives in the dashboard nav (localStorage key `cv-club-id`). All four clubs are in both the main `CLUBS` array and `COMPARE_CLUBS` in courtview.html.
+
+**Racketeer migrated off Padelmates to a different booking app (2026-07-01)** — confirmed via booking-payment revenue dropping to exactly £0 that day and staying there, plus empty availability/payment-history responses. Background polling for Racketeer is disabled (removed from `HEATMAP_CLUBS`, excluded from the availability refresh loop, archive refresh thread removed entirely). On-demand `/api/*` proxying and the dashboard's Racketeer archive views still work — the club profile still exists on Padelmates, it's just not taking bookings there anymore.
 
 TPC Matchpoint API base: `https://stratfordpadelclub.matchpoint.com.es`. Auth token: static `"autorizado"` (from APK, never rotates). All TPC calls use `urllib.request` with no Android headers.
 
@@ -78,7 +80,7 @@ Response fields used:
 
 The heatmap DOW x hour matrix is the product of normalised hour signal x DOW signal. Stored in `heatmap_cache` table. Raw signals in `heatmap_hour_signal` and `heatmap_dow_signal` tables. Court popularity in `court_popularity` table.
 
-Stale threshold: 24h. Background thread refreshes on startup (if stale) then every 24h.
+Stale threshold: 24h. Background thread refreshes on startup (if stale) then every 24h — covers Padium, Rocket Padel Ilford, and Stratford only; Racketeer excluded (see Clubs section).
 
 ---
 
