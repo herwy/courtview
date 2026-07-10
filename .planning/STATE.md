@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: active
-last_updated: "2026-06-14T00:00:00Z"
+last_updated: "2026-07-10T23:46:00Z"
 ---
 
 ## Quick Tasks
@@ -27,6 +27,7 @@ last_updated: "2026-06-14T00:00:00Z"
 | 15 | Wire up archive data to dashboard UI and add DB indexes | 2026-06-12 | 5674e19 | [260612-we4-wire-up-archive-data-to-dashboard-ui-and](.planning/quick/260612-we4-wire-up-archive-data-to-dashboard-ui-and/) |
 | 16 | Add background archive refresh thread for Racketeer club info and revenue | 2026-06-12 | 12279c7 | [260612-wym-add-background-archive-refresh-thread-fo](.planning/quick/260612-wym-add-background-archive-refresh-thread-fo/) |
 | 17 | Fix CourtView process supervision: migrate to systemd, fix watchdog false positive, update deploy.sh | 2026-06-14 | e393636 | [260614-wjl-fix-courtview-process-supervision-migrat](.planning/quick/260614-wjl-fix-courtview-process-supervision-migrat/) |
+| 18 | Stop background polling for Racketeer (migrated off Padelmates to a different app): removed from HEATMAP_CLUBS, excluded from availability refresh loop, removed archive refresh thread + dead helper code. Kept polling for other 3 clubs and on-demand /api/* proxying for Racketeer. | 2026-07-10 | TBD | inline |
 
 ## Session Continuity
 

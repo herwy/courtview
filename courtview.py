@@ -65,8 +65,8 @@ ALLOWED_PATHS = {
 CACHED_PATH = "/player/player_booking/all_courts_slot_prices_v3"
 
 # Clubs and court counts for server-side heatmap fetching
+# Racketeer excluded: migrated off Padelmates to a different booking app (2026-07-01)
 HEATMAP_CLUBS = [
-    {"id": "5111764d9bb14be3adbdb8e133e8bd80", "courts": 11},  # Racketeer
     {"id": "47d2eb0db7194a9dbd29783c3a2a82ad", "courts": 7},   # Padium Canary Wharf
     {"id": "788fa2c66535421aabc60fd27f941c42",  "courts": 12},  # Rocket Padel Ilford
     {"id": "stratfordpadelclub", "courts": 11, "platform": "tpc"},  # Stratford Padel Club
@@ -85,10 +85,8 @@ TPC_CLUB_ID   = "stratfordpadelclub"
 HEATMAP_HOURS      = list(range(7, 23))   # 07:00-22:00
 HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h (1 API call per club)
 
-ARCHIVE_REFRESH_HOUR_UTC   = 22  # 23:30 BST — capture after a full day of payments
-ARCHIVE_REFRESH_MINUTE_UTC = 30
-
-# Racketeer is the primary research target; its club_id is used to guard archive writes
+# Racketeer migrated off Padelmates (2026-07-01) — club_id kept to exclude it from
+# background polling; on-demand /api/* proxying and historical archive data still work.
 RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80"
 
 # Runtime paths on RPi
@@ -2423,140 +2421,6 @@ def _heatmap_refresh_loop() -> None:
                 print(f"[heatmap] daily refresh failed for club {club['id']}: {exc}")
 
 
-def _secs_until_archive_run() -> float:
-    """Seconds until next daily archive run at ARCHIVE_REFRESH_HOUR_UTC:ARCHIVE_REFRESH_MINUTE_UTC UTC."""
-    now = datetime.utcnow()
-    target = now.replace(hour=ARCHIVE_REFRESH_HOUR_UTC, minute=ARCHIVE_REFRESH_MINUTE_UTC, second=0, microsecond=0)
-    if now >= target:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
-
-
-def _archive_refresh_loop() -> None:
-    """Daily at 22:30 UTC (23:30 BST): snapshot Racketeer club info, revenue, and payment history."""
-    while True:
-        wait = _secs_until_archive_run()
-        print(f"[archive-refresh] next run in {wait/3600:.1f}h (22:30 UTC daily)")
-        time.sleep(wait)
-
-        captured_at = int(_now())  # shared timestamp for all four writes this run
-
-        # --- club info ---
-        try:
-            paths = [
-                f"/club/?club_id={RACKETEER_CLUB_ID}",
-                f"/club/membership/?club_id={RACKETEER_CLUB_ID}",
-                f"/club/creditpackage/?club_id={RACKETEER_CLUB_ID}",
-                f"/club/club_extras?club_id={RACKETEER_CLUB_ID}",
-            ]
-            results = {}
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                futs = {pool.submit(cffi_requests.get, TARGET + p, headers=APP_HEADERS, timeout=15, impersonate="chrome110"): p for p in paths}
-                for fut in concurrent.futures.as_completed(futs):
-                    path = futs[fut]
-                    try:
-                        r = fut.result()
-                        results[path] = r.json() if r.status_code == 200 else {"error": r.status_code}
-                    except Exception as exc:
-                        results[path] = {"error": str(exc)}
-            payload = json.dumps(results)
-            conn = _db_connect()
-            conn.execute(
-                "INSERT INTO archive_club_info (club_id, payload, captured_at) VALUES (?, ?, ?)",
-                (RACKETEER_CLUB_ID, payload, captured_at),
-            )
-            conn.commit()
-            conn.close()
-            print(f"[archive-refresh] club_info snapshot saved for {RACKETEER_CLUB_ID}")
-        except Exception as exc:
-            print(f"[archive-refresh] club_info error: {exc}")
-
-        # --- revenue summary (current month to now) ---
-        try:
-            now_dt = datetime.utcnow()
-            month_start = datetime(now_dt.year, now_dt.month, 1)
-            start_ms = int(month_start.timestamp() * 1000)
-            end_ms = int(_now() * 1000)
-            rev_path = f"/club/statistics/financial/v2?club_ids={RACKETEER_CLUB_ID}&start_time={start_ms}&end_time={end_ms}"
-            r = cffi_requests.get(TARGET + rev_path, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-            payload = r.text if r.status_code == 200 else json.dumps({"error": r.status_code})
-            conn = _db_connect()
-            conn.execute(
-                "INSERT INTO archive_financial (club_id, start_time, end_time, payload, endpoint, captured_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (RACKETEER_CLUB_ID, str(start_ms), str(end_ms), payload, "revenue-summary", captured_at),
-            )
-            conn.commit()
-            conn.close()
-            print(f"[archive-refresh] revenue snapshot saved for {RACKETEER_CLUB_ID}")
-        except Exception as exc:
-            print(f"[archive-refresh] revenue error: {exc}")
-
-        # --- payment history (last 24h — paginates at limit=100, API rejects >100) ---
-        try:
-            end_ms = int(_now() * 1000)
-            start_ms = end_ms - 86400 * 1000
-            all_items: list = []
-            skip = 0
-            while True:
-                pay_url = (
-                    f"{TARGET}/club/statistics/online_payment_history"
-                    f"?club_id={RACKETEER_CLUB_ID}&start_datetime={start_ms}&end_datetime={end_ms}"
-                    f"&limit=100&skip={skip}"
-                )
-                r = cffi_requests.get(pay_url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-                page = r.json() if r.status_code == 200 else []
-                if not isinstance(page, list) or not page:
-                    break
-                all_items.extend(page)
-                if len(page) < 100:
-                    break
-                skip += 100
-            if not all_items:
-                # Retry once - empty result may be a transient API hiccup
-                time.sleep(30)
-                r2 = cffi_requests.get(
-                    f"{TARGET}/club/statistics/online_payment_history"
-                    f"?club_id={RACKETEER_CLUB_ID}&start_datetime={start_ms}&end_datetime={end_ms}&limit=100&skip=0",
-                    headers=APP_HEADERS, timeout=15, impersonate="chrome110"
-                )
-                _retry = r2.json() if r2.status_code == 200 else []
-                all_items = _retry if isinstance(_retry, list) else []
-                if not all_items:
-                    print(f"[archive-refresh] WARNING: payment-history returned 0 results after retry")
-            payload = json.dumps({"payments": all_items, "skip": 0, "limit": len(all_items), "has_more": False})
-            conn = _db_connect()
-            conn.execute(
-                "INSERT INTO archive_financial (club_id, start_time, end_time, payload, endpoint, captured_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (RACKETEER_CLUB_ID, str(start_ms), str(end_ms), payload, "payment-history", captured_at),
-            )
-            conn.commit()
-            conn.close()
-            print(f"[archive-refresh] payment-history snapshot saved ({len(all_items)} payments)")
-        except Exception as exc:
-            print(f"[archive-refresh] payment-history error: {exc}")
-
-        # --- heatmap (read from live cache, no extra API call) ---
-        try:
-            conn = _db_connect()
-            rows = conn.execute(
-                "SELECT dow, hour, avg_occ, samples FROM heatmap_cache WHERE club_id=?",
-                (RACKETEER_CLUB_ID,),
-            ).fetchall()
-            if rows:
-                conn.executemany(
-                    "INSERT INTO archive_heatmap (club_id, dow, hour, avg_occ, samples, captured_at)"
-                    " VALUES (?,?,?,?,?,?)",
-                    [(RACKETEER_CLUB_ID, dow, hr, occ, samples, captured_at) for dow, hr, occ, samples in rows],
-                )
-                conn.commit()
-                print(f"[archive-refresh] heatmap snapshot saved ({len(rows)} cells)")
-            else:
-                print("[archive-refresh] heatmap snapshot skipped (no cache data yet)")
-            conn.close()
-        except Exception as exc:
-            print(f"[archive-refresh] heatmap error: {exc}")
-
-
 # ---------------------------------------------------------------------------
 # Background cache refresh thread
 # ---------------------------------------------------------------------------
@@ -2569,8 +2433,8 @@ def _refresh_loop() -> None:
         try:
             conn = _db_connect()
             rows = conn.execute(
-                "SELECT club_id, start_datetime, end_datetime FROM availability WHERE fetched_at > ?",
-                (cutoff,),
+                "SELECT club_id, start_datetime, end_datetime FROM availability WHERE fetched_at > ? AND club_id != ?",
+                (cutoff, RACKETEER_CLUB_ID),
             ).fetchall()
             conn.close()
         except sqlite3.Error as exc:
@@ -2684,9 +2548,7 @@ def _startup() -> None:
     heatmap_thread.start()
     print(f"[startup] heatmap refresh thread started ({len(HEATMAP_CLUBS)} clubs, 24h cycle)")
 
-    archive_thread = threading.Thread(target=_archive_refresh_loop, daemon=True)
-    archive_thread.start()
-    print("[startup] archive refresh thread started (daily at 22:30 UTC, Racketeer only)")
+    print("[startup] archive refresh thread disabled (Racketeer migrated off Padelmates)")
 
 
 _startup()
