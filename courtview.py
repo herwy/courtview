@@ -24,7 +24,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from time import time as _now
-from urllib.parse import urlencode, parse_qsl, quote
+from urllib.parse import urlencode, parse_qsl
 
 from flask import Flask, Response, jsonify, make_response, request
 from curl_cffi import requests as cffi_requests
@@ -925,7 +925,7 @@ def api_membership_members():
         # Fetch the list of membership plans for this club
         try:
             plans_r = cffi_requests.get(
-                f"{TARGET}/club/membership/?club_id={club_id}",
+                f"{TARGET}/club/membership/?" + urlencode({"club_id": club_id}),
                 headers=APP_HEADERS,
                 timeout=15,
                 impersonate="chrome110",
@@ -1041,11 +1041,12 @@ def api_club_info():
             pass
 
     results: dict = {"profile": None, "memberships": None, "credits": None, "extras": None}
+    club_id_qs = urlencode({"club_id": club_id})
     targets = [
-        ("profile",     f"/club/?club_id={club_id}"),
-        ("memberships", f"/club/membership/?club_id={club_id}"),
-        ("credits",     f"/club/creditpackage/?club_id={club_id}"),
-        ("extras",      f"/club/club_extras?club_id={club_id}"),
+        ("profile",     f"/club/?{club_id_qs}"),
+        ("memberships", f"/club/membership/?{club_id_qs}"),
+        ("credits",     f"/club/creditpackage/?{club_id_qs}"),
+        ("extras",      f"/club/club_extras?{club_id_qs}"),
     ]
 
     def _fetch(key: str, path: str) -> None:
@@ -1112,7 +1113,7 @@ def api_booked_hours():
                 if via_query: _set_cookie(resp, via_query)
                 return resp
             try:
-                url = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start}&end_datetime={end}"
+                url = f"{TARGET}/home/activity/get_booked_hours?" + urlencode({"club_id": club_id, "start_datetime": start, "end_datetime": end})
                 r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
                 payload = r.content.decode("utf-8", errors="replace")
                 if r.status_code == 200:
@@ -1121,7 +1122,7 @@ def api_booked_hours():
                 return jsonify({"error": str(exc)}), 502
     else:
         try:
-            url = f"{TARGET}/home/activity/get_booked_hours?club_id={club_id}&start_datetime={start}&end_datetime={end}"
+            url = f"{TARGET}/home/activity/get_booked_hours?" + urlencode({"club_id": club_id, "start_datetime": start, "end_datetime": end})
             r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
             payload = r.content.decode("utf-8", errors="replace")
         except Exception as exc:
@@ -1188,13 +1189,13 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
         coach_rates: dict = {}
 
         def _fetch_mix():
-            url = (f"{TARGET}/home/activity/filtered_activities"
-                   f"?club_id={club_id}&start={s}&end={e}&limit={PAGE_SIZE}")
+            url = f"{TARGET}/home/activity/filtered_activities?" + urlencode(
+                {"club_id": club_id, "start": s, "end": e, "limit": PAGE_SIZE})
             return cffi_requests.get(url, headers=APP_HEADERS, timeout=12, impersonate="chrome110")
 
         def _fetch_training():
-            url = (f"{TARGET}/home/activity/filtered_activities"
-                   f"?club_id={club_id}&start={s}&end={e}&activity_type=Training&limit=100")
+            url = f"{TARGET}/home/activity/filtered_activities?" + urlencode(
+                {"club_id": club_id, "start": s, "end": e, "activity_type": "Training", "limit": 100})
             return cffi_requests.get(url, headers=APP_HEADERS, timeout=12, impersonate="chrome110")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
@@ -1277,11 +1278,8 @@ def api_day_activities():
     skip = 0
     try:
         for page_num in range(MAX_PAGES):
-            url = (
-                f"{TARGET}/home/activity/filtered_activities"
-                f"?club_id={club_id}&start={start}&end={end}"
-                f"&limit={PAGE_SIZE}&skip={skip}"
-            )
+            url = f"{TARGET}/home/activity/filtered_activities?" + urlencode(
+                {"club_id": club_id, "start": start, "end": end, "limit": PAGE_SIZE, "skip": skip})
             r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
             if r.status_code != 200:
                 break
@@ -1332,10 +1330,8 @@ def api_revenue_summary():
                 if via_query: _set_cookie(resp, via_query)
                 return resp
             try:
-                url = (
-                    f"{TARGET}/club/statistics/financial/v2"
-                    f"?club_ids={club_id}&start_time={start}&end_time={end}"
-                )
+                url = f"{TARGET}/club/statistics/financial/v2?" + urlencode(
+                    {"club_ids": club_id, "start_time": start, "end_time": end})
                 r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
                 payload = r.content.decode("utf-8", errors="replace")
                 if r.status_code == 200:
@@ -1344,10 +1340,8 @@ def api_revenue_summary():
                 return jsonify({"error": str(exc)}), 502
     else:
         try:
-            url = (
-                f"{TARGET}/club/statistics/financial/v2"
-                f"?club_ids={club_id}&start_time={start}&end_time={end}"
-            )
+            url = f"{TARGET}/club/statistics/financial/v2?" + urlencode(
+                {"club_ids": club_id, "start_time": start, "end_time": end})
             r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
             payload = r.content.decode("utf-8", errors="replace")
         except Exception as exc:
@@ -1380,11 +1374,8 @@ def api_payment_history():
         return jsonify({"error": "club_id, start and end required"}), 400
 
     try:
-        url = (
-            f"{TARGET}/club/statistics/online_payment_history"
-            f"?club_id={club_id}&start_datetime={start}&end_datetime={end}"
-            f"&limit={limit}&skip={skip}"
-        )
+        url = f"{TARGET}/club/statistics/online_payment_history?" + urlencode(
+            {"club_id": club_id, "start_datetime": start, "end_datetime": end, "limit": limit, "skip": skip})
         r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
         items = r.json() if r.status_code == 200 else []
     except Exception as exc:
@@ -1441,11 +1432,8 @@ def _fetch_payment_leaderboard(club_id: str, start: str, end: str) -> list:
     MAX_PAGES = 20  # cap at 2000 payments/window to prevent runaway upstream
 
     def fetch_page(skip: int) -> list:
-        url = (
-            f"{TARGET}/club/statistics/online_payment_history"
-            f"?club_id={quote(str(club_id))}&start_datetime={quote(str(start))}&end_datetime={quote(str(end))}"
-            f"&limit={PAGE_SIZE}&skip={skip}"
-        )
+        url = f"{TARGET}/club/statistics/online_payment_history?" + urlencode(
+            {"club_id": club_id, "start_datetime": start, "end_datetime": end, "limit": PAGE_SIZE, "skip": skip})
         r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
         if r.status_code != 200:
             return []
@@ -1701,7 +1689,8 @@ def api_coach_stats():
                 if via_query: _set_cookie(resp, via_query)
                 return resp
             try:
-                url = f"{TARGET}/club/statistics/coach?club_ids={club_id}&start_time={start}&end_time={end}"
+                url = f"{TARGET}/club/statistics/coach?" + urlencode(
+                    {"club_ids": club_id, "start_time": start, "end_time": end})
                 r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
                 payload = r.content.decode("utf-8", errors="replace")
                 if r.status_code == 200:
@@ -1710,7 +1699,8 @@ def api_coach_stats():
                 return jsonify({"error": str(exc)}), 502
     else:
         try:
-            url = f"{TARGET}/club/statistics/coach?club_ids={club_id}&start_time={start}&end_time={end}"
+            url = f"{TARGET}/club/statistics/coach?" + urlencode(
+                {"club_ids": club_id, "start_time": start, "end_time": end})
             r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
             payload = r.content.decode("utf-8", errors="replace")
         except Exception as exc:
@@ -1755,7 +1745,7 @@ def api_coach_bios():
 
         def fetch_bio(name: str) -> dict:
             try:
-                url = f"{TARGET}/club/global_search?club_id={club_id}&query={name}&limit=5"
+                url = f"{TARGET}/club/global_search?" + urlencode({"club_id": club_id, "query": name, "limit": 5})
                 r = cffi_requests.get(url, headers=APP_HEADERS, timeout=10, impersonate="chrome110")
                 if r.status_code != 200:
                     return {}
