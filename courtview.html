@@ -2584,6 +2584,11 @@ async function loadRevenue(resetPay = true) {
   const mySeq = ++revReqSeq;
   const { start, end } = revMonthBounds(revMonth);
 
+  document.getElementById('revMonthLbl').textContent =
+    revMonth.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  document.getElementById('revNext').disabled = revMonth.getMonth() === new Date().getMonth()
+    && revMonth.getFullYear() === new Date().getFullYear();
+
   if (CLUB === RACKETEER_CLUB_ID) {
     document.getElementById('revLeadersOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
     document.getElementById('revLeadersMeta').textContent = '';
@@ -2622,12 +2627,8 @@ async function loadRevenue(resetPay = true) {
         loadRevenue();
       }
     );
+    return;
   }
-
-  document.getElementById('revMonthLbl').textContent =
-    revMonth.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
-  document.getElementById('revNext').disabled = revMonth.getMonth() === new Date().getMonth()
-    && revMonth.getFullYear() === new Date().getFullYear();
 
   if (resetPay) {
     revPayWindowEnd = new Date();
