@@ -820,6 +820,16 @@ nav {
       <div id="revSummaryOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div></div>
     </section>
 
+    <section aria-labelledby="rev-leaders-title" class="sec">
+      <div class="sec-hd">
+        <h2 class="sec-title" id="rev-leaders-title">Top spenders</h2>
+        <span class="sec-meta" id="revLeadersMeta"></span>
+      </div>
+      <div class="card">
+        <div id="revLeadersOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div></div>
+      </div>
+    </section>
+
     <section aria-labelledby="rev-dow-title" class="sec">
       <div class="sec-hd"><h2 class="sec-title" id="rev-dow-title">Revenue by day of week</h2></div>
       <div class="card" style="padding:16px"><div id="revDowOut"></div></div>
@@ -2580,6 +2590,8 @@ async function loadRevenue(resetPay = true) {
         document.getElementById('revSummaryOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
         document.getElementById('revDowOut').innerHTML = '';
         document.getElementById('revSubOut').innerHTML = '';
+        document.getElementById('revLeadersOut').innerHTML = '<div class="empty">Top spenders unavailable for archived snapshots.</div>';
+        document.getElementById('revLeadersMeta').textContent = '';
         document.getElementById('revPayOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
         document.getElementById('revLoadMoreWrap').hidden = true;
         const [sumR, payR] = await Promise.allSettled([
@@ -2620,12 +2632,16 @@ async function loadRevenue(resetPay = true) {
     document.getElementById('revSummaryOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
     document.getElementById('revDowOut').innerHTML = '';
     document.getElementById('revSubOut').innerHTML = '';
+    document.getElementById('revLeadersOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+    document.getElementById('revLeadersMeta').textContent = '';
   }
 
-  const [sumData, payData] = await Promise.all([
+  const [sumData, payData, leadersData] = await Promise.all([
     fetch(`/api/revenue-summary?club_id=${clubId}&start=${start}&end=${end}`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
     fetch(`/api/payment-history?club_id=${clubId}&start=${revPayWindowStart.getTime()}&end=${revPayWindowEnd.getTime()}&limit=100&skip=0`)
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`/api/payment-leaderboard?club_id=${clubId}&start=${start}&end=${end}`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
   ]);
 
@@ -2634,8 +2650,35 @@ async function loadRevenue(resetPay = true) {
   // Summary cards and DOW/subscription breakdown
   await renderRevenueSummary(sumData);
 
+  // Top spenders
+  renderLeaders(leadersData);
+
   // Payment history
   renderPayments(payData, resetPay);
+}
+
+function renderLeaders(data) {
+  const out  = document.getElementById('revLeadersOut');
+  const meta = document.getElementById('revLeadersMeta');
+  const leaders = data?.leaders || [];
+  if (!leaders.length) {
+    out.innerHTML = '<div class="empty">No successful payments this month.</div>';
+    meta.textContent = '';
+    return;
+  }
+  meta.textContent = `Top ${Math.min(3, leaders.length)} · successful payments`;
+  let h = '<div class="cp-list">';
+  leaders.slice(0, 3).forEach((p, i) => {
+    const name = esc(p.player_name || 'Unknown');
+    const pct  = Math.max(3, Number(p.pct) || 0);
+    h += `<div class="cp-row">
+            <div class="cp-name" title="${name}">${i + 1}. ${name}</div>
+            <div class="cp-bar-track"><div class="cp-bar-fill" style="width:${pct}%"></div></div>
+            <div class="cp-count">${fmtGBP(p.total)}</div>
+          </div>`;
+  });
+  h += '</div>';
+  out.innerHTML = h;
 }
 
 function renderPayments(data, reset) {

@@ -1830,6 +1830,103 @@ def api_payment_history():
     return resp
 
 
+def _parse_gbp_amount(raw) -> float | None:
+    """Parse upstream amount strings like "40.00 GBP" -> 40.0. None if unparseable."""
+    try:
+        return float(str(raw).split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _fetch_payment_leaderboard(club_id: str, start: str, end: str) -> list:
+    """Paginate online_payment_history for a club+window and sum successful payments per player."""
+    PAGE_SIZE = 100
+    MAX_PAGES = 20  # cap at 2000 payments/window to prevent runaway upstream
+    totals: dict = {}
+    skip = 0
+    for _ in range(MAX_PAGES):
+        url = (
+            f"{TARGET}/club/statistics/online_payment_history"
+            f"?club_id={club_id}&start_datetime={start}&end_datetime={end}"
+            f"&limit={PAGE_SIZE}&skip={skip}"
+        )
+        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+        if r.status_code != 200:
+            break
+        page = r.json()
+        if not isinstance(page, list) or not page:
+            break
+        for rec in page:
+            if rec.get("status") != "PAYMENT_SUCCESS":
+                continue
+            amount = _parse_gbp_amount(rec.get("amount"))
+            if amount is None:
+                continue
+            key = rec.get("player_email") or rec.get("player_name") or "unknown"
+            entry = totals.setdefault(key, {"player_name": rec.get("player_name") or "Unknown", "total": 0.0, "count": 0})
+            entry["total"] += amount
+            entry["count"] += 1
+        if len(page) < PAGE_SIZE:
+            break
+        skip += PAGE_SIZE
+
+    leaders = sorted(totals.values(), key=lambda e: e["total"], reverse=True)[:5]
+    max_total = leaders[0]["total"] if leaders else 0
+    for e in leaders:
+        e["total"] = round(e["total"], 2)
+        e["pct"] = round(e["total"] / max_total * 100, 1) if max_total else 0
+    return leaders
+
+
+@app.route("/api/payment-leaderboard", methods=["GET"])
+def api_payment_leaderboard():
+    """Top spenders for a club+time window, aggregated server-side from payment history."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+
+    club_id = request.args.get("club_id", "")
+    start   = request.args.get("start", "")
+    end     = request.args.get("end", "")
+    if not club_id or not start or not end:
+        return jsonify({"error": "club_id, start and end required"}), 400
+    if club_id == TPC_CLUB_ID:
+        resp = Response(json.dumps({"leaders": []}), status=200, content_type="application/json")
+        if via_query: _set_cookie(resp, via_query)
+        return resp
+
+    ck = _stats_key("payment-leaderboard", club_id, start, end)
+    if ck:
+        cached = get_stats_cached(ck)
+        if cached:
+            resp = Response(cached, status=200, content_type="application/json")
+            if via_query: _set_cookie(resp, via_query)
+            return resp
+        with _STATS_FETCH_MUTEX:
+            lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
+        with lock:
+            cached = get_stats_cached(ck)
+            if cached:
+                resp = Response(cached, status=200, content_type="application/json")
+                if via_query: _set_cookie(resp, via_query)
+                return resp
+            try:
+                payload = json.dumps({"leaders": _fetch_payment_leaderboard(club_id, start, end)})
+            except Exception as exc:
+                return jsonify({"error": str(exc)}), 502
+            set_stats_cached(ck, payload)
+    else:
+        try:
+            payload = json.dumps({"leaders": _fetch_payment_leaderboard(club_id, start, end)})
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 502
+
+    resp = Response(payload, status=200, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
 # ---------------------------------------------------------------------------
 # Archive read endpoints
 # ---------------------------------------------------------------------------
