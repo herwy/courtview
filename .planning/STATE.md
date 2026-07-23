@@ -31,6 +31,7 @@ last_updated: "2026-07-10T23:46:00Z"
 | 19 | Fix /api/archive/heatmap 500 error: archive_heatmap rows have always had NULL hour_norm/dow_norm (writer never populated them since 2026-06-12); endpoint now skips signal entries instead of crashing on round(None) | 2026-07-10 | 9db59db | inline |
 | 20 | Add "Top spenders" monthly leaderboard to Revenue tab: /api/payment-leaderboard aggregates successful payments per player (paginated, stats_cache-backed), rendered as a top-3 card between Revenue summary and Revenue by day of week | 2026-07-23 | db66eaa | inline |
 | 21 | Add archived Top spenders for Racketeer (/api/archive/payment-leaderboard, aggregates all daily payment-history snapshots, dedup by transaction_id); speed up live leaderboard pagination via bounded ThreadPoolExecutor (~16-18s -> ~5s cold); URL-encode club_id/start/end in upstream request | 2026-07-23 | 5aae725 | inline |
+| 22 | Fix Top spenders card race condition: loadRevenue() guarded against club changes mid-fetch but not month changes, so rapid month nav clicks could let a stale slower month's leaderboard response overwrite a fresher one. Added revReqSeq counter. | 2026-07-23 | acfc764 | inline |
 
 ## Session Continuity
 
