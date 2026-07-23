@@ -69,18 +69,7 @@ CACHED_PATH = "/player/player_booking/all_courts_slot_prices_v3"
 HEATMAP_CLUBS = [
     {"id": "47d2eb0db7194a9dbd29783c3a2a82ad", "courts": 7},   # Padium Canary Wharf
     {"id": "788fa2c66535421aabc60fd27f941c42",  "courts": 12},  # Rocket Padel Ilford
-    {"id": "stratfordpadelclub", "courts": 11, "platform": "tpc"},  # Stratford Padel Club
 ]
-
-# ---------------------------------------------------------------------------
-# TPC Matchpoint constants - Stratford Padel Club
-# ---------------------------------------------------------------------------
-TPC_BASE_URL  = "https://stratfordpadelclub.matchpoint.com.es"
-TPC_AUTH_URL  = "https://movhub.matchpoint.com.es/services/mobi/configservices/v1/auth.svc/Autorizar"
-TPC_TOKEN     = "autorizado"   # static, never rotates
-TPC_CENTRO_ID = 2
-TPC_CUADRO_ID = 4
-TPC_CLUB_ID   = "stratfordpadelclub"
 
 HEATMAP_HOURS      = list(range(7, 23))   # 07:00-22:00
 HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h (1 API call per club)
@@ -636,387 +625,6 @@ def store_cached(club_id: str, start: str, end: str, payload: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# TPC Matchpoint helpers - Stratford Padel Club
-# ---------------------------------------------------------------------------
-
-def _tpc_post(endpoint_path: str, body_dict: dict) -> dict:
-    """POST to the TPC Matchpoint API using stdlib urllib.request only."""
-    url = TPC_BASE_URL + endpoint_path
-    body_bytes = json.dumps(body_dict).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body_bytes,
-        method="POST",
-        headers={
-            "Accept":       "application/json",
-            "Content-type": "application/json",
-            "token":        TPC_TOKEN,
-        },
-    )
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read())
-
-
-def _tpc_date(date_obj) -> str:
-    """Convert a datetime.date to DD/MM/YYYY (Spanish TPC date format)."""
-    return date_obj.strftime("%d/%m/%Y")
-
-
-def _fetch_tpc_day(date_obj) -> list:
-    """Fetch per-court availability from TPC ObtenerPistasDisponibles3 for one date.
-    Returns a v1 court list or [] on any error."""
-    try:
-        data = _tpc_post(
-            "/services/mobi/appservices/v1/reservas.svc/ObtenerPistasDisponibles3",
-            {
-                "idCentro": TPC_CENTRO_ID,
-                "idTipoPista": 0,
-                "idDeporte": 0,
-                "idCuadro": TPC_CUADRO_ID,
-                "strfecha": _tpc_date(date_obj),
-                "strhora": "00:00",
-                "duracionPartido": 90,
-                "mostrarDiaEntero": True,
-                "numeroResultadosPorPista": 20,
-                "coordenadasusuario": "",
-                "distmax": 0,
-                "poblacion": "",
-            },
-        )
-        if not data.get("Correcto"):
-            return []
-
-        courts_by_id: dict = {}
-        for item in data.get("Listado", []):
-            court_id = str(item["Id_Pista"])
-            if court_id not in courts_by_id:
-                courts_by_id[court_id] = {
-                    "court_id":   court_id,
-                    "court_name": item["Nombre_Recurso"],
-                    "name":       item["Nombre_Recurso"],
-                    "sport_type": "PADEL",
-                    "available_slots": [],
-                }
-            # Parse StrHora_Inicio / StrHora_Fin as HH:MM
-            start_parts = item["StrHora_Inicio"].split(":")
-            end_parts   = item["StrHora_Fin"].split(":")
-            start_dt = datetime(
-                date_obj.year, date_obj.month, date_obj.day,
-                int(start_parts[0]), int(start_parts[1]),
-                tzinfo=_LONDON_TZ,
-            )
-            end_dt = datetime(
-                date_obj.year, date_obj.month, date_obj.day,
-                int(end_parts[0]), int(end_parts[1]),
-                tzinfo=_LONDON_TZ,
-            )
-            start_ms = int(start_dt.timestamp() * 1000)
-            end_ms   = int(end_dt.timestamp() * 1000)
-            courts_by_id[court_id]["available_slots"].append({
-                "start_datetime":   start_ms,
-                "end_datetime":     end_ms,
-                "interval_prices":  [{"duration": 90, "price": item["Precio"]}],
-                "price_90":         item["Precio"],
-            })
-
-        return list(courts_by_id.values())
-
-    except Exception as exc:
-        print(f"[tpc] _fetch_tpc_day error for {date_obj}: {exc}")
-        return []
-
-
-def _api_month_tpc(club_id: str, via_query: str) -> Response:
-    """Serve /api/month for TPC clubs: same 28-day cache loop as api_month."""
-    from datetime import date as _date
-    cutoff = int(_now()) - CACHE_TTL
-    today  = datetime.now(_LONDON_TZ).date()
-
-    date_params: list = []
-    for i in range(28):
-        d        = today + timedelta(days=i)
-        start_ms = int(datetime(d.year, d.month, d.day, 0, 0, 0,
-                                tzinfo=_LONDON_TZ).timestamp() * 1000)
-        end_ms   = int(datetime(d.year, d.month, d.day, 23, 59, 59, 999000,
-                                tzinfo=_LONDON_TZ).timestamp() * 1000)
-        date_params.append((d, str(d), str(start_ms), str(end_ms)))
-
-    days: dict = {dp[1]: None for dp in date_params}
-
-    # Batch cache read
-    conn = _db_connect()
-    try:
-        placeholders = ",".join(["(?,?)"] * len(date_params))
-        flat_pairs   = [v for dp in date_params for v in (dp[2], dp[3])]
-        rows = conn.execute(
-            f"SELECT start_datetime, end_datetime, payload FROM availability"
-            f" WHERE club_id=? AND fetched_at>?"
-            f" AND (start_datetime, end_datetime) IN ({placeholders})",
-            [club_id, cutoff] + flat_pairs,
-        ).fetchall()
-        pair_to_date = {(dp[2], dp[3]): (dp[0], dp[1]) for dp in date_params}
-        for start_dt, end_dt, payload_str in rows:
-            key = pair_to_date.get((start_dt, end_dt))
-            if key:
-                days[key[1]] = json.loads(payload_str)
-    except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
-    finally:
-        conn.close()
-
-    # Fetch missing days from TPC
-    for date_obj, date_str, start_ms, end_ms in date_params:
-        if days[date_str] is not None:
-            continue
-        courts = _fetch_tpc_day(date_obj)
-        if courts:
-            store_cached(club_id, start_ms, end_ms, json.dumps(courts))
-            days[date_str] = courts
-
-    resp = Response(
-        json.dumps({"club_id": club_id, "days": days}),
-        status=200, content_type="application/json",
-    )
-    if via_query:
-        _set_cookie(resp, via_query)
-    return resp
-
-
-def _fetch_tpc_heatmap() -> None:
-    """Fetch 14 days of ObtenerHorariosDisponibles and build the DOW x hour heatmap matrix.
-    Also calls _fetch_tpc_day for today to build court_popularity."""
-    print(f"[heatmap] fetching TPC data for {TPC_CLUB_ID}")
-    today = datetime.now(_LONDON_TZ).date()
-
-    # Accumulate booked/total per (dow, hour) across 14 days
-    booked: dict = {}  # {(dow, hour): int}
-    total:  dict = {}  # {(dow, hour): int}
-
-    for i in range(14):
-        d = today + timedelta(days=i)
-        try:
-            data = _tpc_post(
-                "/services/mobi/appservices/v1/reservas.svc/ObtenerHorariosDisponibles",
-                {
-                    "idCentro":       TPC_CENTRO_ID,
-                    "idDeporte":      0,
-                    "idTipoPista":    0,
-                    "idCuadro":       TPC_CUADRO_ID,
-                    "strfecha":       _tpc_date(d),
-                    "duracionPartido": 90,
-                },
-            )
-            if not data.get("Correcto"):
-                continue
-        except Exception as exc:
-            print(f"[heatmap] TPC hourly fetch error for {d}: {exc}")
-            continue
-
-        dow = d.weekday()  # 0=Mon, 6=Sun
-        for item in data.get("Listado", []):
-            try:
-                hr = int(item["Hora"].split(":")[0])
-            except (KeyError, ValueError):
-                continue
-            if hr not in HEATMAP_HOURS:
-                continue
-            key = (dow, hr)
-            total[key]  = total.get(key, 0) + 1
-            if not item.get("Disponible", True):  # Disponible:false means booked
-                booked[key] = booked.get(key, 0) + 1
-
-    # Compute occupancy rates
-    occ: dict = {}  # {(dow, hour): float}
-    for key in total:
-        occ[key] = booked.get(key, 0) / total[key] if total[key] else 0.0
-
-    # Build normalised hour and DOW signals
-    hour_totals: dict = {}
-    hour_counts_n: dict = {}
-    dow_totals: dict = {}
-    dow_counts_n: dict = {}
-    for (dow, hr), val in occ.items():
-        hour_totals[hr]  = hour_totals.get(hr, 0.0) + val
-        hour_counts_n[hr] = hour_counts_n.get(hr, 0) + 1
-        dow_totals[dow]  = dow_totals.get(dow, 0.0) + val
-        dow_counts_n[dow] = dow_counts_n.get(dow, 0) + 1
-
-    hour_avg: dict = {hr: hour_totals[hr] / hour_counts_n[hr] for hr in hour_totals}
-    dow_avg:  dict = {dow: dow_totals[dow] / dow_counts_n[dow] for dow in dow_totals}
-
-    max_hour = max(hour_avg.values()) if hour_avg else 1.0
-    max_dow  = max(dow_avg.values())  if dow_avg  else 1.0
-
-    # Court popularity from today's ObtenerPistasDisponibles3
-    today_courts = _fetch_tpc_day(today)
-    court_booked: dict = {}  # {court_name: int booked slots}
-    for court in today_courts:
-        name = court["court_name"]
-        booked_count = 0  # slots in available_slots are available; total - available = booked
-        # available_slots contains AVAILABLE slots (not booked), so booked = 0 for those
-        # Court popularity: use total slot count as a proxy (courts with more total slots are "busier")
-        court_booked[name] = len(court.get("available_slots", []))
-
-    now_ts = int(_now())
-    conn = _db_connect()
-    try:
-        # Product matrix
-        for dow in range(7):
-            dow_w = dow_avg.get(dow, 0.0) / max_dow
-            for hr in HEATMAP_HOURS:
-                hr_w = hour_avg.get(hr, 0.0) / max_hour
-                cell_occ = round(dow_w * hr_w, 4)
-                conn.execute(
-                    "INSERT OR REPLACE INTO heatmap_cache (club_id, dow, hour, avg_occ, samples, fetched_at) VALUES (?,?,?,?,?,?)",
-                    (TPC_CLUB_ID, dow, hr, cell_occ, 14, now_ts),
-                )
-        # Hour signal
-        for hr in HEATMAP_HOURS:
-            norm = round(hour_avg.get(hr, 0.0) / max_hour, 4)
-            conn.execute(
-                "INSERT OR REPLACE INTO heatmap_hour_signal (club_id, hour, norm, fetched_at) VALUES (?,?,?,?)",
-                (TPC_CLUB_ID, hr, norm, now_ts),
-            )
-        # DOW signal
-        for dow in range(7):
-            norm = round(dow_avg.get(dow, 0.0) / max_dow, 4)
-            conn.execute(
-                "INSERT OR REPLACE INTO heatmap_dow_signal (club_id, dow, norm, fetched_at) VALUES (?,?,?,?)",
-                (TPC_CLUB_ID, dow, norm, now_ts),
-            )
-        # Court popularity - wipe-and-replace
-        conn.execute("DELETE FROM court_popularity WHERE club_id=?", (TPC_CLUB_ID,))
-        for court_name, count in court_booked.items():
-            conn.execute(
-                "INSERT OR REPLACE INTO court_popularity (club_id, court_name, count, fetched_at) VALUES (?,?,?,?)",
-                (TPC_CLUB_ID, court_name, count, now_ts),
-            )
-        conn.commit()
-        print(f"[heatmap] stored TPC heatmap for {TPC_CLUB_ID} ({len(court_booked)} courts)")
-    except sqlite3.Error as exc:
-        print(f"[heatmap] TPC db write error: {exc}")
-    finally:
-        conn.close()
-
-
-def _api_club_info_tpc(club_id: str, via_query: str) -> Response:
-    """Fetch live club info for Stratford Padel Club from the TPC Matchpoint API."""
-    GROUP_NAMES = {
-        1:  "Group Training",
-        2:  "Private Classes",
-        3:  "SPC Tournament",
-        4:  "Social / Community",
-        6:  "Competitive Training",
-        8:  "Kids Programs",
-        12: "Starter / Taster Sessions",
-        19: "Physiotherapy & Wellness",
-    }
-
-    _FALLBACK_PROFILE = {
-        "name":        "Stratford Padel Club",
-        "address":     "Stratford, London",
-        "phone":       "00447365809000",
-        "email":       "info@stratfordpadelclub.org",
-        "sport_types": ["PADEL"],
-    }
-
-    # --- Fetch club profile ---
-    try:
-        info_resp = _tpc_post(
-            "/services/mobi/appservices/v1/club.svc/ObtenerInformacionCentro",
-            {"idCentro": TPC_CENTRO_ID},
-        )
-        resp_data = info_resp.get("Respuesta", {})
-        if not resp_data:
-            raise ValueError("empty Respuesta")
-
-        horario = resp_data.get("Horario", "08:00-23:00") or "08:00-23:00"
-        try:
-            open_t, close_t = horario.split("-", 1)
-            open_t = open_t.strip()
-            close_t = close_t.strip()
-            if len(open_t) != 5 or len(close_t) != 5:
-                raise ValueError("bad format")
-        except Exception:
-            open_t, close_t = "08:00", "23:00"
-        opening_hours = [{"open": open_t, "close": close_t} for _ in range(7)]
-
-        facilities = [
-            p.get("Texto", "")
-            for p in (resp_data.get("PastillasInformacionInfoGeneral") or [])
-            if p.get("Texto")
-        ]
-
-        profile = {
-            "name":          resp_data.get("Nombre", _FALLBACK_PROFILE["name"]),
-            "address":       resp_data.get("Direccion", _FALLBACK_PROFILE["address"]),
-            "email":         resp_data.get("Email", _FALLBACK_PROFILE["email"]),
-            "courts":        resp_data.get("NumeroPistas"),
-            "twitter":       resp_data.get("CuentaTwitter"),
-            "facilities":    facilities,
-            "opening_hours": opening_hours,
-        }
-    except Exception as exc:
-        print(f"[club-info-tpc] ObtenerInformacionCentro error: {exc}")
-        profile = _FALLBACK_PROFILE
-
-    # --- Fetch activity catalog ---
-    try:
-        acts_resp = _tpc_post(
-            "/services/mobi/appservices/v1/club.svc/ObtenerConfiguracionSistemaReservaPlazas",
-            {},
-        )
-        acts_raw = (acts_resp.get("Respuesta") or {}).get("Actividades") or []
-        if not isinstance(acts_raw, list):
-            raise ValueError("Actividades is not a list")
-
-        # Build flat list; sort groups by id, activities within each group by name
-        groups: dict = {}
-        for act in acts_raw:
-            gid = act.get("Id_Grupo", 0)
-            if gid not in groups:
-                groups[gid] = []
-            groups[gid].append({
-                "id":         act.get("Id"),
-                "name":       act.get("Nombre", ""),
-                "group_id":   gid,
-                "group_name": GROUP_NAMES.get(gid, f"Group {gid}"),
-            })
-
-        activities = []
-        for gid in sorted(groups.keys()):
-            for act in sorted(groups[gid], key=lambda a: a["name"]):
-                activities.append(act)
-    except Exception as exc:
-        print(f"[club-info-tpc] ObtenerConfiguracionSistemaReservaPlazas error: {exc}")
-        activities = []
-
-    payload = json.dumps({
-        "profile":     profile,
-        "memberships": [],
-        "credits":     [],
-        "extras":      [],
-        "activities":  activities,
-    })
-
-    try:
-        conn = _db_connect()
-        conn.execute(
-            "INSERT OR REPLACE INTO club_info_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
-            (club_id, payload, int(_now())),
-        )
-        conn.commit()
-        conn.close()
-    except sqlite3.Error:
-        pass
-
-    resp = Response(payload, status=200, content_type="application/json")
-    if via_query:
-        _set_cookie(resp, via_query)
-    return resp
-
-
-# ---------------------------------------------------------------------------
 # Flask application
 # ---------------------------------------------------------------------------
 
@@ -1209,9 +817,6 @@ def api_month():
     if not club_id:
         return jsonify({"error": "club_id required"}), 400
 
-    if club_id == TPC_CLUB_ID:
-        return _api_month_tpc(club_id, via_query)
-
     cutoff = int(_now()) - CACHE_TTL
     today  = datetime.now(_LONDON_TZ).date()
 
@@ -1271,10 +876,6 @@ def api_membership_members():
     club_id = request.args.get("club_id", "")
     if not club_id:
         return jsonify({"error": "club_id required"}), 400
-    if club_id == TPC_CLUB_ID:
-        resp = Response(json.dumps({"club_id": club_id, "counts": {}}), status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
 
     force_refresh = request.args.get("refresh") == "1"
     empty_resp = json.dumps({"club_id": club_id, "counts": {}})
@@ -1422,9 +1023,6 @@ def api_club_info():
     if not club_id:
         return jsonify({"error": "club_id required"}), 400
 
-    if club_id == TPC_CLUB_ID:
-        return _api_club_info_tpc(club_id, via_query)
-
     force_refresh = request.args.get("refresh") == "1"
     if not force_refresh:
         try:
@@ -1497,10 +1095,6 @@ def api_booked_hours():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
-    if club_id == TPC_CLUB_ID:
-        resp = Response(json.dumps({"club_id": club_id, "total_activities": None, "total_booked_hours": None}), status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
     ck = _stats_key("booked-hours", club_id, start, end)
     if ck:
         cached = get_stats_cached(ck)
@@ -1551,14 +1145,6 @@ def api_activity_summary():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
-    if club_id == TPC_CLUB_ID:
-        resp = Response(
-            json.dumps({"total": 0, "counts": {}, "coach_rates": {}, "range_days": 0}),
-            status=200, content_type="application/json",
-        )
-        if via_query:
-            _set_cookie(resp, via_query)
-        return resp
     ck = _stats_key("activity-summary", club_id, start, end)
     if ck:
         cached = get_stats_cached(ck)
@@ -1684,10 +1270,6 @@ def api_day_activities():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
-    if club_id == TPC_CLUB_ID:
-        resp = Response(json.dumps({"activities": []}), status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
 
     PAGE_SIZE = 50
     MAX_PAGES = 20  # cap at 1000 activities to prevent runaway upstream
@@ -1734,14 +1316,6 @@ def api_revenue_summary():
     end       = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
-    if club_id == TPC_CLUB_ID:
-        resp = Response(
-            json.dumps({"total_combined_payments": None, "platform_not_supported": True}),
-            status=200, content_type="application/json",
-        )
-        if via_query:
-            _set_cookie(resp, via_query)
-        return resp
     ck = _stats_key("revenue-summary", club_id, start, end)
     if ck:
         cached = get_stats_cached(ck)
@@ -1797,10 +1371,6 @@ def api_payment_history():
     club_id = request.args.get("club_id", "")
     start   = request.args.get("start", "")
     end     = request.args.get("end", "")
-    if club_id == TPC_CLUB_ID:
-        resp = Response(json.dumps([]), status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
     try:
         limit = min(int(request.args.get("limit", "100")), 100)
         skip  = int(request.args.get("skip", "0"))
@@ -1906,10 +1476,6 @@ def api_payment_leaderboard():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
-    if club_id == TPC_CLUB_ID:
-        resp = Response(json.dumps({"leaders": []}), status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
 
     ck = _stats_key("payment-leaderboard", club_id, start, end)
     if ck:
@@ -2119,10 +1685,6 @@ def api_coach_stats():
     end     = request.args.get("end", "")
     if not club_id or not start or not end:
         return jsonify({"error": "club_id, start and end required"}), 400
-    if club_id == TPC_CLUB_ID:
-        resp = Response(json.dumps({"coaches": []}), status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
     ck = _stats_key("coach-stats", club_id, start, end)
     if ck:
         cached = get_stats_cached(ck)
@@ -2171,10 +1733,6 @@ def api_coach_bios():
     names_raw = request.args.get("names", "")
     if not club_id or not names_raw:
         return jsonify({"error": "club_id and names required"}), 400
-    if club_id == TPC_CLUB_ID:
-        resp = Response(json.dumps({}), status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
 
     ck = f"coach-bios:{club_id}:{names_raw}"
     cached = get_stats_cached(ck)
@@ -2518,10 +2076,7 @@ def _heatmap_refresh_loop() -> None:
     for club in HEATMAP_CLUBS:
         if _heatmap_is_stale(club["id"]):
             try:
-                if club.get("platform") == "tpc":
-                    _fetch_tpc_heatmap()
-                else:
-                    _fetch_heatmap_for_club(club["id"], club["courts"])
+                _fetch_heatmap_for_club(club["id"], club["courts"])
             except Exception as exc:
                 print(f"[heatmap] startup refresh failed for club {club['id']}: {exc}")
     # Daily refresh loop
@@ -2529,10 +2084,7 @@ def _heatmap_refresh_loop() -> None:
         time.sleep(HEATMAP_STALE_SECS)
         for club in HEATMAP_CLUBS:
             try:
-                if club.get("platform") == "tpc":
-                    _fetch_tpc_heatmap()
-                else:
-                    _fetch_heatmap_for_club(club["id"], club["courts"])
+                _fetch_heatmap_for_club(club["id"], club["courts"])
             except Exception as exc:
                 print(f"[heatmap] daily refresh failed for club {club['id']}: {exc}")
 

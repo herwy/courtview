@@ -861,8 +861,7 @@ nav {
 const CLUBS = [
   { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer',           sub: 'North Acton, London',  courts: 11 },
   { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium Canary Wharf', sub: 'Canary Wharf, London', courts: 7  },
-  { id: '788fa2c66535421aabc60fd27f941c42',  name: 'Rocket Padel Ilford', sub: 'Ilford, London',       courts: 12 },
-  { id: 'stratfordpadelclub',               name: 'Stratford Padel Club', sub: 'Stratford, London',   courts: 11, platform: 'tpc' }
+  { id: '788fa2c66535421aabc60fd27f941c42',  name: 'Rocket Padel Ilford', sub: 'Ilford, London',       courts: 12 }
 ];
 let CLUB = (localStorage.getItem('cv-club-id') && CLUBS.find(c => c.id === localStorage.getItem('cv-club-id')))
   ? localStorage.getItem('cv-club-id')
@@ -887,11 +886,8 @@ const WEEK_DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 const COMPARE_CLUBS = [
   { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer · North Acton' },
   { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium · Canary Wharf' },
-  { id: '788fa2c66535421aabc60fd27f941c42', name: 'Rocket Padel · Ilford' },
-  { id: 'stratfordpadelclub',               name: 'Stratford Padel · Stratford' }
+  { id: '788fa2c66535421aabc60fd27f941c42', name: 'Rocket Padel · Ilford' }
 ];
-
-function isTPCClub(id) { return id === 'stratfordpadelclub'; }
 
 /* STATE */
 let dayData     = null;
@@ -946,7 +942,6 @@ function fmtGBP(n) {
 
 /* API */
 async function fetchDay(date, clubId = CLUB) {
-  if (isTPCClub(clubId)) return [];
   const url = `${API}/player/player_booking/all_courts_slot_prices_v3?club_id=${clubId}&start_datetime=${dayStart(date)}&end_datetime=${dayEnd(date)}`;
   const r = await apiFetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2144,31 +2139,7 @@ async function runCompare() {
       (async () => {
         try {
           if (!compareCache[ck]) {
-            if (isTPCClub(club.id)) {
-              const scanMonthCache = (id) => {
-                for (let i = 0; i <= 14; i++) {
-                  const d = new Date(compareDate); d.setDate(d.getDate() + i);
-                  const c = monthCache[cacheKey(id, isoDate(d))];
-                  if (c && c.length > 0) return c;
-                }
-                return null;
-              };
-              let data = scanMonthCache(club.id);
-              if (!data) {
-                // monthCache not yet populated — fetch directly and populate
-                const r = await fetch(`/api/month?club_id=${encodeURIComponent(club.id)}`);
-                if (r.ok) {
-                  const m = await r.json();
-                  for (const [ds, courts] of Object.entries(m.days || {})) {
-                    if (courts !== null) monthCache[cacheKey(club.id, ds)] = normaliseV2(courts);
-                  }
-                  data = scanMonthCache(club.id);
-                }
-              }
-              compareCache[ck] = data || [];
-            } else {
-              compareCache[ck] = await fetchDay(compareDate, club.id);
-            }
+            compareCache[ck] = await fetchDay(compareDate, club.id);
           }
         } catch (_) { compareCache[ck] = []; }
         updateCompareRow(club);
@@ -2295,23 +2266,11 @@ async function loadStats() {
   document.getElementById('statsMonthLbl').textContent =
     now.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
-  // For TPC clubs, activity mix and coach stats are not available
-  if (isTPCClub(clubId)) {
-    document.getElementById('statsMixOut').innerHTML =
-      '<div class="empty">Activity mix not available for this club.</div>';
-    document.getElementById('statsCoachOut').innerHTML =
-      '<div class="empty">Coach stats not available for this club.</div>';
-  }
-
   // Fire all three slow fetches in parallel; render each section as it arrives
-  const mixPromise   = isTPCClub(clubId)
-    ? Promise.resolve(null)
-    : apiFetch(`/api/activity-summary?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
-        .then(r => r.ok ? r.json() : null).catch(() => null);
-  const coachPromise = isTPCClub(clubId)
-    ? Promise.resolve(null)
-    : apiFetch(`/api/coach-stats?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
-        .then(r => r.ok ? r.json() : null).catch(() => null);
+  const mixPromise   = apiFetch(`/api/activity-summary?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
+    .then(r => r.ok ? r.json() : null).catch(() => null);
+  const coachPromise = apiFetch(`/api/coach-stats?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
+    .then(r => r.ok ? r.json() : null).catch(() => null);
 
   const [curr, prev] = await Promise.all([
     apiFetch(`/api/booked-hours?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
