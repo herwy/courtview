@@ -2501,6 +2501,7 @@ async function loadCourtPopularity() {
 let revMonth = new Date();
 revMonth.setDate(1);
 let revLoaded = false;
+let revReqSeq = 0;
 let revPayWindowEnd = new Date();
 let revPayWindowStart = new Date(revPayWindowEnd);
 revPayWindowStart.setHours(0, 0, 0, 0);
@@ -2580,6 +2581,7 @@ async function renderRevenueSummary(sumData) {
 async function loadRevenue(resetPay = true) {
   revLoaded = true;
   const clubId = CLUB;
+  const mySeq = ++revReqSeq;
   const { start, end } = revMonthBounds(revMonth);
 
   if (CLUB === RACKETEER_CLUB_ID) {
@@ -2649,7 +2651,7 @@ async function loadRevenue(resetPay = true) {
       .then(r => r.ok ? r.json() : null).catch(() => null),
   ]);
 
-  if (clubId !== CLUB) return;
+  if (clubId !== CLUB || mySeq !== revReqSeq) return;
 
   // Summary cards and DOW/subscription breakdown
   await renderRevenueSummary(sumData);
