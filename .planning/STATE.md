@@ -32,6 +32,7 @@ last_updated: "2026-07-10T23:46:00Z"
 | 20 | Add "Top spenders" monthly leaderboard to Revenue tab: /api/payment-leaderboard aggregates successful payments per player (paginated, stats_cache-backed), rendered as a top-3 card between Revenue summary and Revenue by day of week | 2026-07-23 | db66eaa | inline |
 | 21 | Add archived Top spenders for Racketeer (/api/archive/payment-leaderboard, aggregates all daily payment-history snapshots, dedup by transaction_id); speed up live leaderboard pagination via bounded ThreadPoolExecutor (~16-18s -> ~5s cold); URL-encode club_id/start/end in upstream request | 2026-07-23 | 5aae725 | inline |
 | 22 | Fix Top spenders card race condition: loadRevenue() guarded against club changes mid-fetch but not month changes, so rapid month nav clicks could let a stale slower month's leaderboard response overwrite a fresher one. Added revReqSeq counter. | 2026-07-23 | acfc764 | inline |
+| 23 | Fix Racketeer archive view overwrite bug: loadRevenue() never returned after the archive branch, so it fell through into the live /api/payment-leaderboard fetch too (empty for Racketeer since 2026-07-01 migration), which overwrote the correct archived leaderboard once it resolved. Added missing return; moved month-label update above the branch. | 2026-07-23 | 87f30dd | inline |
 
 ## Session Continuity
 
