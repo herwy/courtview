@@ -24,7 +24,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from time import time as _now
-from urllib.parse import urlencode, parse_qsl
+from urllib.parse import urlencode, parse_qsl, quote
 
 from flask import Flask, Response, jsonify, make_response, request
 from curl_cffi import requests as cffi_requests
@@ -1838,37 +1838,19 @@ def _parse_gbp_amount(raw) -> float | None:
         return None
 
 
-def _fetch_payment_leaderboard(club_id: str, start: str, end: str) -> list:
-    """Paginate online_payment_history for a club+window and sum successful payments per player."""
-    PAGE_SIZE = 100
-    MAX_PAGES = 20  # cap at 2000 payments/window to prevent runaway upstream
+def _aggregate_leaders(records: list) -> list:
+    """Sum successful payments per player from a flat list of payment records, top 5 desc."""
     totals: dict = {}
-    skip = 0
-    for _ in range(MAX_PAGES):
-        url = (
-            f"{TARGET}/club/statistics/online_payment_history"
-            f"?club_id={club_id}&start_datetime={start}&end_datetime={end}"
-            f"&limit={PAGE_SIZE}&skip={skip}"
-        )
-        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-        if r.status_code != 200:
-            break
-        page = r.json()
-        if not isinstance(page, list) or not page:
-            break
-        for rec in page:
-            if rec.get("status") != "PAYMENT_SUCCESS":
-                continue
-            amount = _parse_gbp_amount(rec.get("amount"))
-            if amount is None:
-                continue
-            key = rec.get("player_email") or rec.get("player_name") or "unknown"
-            entry = totals.setdefault(key, {"player_name": rec.get("player_name") or "Unknown", "total": 0.0, "count": 0})
-            entry["total"] += amount
-            entry["count"] += 1
-        if len(page) < PAGE_SIZE:
-            break
-        skip += PAGE_SIZE
+    for rec in records:
+        if rec.get("status") != "PAYMENT_SUCCESS":
+            continue
+        amount = _parse_gbp_amount(rec.get("amount"))
+        if amount is None:
+            continue
+        key = rec.get("player_email") or rec.get("player_name") or "unknown"
+        entry = totals.setdefault(key, {"player_name": rec.get("player_name") or "Unknown", "total": 0.0, "count": 0})
+        entry["total"] += amount
+        entry["count"] += 1
 
     leaders = sorted(totals.values(), key=lambda e: e["total"], reverse=True)[:5]
     max_total = leaders[0]["total"] if leaders else 0
@@ -1876,6 +1858,40 @@ def _fetch_payment_leaderboard(club_id: str, start: str, end: str) -> list:
         e["total"] = round(e["total"], 2)
         e["pct"] = round(e["total"] / max_total * 100, 1) if max_total else 0
     return leaders
+
+
+def _fetch_payment_leaderboard(club_id: str, start: str, end: str) -> list:
+    """Paginate online_payment_history for a club+window and sum successful payments per player.
+
+    Upstream rejects limit>100 (422), so page count can't be cut by requesting bigger pages.
+    Fetches page 0 alone first (most clubs/windows fit in one page); only if that page is full
+    does it fan out the remaining candidate pages concurrently, still stopping accumulation at
+    the first short/empty page found (in skip order) to preserve pagination semantics."""
+    PAGE_SIZE = 100
+    MAX_PAGES = 20  # cap at 2000 payments/window to prevent runaway upstream
+
+    def fetch_page(skip: int) -> list:
+        url = (
+            f"{TARGET}/club/statistics/online_payment_history"
+            f"?club_id={quote(str(club_id))}&start_datetime={quote(str(start))}&end_datetime={quote(str(end))}"
+            f"&limit={PAGE_SIZE}&skip={skip}"
+        )
+        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+        if r.status_code != 200:
+            return []
+        page = r.json()
+        return page if isinstance(page, list) else []
+
+    all_records = fetch_page(0)
+    if len(all_records) == PAGE_SIZE:
+        remaining_skips = [p * PAGE_SIZE for p in range(1, MAX_PAGES)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+            for page in pool.map(fetch_page, remaining_skips):
+                all_records.extend(page)
+                if len(page) < PAGE_SIZE:
+                    break
+
+    return _aggregate_leaders(all_records)
 
 
 @app.route("/api/payment-leaderboard", methods=["GET"])
@@ -2087,6 +2103,51 @@ def api_archive_financial():
     if not row:
         return jsonify({"error": "no snapshot"}), 404
     resp = Response(row[0], status=200, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/archive/payment-leaderboard", methods=["GET"])
+def api_archive_payment_leaderboard():
+    """Top spenders aggregated across ALL archived payment-history snapshots for a club.
+
+    Snapshots are daily windows (see archive_financial), so this reads every stored
+    snapshot for the club and dedupes by transaction_id rather than scoping to one day."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "")
+    if not club_id:
+        return jsonify({"error": "club_id required"}), 400
+    try:
+        conn = _db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT payload FROM archive_financial WHERE club_id=? AND endpoint='payment-history'",
+                (club_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    seen_tx: set = set()
+    records: list = []
+    for (payload,) in rows:
+        try:
+            data = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+        for rec in data.get("payments", []):
+            tx = rec.get("transaction_id")
+            if tx:
+                if tx in seen_tx:
+                    continue
+                seen_tx.add(tx)
+            records.append(rec)
+
+    resp = Response(json.dumps({"leaders": _aggregate_leaders(records)}), status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp

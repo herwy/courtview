@@ -2583,6 +2583,12 @@ async function loadRevenue(resetPay = true) {
   const { start, end } = revMonthBounds(revMonth);
 
   if (CLUB === RACKETEER_CLUB_ID) {
+    document.getElementById('revLeadersOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+    document.getElementById('revLeadersMeta').textContent = '';
+    fetch(`/api/archive/payment-leaderboard?club_id=${RACKETEER_CLUB_ID}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(d => { if (CLUB === RACKETEER_CLUB_ID) renderLeaders(d, 'across all archived data'); });
+
     showArchiveSelector(
       'revenue',
       'financial',
@@ -2590,8 +2596,6 @@ async function loadRevenue(resetPay = true) {
         document.getElementById('revSummaryOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
         document.getElementById('revDowOut').innerHTML = '';
         document.getElementById('revSubOut').innerHTML = '';
-        document.getElementById('revLeadersOut').innerHTML = '<div class="empty">Top spenders unavailable for archived snapshots.</div>';
-        document.getElementById('revLeadersMeta').textContent = '';
         document.getElementById('revPayOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
         document.getElementById('revLoadMoreWrap').hidden = true;
         const [sumR, payR] = await Promise.allSettled([
@@ -2657,16 +2661,16 @@ async function loadRevenue(resetPay = true) {
   renderPayments(payData, resetPay);
 }
 
-function renderLeaders(data) {
+function renderLeaders(data, scopeLabel = 'this month') {
   const out  = document.getElementById('revLeadersOut');
   const meta = document.getElementById('revLeadersMeta');
   const leaders = data?.leaders || [];
   if (!leaders.length) {
-    out.innerHTML = '<div class="empty">No successful payments this month.</div>';
+    out.innerHTML = `<div class="empty">No successful payments ${esc(scopeLabel)}.</div>`;
     meta.textContent = '';
     return;
   }
-  meta.textContent = `Top ${Math.min(3, leaders.length)} · successful payments`;
+  meta.textContent = `Top ${Math.min(3, leaders.length)} · successful payments, ${scopeLabel}`;
   let h = '<div class="cp-list">';
   leaders.slice(0, 3).forEach((p, i) => {
     const name = esc(p.player_name || 'Unknown');
