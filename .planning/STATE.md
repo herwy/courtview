@@ -34,6 +34,7 @@ last_updated: "2026-07-10T23:46:00Z"
 | 22 | Fix Top spenders card race condition: loadRevenue() guarded against club changes mid-fetch but not month changes, so rapid month nav clicks could let a stale slower month's leaderboard response overwrite a fresher one. Added revReqSeq counter. | 2026-07-23 | acfc764 | inline |
 | 23 | Fix Racketeer archive view overwrite bug: loadRevenue() never returned after the archive branch, so it fell through into the live /api/payment-leaderboard fetch too (empty for Racketeer since 2026-07-01 migration), which overwrote the correct archived leaderboard once it resolved. Added missing return; moved month-label update above the branch. | 2026-07-23 | 87f30dd | inline |
 | 24 | Correct overcorrection from #23: unconditional return also broke the legitimate default "Live" rendering for revSummaryOut/revDowOut/revSubOut/revPayOut (the archive dropdown never auto-fires, so that fallthrough was the only thing populating them). Scoped the exclusion to just the leaderboard fetch/render instead of the whole fallthrough. | 2026-07-23 | 93da6c0 | inline |
+| 25 | Remove the whole Racketeer-special-case for Top spenders (from #20/#21): verified live upstream still returns correct historical payment data for any past month for Racketeer, so the "no live data" premise behind the archive-only design was wrong. Top spenders now uses the same live per-month path as every club; deleted the now-dead /api/archive/payment-leaderboard endpoint. | 2026-07-23 | 70993b1 | inline |
 
 ## Session Continuity
 
