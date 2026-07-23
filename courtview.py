@@ -2108,51 +2108,6 @@ def api_archive_financial():
     return resp
 
 
-@app.route("/api/archive/payment-leaderboard", methods=["GET"])
-def api_archive_payment_leaderboard():
-    """Top spenders aggregated across ALL archived payment-history snapshots for a club.
-
-    Snapshots are daily windows (see archive_financial), so this reads every stored
-    snapshot for the club and dedupes by transaction_id rather than scoping to one day."""
-    passed, via_query = _gate()
-    if not passed:
-        return _forbidden()
-    club_id = request.args.get("club_id", "")
-    if not club_id:
-        return jsonify({"error": "club_id required"}), 400
-    try:
-        conn = _db_connect()
-        try:
-            rows = conn.execute(
-                "SELECT payload FROM archive_financial WHERE club_id=? AND endpoint='payment-history'",
-                (club_id,),
-            ).fetchall()
-        finally:
-            conn.close()
-    except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
-
-    seen_tx: set = set()
-    records: list = []
-    for (payload,) in rows:
-        try:
-            data = json.loads(payload)
-        except (TypeError, ValueError):
-            continue
-        for rec in data.get("payments", []):
-            tx = rec.get("transaction_id")
-            if tx:
-                if tx in seen_tx:
-                    continue
-                seen_tx.add(tx)
-            records.append(rec)
-
-    resp = Response(json.dumps({"leaders": _aggregate_leaders(records)}), status=200, content_type="application/json")
-    if via_query:
-        _set_cookie(resp, via_query)
-    return resp
-
-
 @app.route("/api/coach-stats", methods=["GET"])
 def api_coach_stats():
     """Proxy /club/statistics/coach with 1h SQLite cache."""

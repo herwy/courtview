@@ -2590,17 +2590,6 @@ async function loadRevenue(resetPay = true) {
   document.getElementById('revNext').disabled = revMonth.getMonth() === new Date().getMonth()
     && revMonth.getFullYear() === new Date().getFullYear();
 
-  // Top spenders isn't part of the Live/Archive toggle below - Racketeer has no live
-  // payment data since its 2026-07-01 migration, so it always shows the archived
-  // aggregate here and is excluded from the live fetch further down.
-  if (isRacketeer) {
-    document.getElementById('revLeadersOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
-    document.getElementById('revLeadersMeta').textContent = '';
-    fetch(`/api/archive/payment-leaderboard?club_id=${RACKETEER_CLUB_ID}`)
-      .then(r => r.ok ? r.json() : null).catch(() => null)
-      .then(d => { if (CLUB === RACKETEER_CLUB_ID) renderLeaders(d, 'across all archived data'); });
-  }
-
   if (isRacketeer) {
     showArchiveSelector(
       'revenue',
@@ -2644,48 +2633,41 @@ async function loadRevenue(resetPay = true) {
     document.getElementById('revSummaryOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
     document.getElementById('revDowOut').innerHTML = '';
     document.getElementById('revSubOut').innerHTML = '';
-    if (!isRacketeer) {
-      document.getElementById('revLeadersOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
-      document.getElementById('revLeadersMeta').textContent = '';
-    }
+    document.getElementById('revLeadersOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+    document.getElementById('revLeadersMeta').textContent = '';
   }
 
-  const fetches = [
+  const [sumData, payData, leadersData] = await Promise.all([
     fetch(`/api/revenue-summary?club_id=${clubId}&start=${start}&end=${end}`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
     fetch(`/api/payment-history?club_id=${clubId}&start=${revPayWindowStart.getTime()}&end=${revPayWindowEnd.getTime()}&limit=100&skip=0`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
-  ];
-  if (!isRacketeer) {
-    fetches.push(
-      fetch(`/api/payment-leaderboard?club_id=${clubId}&start=${start}&end=${end}`)
-        .then(r => r.ok ? r.json() : null).catch(() => null)
-    );
-  }
-  const [sumData, payData, leadersData] = await Promise.all(fetches);
+    fetch(`/api/payment-leaderboard?club_id=${clubId}&start=${start}&end=${end}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+  ]);
 
   if (clubId !== CLUB || mySeq !== revReqSeq) return;
 
   // Summary cards and DOW/subscription breakdown
   await renderRevenueSummary(sumData);
 
-  // Top spenders (Racketeer's archived leaderboard is rendered above, independently)
-  if (!isRacketeer) renderLeaders(leadersData);
+  // Top spenders
+  renderLeaders(leadersData);
 
   // Payment history
   renderPayments(payData, resetPay);
 }
 
-function renderLeaders(data, scopeLabel = 'this month') {
+function renderLeaders(data) {
   const out  = document.getElementById('revLeadersOut');
   const meta = document.getElementById('revLeadersMeta');
   const leaders = data?.leaders || [];
   if (!leaders.length) {
-    out.innerHTML = `<div class="empty">No successful payments ${esc(scopeLabel)}.</div>`;
+    out.innerHTML = '<div class="empty">No successful payments this month.</div>';
     meta.textContent = '';
     return;
   }
-  meta.textContent = `Top ${Math.min(3, leaders.length)} · successful payments, ${scopeLabel}`;
+  meta.textContent = `Top ${Math.min(3, leaders.length)} · successful payments`;
   let h = '<div class="cp-list">';
   leaders.slice(0, 3).forEach((p, i) => {
     const name = esc(p.player_name || 'Unknown');
