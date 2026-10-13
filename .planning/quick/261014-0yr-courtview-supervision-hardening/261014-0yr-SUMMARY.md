@@ -15,4 +15,4 @@ commit: a2df05f
 
 **Docs:** CLAUDE.md now has the real cache table names, drops the stale `courtview.log` row, documents the notifier and adds a never-pkill restart rule.
 
-**Not verified:** a live crash-loop alert, which would mean deliberately breaking the service and paging Telegram.
+**Live test (2026-10-14 00:46-00:47 BST):** a throwaway `cv-loop-test.service` (`ExecStart=/bin/false`, same OnFailure and backoff settings) crash-looped. Notifier runs 1 and 2 logged "recovered, no alert"; run 3 sent one Telegram CRASH-LOOPING alert. Crashes that land while the notifier is still running are merged into that run, so with backoff the alert arrives after about 1 minute. Unit and state file removed afterwards.
