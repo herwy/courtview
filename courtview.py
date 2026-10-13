@@ -2,11 +2,11 @@
 """
 courtview.py - Padelmates API proxy server for RPi.
 
-Serves the Racketeer dashboard HTML at / and proxies allowed Padelmates API
+Serves the CourtView dashboard HTML at / and proxies allowed Padelmates API
 paths at /api/* using Android OkHttp headers. Includes token auth,
 per-IP rate limiting, SQLite availability cache, and a 6-hour refresh thread.
 
-Run: python3 courtview.py
+Run: gunicorn via courtview.service (systemd); python3 courtview.py is a dev fallback
 Deployed to: /root/projects/courtview/courtview.py
 """
 
