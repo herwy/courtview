@@ -38,12 +38,47 @@ if [[ ! -f /root/projects/courtview/requirements.txt ]]; then
     echo "SKIP: /root/projects/courtview/requirements.txt not found (first deploy)"
     exit 2
 fi
-python3 -m pip install pip-audit -q --break-system-packages 2>/dev/null
+if ! python3 -c "import pip_audit" 2>/dev/null; then
+    python3 -m pip install pip-audit -q --break-system-packages 2>/dev/null
+fi
 if ! python3 -c "import pip_audit" 2>/dev/null; then
     echo "SKIP: pip-audit unavailable after install attempt"
     exit 2
 fi
-python3 -m pip_audit -r /root/projects/courtview/requirements.txt 2>&1
+pins=$(mktemp)
+trap 'rm -f "$pins"' EXIT
+python3 - /root/projects/courtview/requirements.txt > "$pins" << 'CVPINS'
+import sys
+from importlib.metadata import distribution, PackageNotFoundError
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+todo = [Requirement(l) for l in open(sys.argv[1]).read().split("\n") if l.strip() and not l.startswith("#")]
+seen = {}
+while todo:
+    req = todo.pop()
+    if req.marker and not req.marker.evaluate({"extra": ""}): continue
+    name = canonicalize_name(req.name)
+    if name in seen: continue
+    try: dist = distribution(name)
+    except PackageNotFoundError: sys.exit(f"MISSING {name}")
+    seen[name] = dist.version
+    todo.extend(Requirement(r) for r in dist.requires or [])
+if not seen: sys.exit("no packages resolved")
+for n, v in sorted(seen.items()): print(f"{n}=={v}")
+CVPINS
+resolve_rc=$?
+if [[ $resolve_rc -ne 0 || ! -s "$pins" ]]; then
+    echo "BLOCK: could not resolve installed dependency closure (missing package or empty closure)"
+    exit 1
+fi
+echo "Auditing $(wc -l < "$pins") installed packages"
+out=$(python3 -m pip_audit --no-deps --disable-pip -r "$pins" 2>&1)
+rc=$?
+printf '%s\n' "$out" | grep -v 'WARNING:pip_audit._cli' || true
+if [[ $rc -eq 0 ]]; then
+    exit 0
+fi
+exit 1
 REMOTE
 ) || _audit_rc=$?
 if [[ $_audit_rc -eq 0 ]]; then
@@ -98,9 +133,6 @@ _main_pid=$(systemctl show courtview -p MainPID --value)
 # gunicorn master and worker share the socket, so MainPID must be among them
 _listen_pids=$(ss -ltnpH "sport = :8766" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u | tr '\n' ',')
 echo "LISTENER:${_listen_pids:-none}:${_main_pid}"
-
-# Remove @reboot crontab entries for courtview (idempotent)
-crontab -l 2>/dev/null | grep -v "projects/courtview" | crontab -
 
 # Report status
 echo "ACTIVE:$(systemctl is-active courtview)"
