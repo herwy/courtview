@@ -27,7 +27,7 @@ The grep count must be > 0 AND systemctl must return `active` before reporting d
 
 | Path | Purpose |
 |------|---------|
-| `/root/projects/courtview/courtview.py` | WSGI app (served via gunicorn, port 8766) |
+| `/root/projects/courtview/courtview.py` | WSGI app (gunicorn, plain HTTP on 127.0.0.1:8766; TLS is terminated in front). On-RPi curl: `http://127.0.0.1:8766/...?token=$(cat /root/.courtview_token)`, never `https://localhost` (hangs) |
 | `/root/projects/courtview/courtview.html` | Dashboard HTML |
 | `/root/projects/courtview/courtview_cache.db` | SQLite cache: availability (28-day TTL), heatmap, court popularity, membership_members_cache (6h TTL), club_info_cache (10-min TTL), stats_cache, archive_* (Racketeer, 2026-06-15 to 06-30) |
 | `/root/projects/courtview/access.log` | JSONL access log |
