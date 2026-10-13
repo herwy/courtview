@@ -2168,7 +2168,7 @@ def _startup() -> None:
             return
         _STARTUP_DONE = True
 
-    print(f"[startup] courtview on 0.0.0.0:8766")
+    print("[startup] courtview starting (bind address set by gunicorn ExecStart in courtview.service)")
     print(f"[startup] UA profile  : Android OkHttp (from APK analysis)")
     print(f"[startup] User-Agent  : {ANDROID_UA}")
     print(f"[startup] DB path     : {DB_PATH}")

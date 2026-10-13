@@ -88,14 +88,16 @@ cp /root/projects/courtview/notify-telegram@.service /etc/systemd/system/notify-
 systemctl daemon-reload
 systemctl enable courtview
 
-# One-time cleanup: stop legacy watchdog and gunicorn (idempotent)
-pkill -f /root/projects/courtview/watchdog.sh 2>/dev/null || true
-pkill -f "gunicorn.*courtview" 2>/dev/null || true
-sleep 2
-
-# Restart via systemctl
+# Restart via systemctl only. Never pkill or hand-run gunicorn: a stray
+# process holding :8766 crash-loops the unit (2026-10-13 outage).
 systemctl restart courtview
 sleep 2
+
+# The :8766 listener must be systemd's MainPID, not a stray gunicorn
+_main_pid=$(systemctl show courtview -p MainPID --value)
+# gunicorn master and worker share the socket, so MainPID must be among them
+_listen_pids=$(ss -ltnpH "sport = :8766" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u | tr '\n' ',')
+echo "LISTENER:${_listen_pids:-none}:${_main_pid}"
 
 # Remove @reboot crontab entries for courtview (idempotent)
 crontab -l 2>/dev/null | grep -v "projects/courtview" | crontab -
@@ -111,5 +113,15 @@ cv_enabled=$(echo "$remote_out" | grep "^ENABLED:" | sed 's/^ENABLED://')
 
 [[ "$cv_active" == "active" ]] && ok "courtview: systemd active" || { err "courtview systemd unit not active (got: $cv_active)"; exit 1; }
 [[ "$cv_enabled" == "enabled" ]] && ok "courtview: enabled on boot" || err "courtview not enabled (got: $cv_enabled)"
+
+listener=$(echo "$remote_out" | grep "^LISTENER:" | sed 's/^LISTENER://')
+listen_pids=${listener%%:*}
+main_pid=${listener##*:}
+if [[ -n "$main_pid" && "$main_pid" != "0" && ",$listen_pids" == *",$main_pid,"* ]]; then
+    ok "courtview: :8766 owned by systemd MainPID $main_pid"
+else
+    err ":8766 listener pids ($listen_pids) exclude systemd MainPID ($main_pid) - stray process on the port?"
+    exit 1
+fi
 
 log "=== CourtView deploy complete ==="

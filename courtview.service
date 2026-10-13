@@ -2,6 +2,8 @@
 Description=CourtView Flask/gunicorn server
 After=network.target
 OnFailure=notify-telegram@%p.service
+# Never give up on a restart loop; back off instead (cv_notify_fail.py alerts on loops)
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -10,6 +12,8 @@ WorkingDirectory=/root/projects/courtview
 ExecStart=/usr/local/bin/gunicorn --workers 1 --worker-class gthread --threads 4 --bind 127.0.0.1:8766 --timeout 60 courtview:app
 Restart=always
 RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=300
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=courtview
