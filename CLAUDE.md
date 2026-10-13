@@ -29,10 +29,10 @@ The grep count must be > 0 AND systemctl must return `active` before reporting d
 |------|---------|
 | `/root/projects/courtview/courtview.py` | WSGI app (served via gunicorn, port 8766) |
 | `/root/projects/courtview/courtview.html` | Dashboard HTML |
-| `/root/projects/courtview/courtview_cache.db` | SQLite cache: availability (28-day TTL), heatmap, court popularity, membership_members (6h TTL), club_info (10-min TTL) |
+| `/root/projects/courtview/courtview_cache.db` | SQLite cache: availability (28-day TTL), heatmap, court popularity, membership_members_cache (6h TTL), club_info_cache (10-min TTL), stats_cache, archive_* (Racketeer, 2026-06-15 to 06-30) |
 | `/root/projects/courtview/access.log` | JSONL access log |
-| `/root/projects/courtview/courtview.log` | gunicorn stderr (warnings only; crashes go to journal) |
-| `/etc/systemd/system/courtview.service` | systemd unit - Restart=always, WantedBy=multi-user.target |
+| `/etc/systemd/system/courtview.service` | systemd unit - Restart=always with backoff (RestartSteps=5, max 5 min), StartLimitIntervalSec=0, OnFailure=notify-telegram@%p. gunicorn stdout/stderr go to the journal |
+| `/root/projects/courtview/cv_notify_fail.py` | OnFailure notifier: FAILED alert if still down after 15s; one CRASH-LOOPING alert for 3+ crashes in 10 min (1h cooldown). State in `unit_failure_state.json` (0600) |
 | `/root/.courtview_token` | Auth token (cookie: courtview_token) |
 | `/root/labs/web/` | Shared with nightwatch dashboard - access.html, access.js, dashboard.css loaded at startup |
 
@@ -108,3 +108,4 @@ All Padelmates requests are made server-side by Flask. The browser never contact
 - No nightwatch session concept here - the Flask server is killable and restartable at any time.
 - Gunicorn is the process manager; Flask is still the app. Gunicorn replaced `app.run()`, not Flask. All routing, proxy logic, and header injection happen inside Flask.
 - systemd manages the process lifecycle: `systemctl restart courtview` to restart, `journalctl -u courtview` to view logs. Boot persistence via WantedBy=multi-user.target - no @reboot crontab.
+- Never `pkill` gunicorn or hand-run `gunicorn --daemon` on :8766. A stray process holding the port crash-loops the unit (2026-10-13: 44 min loop). After any restart, the :8766 listener PIDs must include `systemctl show courtview -p MainPID` (deploy.sh enforces this).
