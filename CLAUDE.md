@@ -32,7 +32,7 @@ The grep count must be > 0 AND systemctl must return `active` before reporting d
 | `/root/projects/courtview/courtview_cache.db` | SQLite cache: availability (28-day TTL), heatmap, court popularity, membership_members_cache (6h TTL), club_info_cache (10-min TTL), stats_cache, archive_* (Racketeer, 2026-06-15 to 06-30) |
 | `/root/projects/courtview/access.log` | JSONL access log |
 | `/etc/systemd/system/courtview.service` | systemd unit - Restart=always with backoff (RestartSteps=5, max 5 min), StartLimitIntervalSec=0, OnFailure=notify-telegram@%p. gunicorn stdout/stderr go to the journal |
-| `/root/projects/courtview/cv_notify_fail.py` | OnFailure notifier: FAILED alert if still down after 15s; one CRASH-LOOPING alert for 3+ crashes in 10 min (1h cooldown). State in `unit_failure_state.json` (0600) |
+| `/root/projects/courtview/cv_notify_fail.py` | OnFailure notifier: "CourtView is down" if still failed after 15s; one "CourtView keeps crashing" alert for 3+ crashes in 10 min (1h cooldown). Plain-English wording with a likely cause read from the journal. State in `unit_failure_state.json` (0600) |
 | `/root/.courtview_token` | Auth token (cookie: courtview_token) |
 | `/root/labs/web/` | Shared with nightwatch dashboard - access.html, access.js, dashboard.css loaded at startup |
 
