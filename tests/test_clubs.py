@@ -125,5 +125,39 @@ class HtmlHasNoClubIdsTests(unittest.TestCase):
         self.assertIn("/api/clubs", self.html)
 
 
+class HtmlDataLayerTests(unittest.TestCase):
+    """Static checks on the dashboard script (no browser): one api() helper, visibility-gated preloads."""
+
+    def setUp(self):
+        with open(os.path.join(REPO, "courtview.html"), encoding="utf-8") as fh:
+            html = fh.read()
+        self.assertEqual(html.count("<script"), 1)
+        start = html.index("<script>") + len("<script>")
+        self.script = html[start:html.index("</script>", start)]
+
+    def test_single_fetch_inside_api_helper(self):
+        self.assertEqual(self.script.count("fetch("), 1)
+        helper = self.script[self.script.index("async function api("):]
+        self.assertLess(helper.index("fetch("), helper.index("\n}\n"))
+        self.assertNotIn("apiFetch", self.script)
+
+    def test_helper_has_timeout_stale_guard_and_visibility_gate(self):
+        for needle in ("AbortController", "API_TIMEOUT_MS = 20000", "class ApiError", "visibilitychange",
+                       "function whenVisible", "/api/clubs"):
+            self.assertIn(needle, self.script, needle)
+
+    def test_preload_timers_are_visibility_gated(self):
+        for needle in ("whenVisible(() => { if (!clubLoaded) loadClubInfo(); }",
+                       "whenVisible(() => { if (!compareLoaded) loadCompare(); }",
+                       "whenVisible(() => { if (!revLoaded) loadRevenue(); }",
+                       "whenVisible(() => warmOtherClubs()"):
+            self.assertIn(needle, self.script, needle)
+        self.assertNotIn("setTimeout(() => warmOtherClubs", self.script)
+
+    def test_pay_pager_markers_present_once(self):
+        self.assertEqual(self.script.count("PAY-PAGER:BEGIN"), 1)
+        self.assertEqual(self.script.count("PAY-PAGER:END"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

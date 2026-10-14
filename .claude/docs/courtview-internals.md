@@ -1,6 +1,29 @@
 # CourtView internals
 
-Verified against code 2026-10-14. Route list: `grep -n "@app.route" courtview.py`.
+Verified against code 2026-10-14. Route list: `grep -n "ROUTES" -A12 courtview_app/routes_*.py` (rule, view, options per module; registration order is `_ROUTE_ORDER` in `courtview_app/__init__.py`).
+
+## Module map
+
+`courtview.py` is the gunicorn entry (`app = create_app()`, runs `startup._startup()` unless `COURTVIEW_SKIP_STARTUP=1`). The code is the `courtview_app` package. Layers, lowest first; a module imports only lower ones, always as `from . import module` at the top (no `from .mod import name`, no imports inside functions; `tests/test_pii.py` enforces it) and refers to other modules qualified, so a test patches a name in the module that owns it.
+
+| Module | Holds |
+|---|---|
+| `clubs` | `CLUBS` table, derived `HEATMAP_CLUBS`, `PAYMENT_CLUB_IDS`, `ARCHIVE_CLUB_IDS`, `RACKETEER_CLUB_ID`, `public_clubs()` |
+| `config` | `ROOT_DIR` (release root), data/credential paths, cookie and timing constants, `_now` |
+| `upstream` | `UpstreamClient`, `UPSTREAM`, `ALLOWED_PATHS`, `APP_HEADERS` (the only `curl_cffi` importer) |
+| `privacy` | PII scrubbing, HMAC key and `customer_key` |
+| `db` | SQLite connection, schema, stats and availability caches, single-flight locks |
+| `jobs` | `job_state` schedule and status JSON files |
+| `accesslog` | IP geo, ring buffer, rotating `access.log`, `web/` assets, `log_req` hook |
+| `security` | token gate, rate limit, CSP and headers, request hooks, `_exc_error` |
+| `payments` | payment sanitising, sync engine, queue, background loop |
+| `refresh` | availability and heatmap refresh loops |
+| `routes_core`, `routes_availability`, `routes_club`, `routes_payments`, `routes_archive` | views plus a `ROUTES` table each |
+| `startup` | `_startup()` (schema, assets, threads) |
+
+`create_app()` registers hooks in the original order (before: `_allow_only_get_head`, `_block_archived_club`; after: `_security_headers`, `log_req`; 404 handler `_not_found`). `/api/clubs` returns `{"clubs": [...]}` with only `id, name, sub, short, courts, archived, compare`; the dashboard loads it in `boot()` before anything club-dependent runs.
+
+Dashboard data layer: every request goes through `api(url, {key, timeoutMs})` in courtview.html (20 s default, 60 s for the slow aggregate endpoints, JSON parsing, `ApiError` with `kind/status/error`, a new request with the same `key` aborts the previous one). Preloads and cache warm-up run through `whenVisible()` and wait while the tab is hidden; `pollWatches` is a user-requested alert and keeps its interval.
 
 ## Padelmates API
 
@@ -12,7 +35,7 @@ Base `https://fastapi-production-fargate.padelmates.io`, no auth. Every call goe
 - Breaker: 5 consecutive failed calls (exception, 5xx, 429 after retries) open it for 300 s, then one half-open probe. A non-429 4xx counts as reachable.
 - Counters per path (calls, ok, non_200, errors, unauthorized, last_status, last_at) plus totals (retries, rejected, unauthorized) and breaker state in `/api/health`. Logs carry path and status only (`[upstream] non-200 status=422 path=/club/`), never the query string or an exception message.
 - 401 rule: on 2026-10-14 `/club/club_extras` and `/home/activity/get_booked_hours` started answering 401 (Padelmates is adding auth, other endpoints may follow). Both are retired: not in `ALLOWED_PATHS`, no code calls them, `/api/booked-hours` answers 410 `{error: "unavailable", message: "No longer available from Padelmates"}` after the token gate with zero upstream calls, and the UI shows "No longer available from Padelmates" (Club Info has no extras section, Stats KPIs and the Compare Activities/Occupancy columns are gone). A 401 is never retried, never a breaker failure, never cached, logged once per endpoint per process (`[upstream] auth required status=401 path=...`), counted as `unauthorized` (totals and per endpoint in `/api/health`) and relayed by the generic proxy as 502 `{error: "upstream_auth_required"}`. CourtView must not add credentials or auth headers to reach those endpoints.
-- Test seam: patch `cv.UPSTREAM._new_session` with an object whose `get(url, **kw)` returns the fake response, and call `cv.UPSTREAM.reset()` in `setUp`.
+- Test seam: patch `cv.upstream.UPSTREAM._new_session` with an object whose `get(url, **kw)` returns the fake response, and call `cv.upstream.UPSTREAM.reset()` in `setUp`.
 
 | Endpoint | Used for |
 |---|---|
@@ -35,7 +58,7 @@ Quirks:
 
 ## Racketeer guard
 
-`@app.before_request _block_archived_club` returns 410 `{error: "archived"}` for any `/api/` path except `/api/archive/` when `club_id` or `club_ids` is Racketeer. Cache-only routes (`/api/month`, `/api/heatmap`, `/api/court-popularity`) are included. Racketeer payments are served from `archive_financial` only (`/api/archive/financial?endpoint=payment-history`), sanitised, never contacting upstream. The token is checked first without recording failures, so unauthenticated callers still get 403. Each 410 logs `[archived] 410 METHOD path` to the journal; a clean UI load produces none.
+the `before_request` hook `security._block_archived_club` returns 410 `{error: "archived"}` for any `/api/` path except `/api/archive/` when `club_id` or `club_ids` is Racketeer. Cache-only routes (`/api/month`, `/api/heatmap`, `/api/court-popularity`) are included. Racketeer payments are served from `archive_financial` only (`/api/archive/financial?endpoint=payment-history`), sanitised, never contacting upstream. The token is checked first without recording failures, so unauthenticated callers still get 403. Each 410 logs `[archived] 410 METHOD path` to the journal; a clean UI load produces none.
 
 ## Payment history paging
 
@@ -54,7 +77,7 @@ Revenue walks back by Europe/London day within the selected month, newest day fi
 - Club allowlists: payment-history, payment-leaderboard and membership-members accept `PAYMENT_CLUB_IDS` (Padium, Rocket) only (400 `club not allowed`; Racketeer gets 410 first). `/api/archive/financial` accepts `ARCHIVE_CLUB_IDS` (Racketeer) only.
 - `/api/payment-history` and `/api/payment-leaderboard` never sync: they read the table and return `complete` (every London day in the window has `complete=1`), `synced_through` (ISO 8601 Z, oldest `synced_at` among non-final days, the window end when all are final, null when a day has no row) and `queued`. An incomplete window is queued (`_enqueue_payment_window`, max 16, deduplicated per club and day range) and the loop thread syncs it within seconds; the Revenue tab polls the leaderboard every 15 s (max 8) while `queued` and shows "Data up to HH:MM". `/api/payment-leaderboard` groups `PAYMENT_SUCCESS` rows by `customer_key` and returns the top 5 as `{customer_id, bookings, total, pct}`; `customer_id` is the first 4 hex of `customer_key`, upper-case (the dashboard shows "Customer #XXXX"). Rows without a key are skipped.
 - Payment search and coach bios were removed (they needed names).
-- Unit tests (`tests/test_payments.py`, `tests/test_pii.py`, `tests/test_purge.py`, `tests/test_reliability.py`, `tests/test_auth.py`, `tests/test_cv_notify_fail.py`, `tests/test_cv_telegram.py`, `tests/test_paths.py`) need Flask and curl_cffi on Python 3.10+, so run them on the RPi from a temp copy of every root `*.py`, courtview.html, `web/` and `tests/`: `D=$(rpi 'mktemp -d'); COPYFILE_DISABLE=1 tar cf - courtview.py courtview.html cv_*.py web tests/*.py | rpi "tar xf - -C $D"; rpi "cd $D && COURTVIEW_SKIP_STARTUP=1 python3 -m unittest tests.test_security tests.test_reliability tests.test_pii tests.test_payments tests.test_auth tests.test_purge tests.test_cv_notify_fail tests.test_cv_telegram tests.test_paths"`, then remove the temp dir. Each module sets `COURTVIEW_DATA_DIR` to a temp dir, so tests never touch `/var/lib/courtview`.
+- Unit tests (`tests/test_payments.py`, `tests/test_pii.py`, `tests/test_purge.py`, `tests/test_reliability.py`, `tests/test_auth.py`, `tests/test_cv_notify_fail.py`, `tests/test_cv_telegram.py`, `tests/test_paths.py`) need Flask and curl_cffi on Python 3.10+, so run them on the RPi from a temp copy of every root `*.py`, `courtview_app/`, courtview.html, `web/` and `tests/`: `D=$(rpi 'mktemp -d'); COPYFILE_DISABLE=1 tar --exclude __pycache__ -cf - courtview.py courtview.html cv_*.py courtview_app web tests/*.py | rpi "tar xf - -C $D"; rpi "cd $D && COURTVIEW_SKIP_STARTUP=1 python3 -m unittest tests.test_security tests.test_reliability tests.test_pii tests.test_payments tests.test_auth tests.test_purge tests.test_cv_notify_fail tests.test_cv_telegram tests.test_paths tests.test_clubs"`, then remove the temp dir. Each module sets `COURTVIEW_DATA_DIR` to a temp dir, so tests never touch `/var/lib/courtview`. `tests/cvload.py` loads a fresh copy of the package per test module (`cv = cvload.load(alias)`, then `cv.security._gate`, `cv.config.DB_PATH`), which keeps each module's environment-driven state independent.
 - `tests/test_reliability.py` covers the client (retries, breaker, cap, log hygiene), never-cache and single-flight, health, job_state, the availability window and purge, status JSON, read-only payment routes and the fresh-availability route.
 
 ## Data protection

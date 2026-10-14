@@ -857,8 +857,78 @@ let CLUB = null;
 let clubInfo = null;
 // All API calls route via same-origin /api/* (courtview proxy on port 8766)
 const API = '/api';
-async function apiFetch(url, opts) {
-  return fetch(url, opts);
+const API_TIMEOUT_MS = 20000;
+const API_SLOW_TIMEOUT_MS = 60000; // aggregate endpoints that retry upstream server-side (activity, coach, revenue, club info)
+const STALE = Symbol('stale');     // settled value of a request superseded by a newer one with the same key
+
+/* One error type for every API call: kind is 'http' | 'timeout' | 'network' | 'parse' | 'stale'.
+ * status is the HTTP status (0 when there was no response), error the body's "error" code (410/503
+ * callers branch on it), message the body's "message" or a short generic text. */
+class ApiError extends Error {
+  constructor(kind, { status = 0, error = null, message = '', url = '' } = {}) {
+    const generic = { http: `HTTP ${status}`, timeout: 'Request timed out', network: 'Network error',
+                      parse: 'Unreadable response', stale: 'Superseded by a newer request' };
+    super(message || generic[kind]);
+    this.name = 'ApiError';
+    this.kind = kind;
+    this.status = status;
+    this.error = error;
+    this.url = url;
+  }
+}
+const isStale = e => e instanceof ApiError && e.kind === 'stale';
+const apiInflight = new Map(); // key -> { ctrl, reason }: a new request with the same key aborts the previous one
+
+/* The only network call in this file. Resolves with parsed JSON for 2xx, otherwise rejects with an ApiError. */
+async function api(url, { timeoutMs = API_TIMEOUT_MS, key } = {}) {
+  const entry = { ctrl: new AbortController(), reason: null };
+  if (key) {
+    const prev = apiInflight.get(key);
+    if (prev) { prev.reason = 'stale'; prev.ctrl.abort(); }
+    apiInflight.set(key, entry);
+  }
+  const timer = setTimeout(() => { entry.reason = entry.reason || 'timeout'; entry.ctrl.abort(); }, timeoutMs);
+  try {
+    let text, status, ok;
+    try {
+      const r = await fetch(url, { signal: entry.ctrl.signal });
+      status = r.status;
+      ok = r.ok;
+      text = await r.text();
+    } catch (_) {
+      throw new ApiError(entry.reason || 'network', { url });
+    }
+    let data = null;
+    let parsed = true;
+    try { data = JSON.parse(text); } catch (_) { parsed = false; }
+    if (!ok) {
+      const body = parsed && data && typeof data === 'object' ? data : {};
+      throw new ApiError('http', {
+        status, url,
+        error: typeof body.error === 'string' ? body.error : null,
+        message: typeof body.message === 'string' ? body.message : '',
+      });
+    }
+    if (!parsed) throw new ApiError('parse', { status, url });
+    return data;
+  } finally {
+    clearTimeout(timer);
+    if (key && apiInflight.get(key) === entry) apiInflight.delete(key);
+  }
+}
+
+/* Run fn after delayMs, but only while the tab is visible: if hidden when the delay ends, wait for it to
+ * become visible again. Used for preloads and warm-up so a background tab does not hit the RPi. */
+function whenVisible(fn, delayMs) {
+  setTimeout(() => {
+    if (document.visibilityState === 'visible') { fn(); return; }
+    const resumeWhenShown = () => {
+      if (document.visibilityState !== 'visible') return;
+      document.removeEventListener('visibilitychange', resumeWhenShown);
+      fn();
+    };
+    document.addEventListener('visibilitychange', resumeWhenShown);
+  }, delayMs);
 }
 const RACKETEER_ARCHIVED_MSG = 'Racketeer stopped taking bookings on Padelmates on 1 July 2026. Archived data (15 to 30 June) is on the Club Info, Stats and Revenue tabs.';
 const NOT_ARCHIVED_HTML = '<div class="empty">Not archived for Racketeer</div>';
@@ -925,14 +995,12 @@ function fmtGBP(n) {
 }
 
 /* API */
-async function fetchDay(date, clubId = CLUB, { fresh = false } = {}) {
+async function fetchDay(date, clubId = CLUB, { fresh = false, key } = {}) {
   if (isArchivedClub(clubId)) throw new Error('archived club');
   // fresh: max 5 min old (watch notifications); the normal route can serve a 6 h old cache
   const base = fresh ? '/api/availability-fresh' : `${API}/player/player_booking/all_courts_slot_prices_v3`;
   const url = `${base}?club_id=${clubId}&start_datetime=${dayStart(date)}&end_datetime=${dayEnd(date)}`;
-  const r = await apiFetch(url);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const data = await r.json();
+  const data = await api(url, { key });
   // Track today's booking density for the stats bar
   if (clubId === CLUB && isoDate(date) === TODAY_ISO) {
     todayReservedCount = Array.isArray(data.reservedBookings) ? data.reservedBookings.length : 0;
@@ -941,13 +1009,17 @@ async function fetchDay(date, clubId = CLUB, { fresh = false } = {}) {
 }
 
 /* Fetch all bookings for a day and build a map: "courtId:cellIdx" -> activity object */
-async function fetchDayActivities(date, clubId = CLUB) {
+async function fetchDayActivities(date, clubId = CLUB, { key } = {}) {
   if (isArchivedClub(clubId)) throw new Error('archived club');
   const start = dayStart(date);
   const end   = dayEnd(date);
-  const r = await apiFetch(`/api/day-activities?club_id=${clubId}&start=${start}&end=${end}`);
-  if (!r.ok) return new Map();
-  const data = await r.json();
+  let data;
+  try {
+    data = await api(`/api/day-activities?club_id=${clubId}&start=${start}&end=${end}`, { key });
+  } catch (e) {
+    if (e instanceof ApiError && e.kind === 'http') return new Map();
+    throw e;
+  }
   const map = new Map();
   for (const act of (data.activities || [])) {
     const si = cellIdx(act.start_datetime);
@@ -1367,9 +1439,7 @@ async function loadRealHeatmap() {
   if (isArchivedClub(clubId)) return;
   const hmOut  = document.getElementById('hmOut');
   try {
-    const r = await fetch(`/api/heatmap?club_id=${clubId}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const d = await r.json();
+    const d = await api(`/api/heatmap?club_id=${clubId}`, { key: 'heatmap' });
     if (CLUB === clubId) {
       hmOut.innerHTML  = renderRealHeatmap(d.buckets || {});
       activeHmBuckets  = d.buckets      || null;
@@ -1381,6 +1451,7 @@ async function loadRealHeatmap() {
       if (dowOut) dowOut.innerHTML = renderDowChart(d.dow_signal) || '<div class="empty">No occupancy data yet.</div>';
     }
   } catch(e) {
+    if (isStale(e)) return;
     if (CLUB === clubId) {
       hmOut.innerHTML = `<div class="empty">Occupancy data building in background.</div>`;
       recsHmDone = true;
@@ -1588,8 +1659,8 @@ async function loadDay(date) {
   try {
     const key = cacheKey(CLUB, isoDate(date));
     const [courts, actMap] = await Promise.all([
-      monthCache[key]      ? Promise.resolve(monthCache[key])      : fetchDay(date),
-      activitiesCache[key] ? Promise.resolve(activitiesCache[key]) : fetchDayActivities(date),
+      monthCache[key]      ? Promise.resolve(monthCache[key])      : fetchDay(date, CLUB, { key: 'day' }),
+      activitiesCache[key] ? Promise.resolve(activitiesCache[key]) : fetchDayActivities(date, CLUB, { key: 'day-activities' }),
     ]);
     monthCache[key]      = courts;
     activitiesCache[key] = actMap;
@@ -1600,6 +1671,7 @@ async function loadDay(date) {
     document.getElementById('b2bOut').innerHTML  = renderB2B(courts, selDur);
     populateNotifyCourts(courts);
   } catch(e) {
+    if (isStale(e)) return;
     document.getElementById('gridOut').innerHTML = `<div class="empty">Could not load data: ${esc(e.message)}</div>`;
     document.getElementById('b2bOut').innerHTML  = '';
   }
@@ -1614,9 +1686,8 @@ async function loadMonth() {
   if (isArchivedClub(clubId)) return;
   let batchOk = false;
   try {
-    const r = await fetch(`/api/month?club_id=${encodeURIComponent(clubId)}`);
-    if (r.ok) {
-      const d = await r.json();
+    const d = await api(`/api/month?club_id=${encodeURIComponent(clubId)}`, { key: 'month' });
+    if (d) {
       const missing = [];
       for (const [dateStr, courts] of Object.entries(d.days || {})) {
         const k = cacheKey(clubId, dateStr);
@@ -1640,7 +1711,9 @@ async function loadMonth() {
       }
       if (CLUB === clubId) { recsMonthDone = true; updateRecs(); }
     }
-  } catch (_) {}
+  } catch (e) {
+    if (isStale(e)) return;
+  }
 
   if (!batchOk) {
     // Fallback: original sequential approach
@@ -1791,8 +1864,7 @@ function fireNotification(w, court, slot, price) {
 async function populateArchiveSelect(selectEl, table) {
   let snaps = [];
   try {
-    const r = await fetch(`/api/archive/snapshots?club_id=${RACKETEER_CLUB_ID}&table=${table}`);
-    snaps = r.ok ? await r.json() : [];
+    snaps = await api(`/api/archive/snapshots?club_id=${RACKETEER_CLUB_ID}&table=${table}`);
   } catch (_) { snaps = []; }
   selectEl.innerHTML = '';
   if (snaps.length === 0) {
@@ -1878,12 +1950,11 @@ async function loadClubInfo() {
       async (ts) => {
         try {
           out.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
-          const r = await fetch(`/api/archive/club-info?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}`);
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          const data = await r.json();
+          const data = await api(`/api/archive/club-info?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}`, { key: 'archive-club-info' });
           if (CLUB !== RACKETEER_CLUB_ID) return;
           renderClubInfoData(data, RACKETEER_CLUB_ID);
         } catch (e) {
+          if (isStale(e)) return;
           if (CLUB === RACKETEER_CLUB_ID) out.innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
         }
       }
@@ -1892,11 +1963,10 @@ async function loadClubInfo() {
   }
 
   try {
-    const r = await fetch(`${API}/club-info?club_id=${encodeURIComponent(CLUB)}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
+    const data = await api(`${API}/club-info?club_id=${encodeURIComponent(CLUB)}`, { key: 'club-info', timeoutMs: API_SLOW_TIMEOUT_MS });
     renderClubInfoData(data, CLUB);
   } catch (e) {
+    if (isStale(e)) return;
     out.innerHTML = `<div class="empty">Could not load club info: ${esc(e.message)}</div>`;
     clubLoaded = false;
   }
@@ -1906,9 +1976,7 @@ async function loadMemberCounts(clubId) {
   if (isArchivedClub(clubId)) return;
   let d;
   try {
-    const r = await fetch(`/api/membership-members?club_id=${encodeURIComponent(clubId)}`);
-    if (!r.ok) return;
-    d = await r.json();
+    d = await api(`/api/membership-members?club_id=${encodeURIComponent(clubId)}`, { key: 'members' });
   } catch (e) { return; }
   if (!d || !d.counts) return;
   if (clubId !== CLUB) return;
@@ -2122,8 +2190,12 @@ async function runCompare() {
       (async () => {
         if (compareCache[rk] !== undefined) return;
         try {
-          const r = await apiFetch(`/api/revenue-summary?club_id=${club.id}&start=${moStart}&end=${moEnd}`);
-          const d = r.ok ? await r.json() : null;
+          let d = null;
+          try {
+            d = await api(`/api/revenue-summary?club_id=${club.id}&start=${moStart}&end=${moEnd}`, { timeoutMs: API_SLOW_TIMEOUT_MS });
+          } catch (e) {
+            if (!(e instanceof ApiError && e.kind === 'http')) throw e;
+          }
           compareCache[rk] = revTotalInclSubs(d).val;
         } catch (_) { compareCache[rk] = null; }
       })(),
@@ -2200,12 +2272,11 @@ async function loadStats() {
         const dowOut = document.getElementById('statsDowOut');
         if (dowOut) dowOut.innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
         try {
-          const r = await fetch(`/api/archive/heatmap?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}`);
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          const d = await r.json();
+          const d = await api(`/api/archive/heatmap?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}`, { key: 'archive-heatmap' });
           if (CLUB !== RACKETEER_CLUB_ID) return;
           if (dowOut) dowOut.innerHTML = renderDowChart(d.dow_signal) || '<div class="empty">No occupancy data in snapshot.</div>';
         } catch (e) {
+          if (isStale(e)) return;
           if (CLUB === RACKETEER_CLUB_ID && dowOut) dowOut.innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
         }
       }
@@ -2223,10 +2294,10 @@ async function loadStats() {
     now.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
   // Fire all three slow fetches in parallel; render each section as it arrives
-  const mixPromise   = apiFetch(`/api/activity-summary?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
-    .then(r => r.ok ? r.json() : null).catch(() => null);
-  const coachPromise = apiFetch(`/api/coach-stats?club_id=${clubId}&start=${moStart}&end=${moEnd}`)
-    .then(r => r.ok ? r.json() : null).catch(() => null);
+  const mixPromise   = api(`/api/activity-summary?club_id=${clubId}&start=${moStart}&end=${moEnd}`, { key: 'stats-mix', timeoutMs: API_SLOW_TIMEOUT_MS })
+    .catch(e => isStale(e) ? STALE : null);
+  const coachPromise = api(`/api/coach-stats?club_id=${clubId}&start=${moStart}&end=${moEnd}`, { key: 'stats-coach', timeoutMs: API_SLOW_TIMEOUT_MS })
+    .catch(e => isStale(e) ? STALE : null);
 
   // Booked-hours KPIs were retired (Padelmates now requires auth for that endpoint)
   document.getElementById('statsKpiOut').innerHTML =
@@ -2234,7 +2305,7 @@ async function loadStats() {
 
   // Activity mix - wait for the slower summary call
   const mix = await mixPromise;
-  if (clubId !== CLUB) return;
+  if (mix === STALE || clubId !== CLUB) return;
   if (mix && mix.total > 0) {
     const metaMix = document.getElementById('statsMixMeta');
     const mixPeriod = mix.range_days && mix.range_days < 20
@@ -2258,6 +2329,7 @@ async function loadStats() {
 
   // Coaching renders as soon as coach-stats resolves - no longer blocks on activity-mix
   const coach = await coachPromise;
+  if (coach === STALE) return;
   if (clubId !== CLUB) return;
   // mix may or may not be resolved yet - use what we have, patch rates in after
   const coachRates = mix?.coach_rates || {};
@@ -2357,11 +2429,10 @@ async function loadCourtPopularity() {
   if (!out) return;
   if (isArchivedClub(clubId)) { out.innerHTML = NOT_ARCHIVED_HTML; return; }
   try {
-    const r = await fetch(`/api/court-popularity?club_id=${clubId}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const d = await r.json();
+    const d = await api(`/api/court-popularity?club_id=${clubId}`, { key: 'court-popularity' });
     if (CLUB === clubId) out.innerHTML = renderCourtPopularity(d.courts || []);
   } catch (e) {
+    if (isStale(e)) return;
     if (CLUB === clubId) out.innerHTML = `<div class="empty">Court popularity unavailable.</div>`;
   }
 }
@@ -2601,19 +2672,21 @@ async function loadRevenue(resetPay = true) {
         document.getElementById('revSubOut').innerHTML = '';
         document.getElementById('revPayOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
         const [sumR, payR] = await Promise.allSettled([
-          fetch(`/api/archive/financial?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}&endpoint=revenue-summary`),
-          fetch(`/api/archive/financial?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}&endpoint=payment-history`),
+          api(`/api/archive/financial?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}&endpoint=revenue-summary`, { key: 'archive-financial-summary' }),
+          api(`/api/archive/financial?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}&endpoint=payment-history`, { key: 'archive-financial-payments' }),
         ]);
         try {
-          if (!sumR.value?.ok) throw new Error(`HTTP ${sumR.value?.status}`);
-          const sumJson = await sumR.value.json();
+          if (sumR.status === 'rejected') throw sumR.reason;
+          const sumJson = sumR.value;
           if (!isCurrent()) return;
           await renderRevenueSummary(sumJson);
         } catch (e) {
+          if (isStale(e)) return;
           if (isCurrent()) document.getElementById('revSummaryOut').innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
         }
         try {
-          const payData = payR.value?.ok ? await payR.value.json() : null;
+          if (payR.status === 'rejected' && isStale(payR.reason)) return;
+          const payData = payR.status === 'fulfilled' ? payR.value : null;
           if (!isCurrent()) return;
           if (!payData) throw new Error('no payment data');
           revArchivePayRows = payData.payments || [];
@@ -2651,12 +2724,13 @@ async function loadRevenue(resetPay = true) {
   loadPayChunk();
 
   const [sumData, leadersData] = await Promise.all([
-    fetch(`/api/revenue-summary?club_id=${clubId}&start=${start}&end=${end}`)
-      .then(r => r.ok ? r.json() : null).catch(() => null),
-    fetch(`/api/payment-leaderboard?club_id=${clubId}&start=${start}&end=${end}`)
-      .then(r => r.ok ? r.json() : null).catch(() => null),
+    api(`/api/revenue-summary?club_id=${clubId}&start=${start}&end=${end}`, { key: 'rev-summary', timeoutMs: API_SLOW_TIMEOUT_MS })
+      .catch(e => isStale(e) ? STALE : null),
+    api(`/api/payment-leaderboard?club_id=${clubId}&start=${start}&end=${end}`, { key: 'rev-leaders' })
+      .catch(e => isStale(e) ? STALE : null),
   ]);
 
+  if (sumData === STALE || leadersData === STALE) return;
   if (clubId !== CLUB || mySeq !== revReqSeq) return;
 
   // Summary cards and DOW/subscription breakdown
@@ -2675,8 +2749,8 @@ async function pollLeadersWhileSyncing(clubId, mySeq, start, end) {
   for (let i = 0; i < 8; i++) {
     await new Promise(r => setTimeout(r, 15000));
     if (clubId !== CLUB || mySeq !== revReqSeq) return;
-    const data = await fetch(`/api/payment-leaderboard?club_id=${clubId}&start=${start}&end=${end}`)
-      .then(r => r.ok ? r.json() : null).catch(() => null);
+    const data = await api(`/api/payment-leaderboard?club_id=${clubId}&start=${start}&end=${end}`, { key: 'rev-leaders-poll' })
+      .catch(() => null);
     if (clubId !== CLUB || mySeq !== revReqSeq) return;
     if (!data) continue;
     renderLeaders(data);
@@ -2711,8 +2785,8 @@ async function loadPayChunk() {
   btn.textContent = 'Loading...';
   try {
     const fetchPage = (win, skip) =>
-      fetch(`/api/payment-history?club_id=${clubId}&start=${win.start}&end=${win.end}&limit=${PAY_PAGE_SIZE}&skip=${skip}`)
-        .then(r => r.ok ? r.json() : null).catch(() => null);
+      api(`/api/payment-history?club_id=${clubId}&start=${win.start}&end=${win.end}&limit=${PAY_PAGE_SIZE}&skip=${skip}`)
+        .catch(() => null);
     const res = await payPagerRun(revPayCursor, fetchPage, Date.now(), stale);
     if (res.aborted || stale()) return;
     revPayCursor = res.cursor;
@@ -2941,8 +3015,8 @@ async function switchClub(id) {
   // Reload availability + heatmap; then pre-load all other tabs in background
   await Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]);
   loadStats(); loadCourtPopularity(); loadRevenue();
-  setTimeout(() => { if (!clubLoaded) loadClubInfo(); }, 200);
-  setTimeout(() => { if (!compareLoaded) loadCompare(); }, 300);
+  whenVisible(() => { if (!clubLoaded) loadClubInfo(); }, 200);
+  whenVisible(() => { if (!compareLoaded) loadCompare(); }, 300);
 }
 
 function setupClubSelector() {
@@ -2970,7 +3044,7 @@ function warmOtherClubs() {
   const others = COMPARE_CLUBS.filter(c => c.id !== CLUB);
   others.forEach((club, idx) => {
     const delay = idx * 1500; // stagger 1.5s apart to avoid hammering RPi
-    setTimeout(() => {
+    whenVisible(() => {
       const id = club.id;
       [
         `/api/activity-summary?club_id=${id}&start=${moStart}&end=${moEnd}`,
@@ -2979,7 +3053,7 @@ function warmOtherClubs() {
         `/api/club-info?club_id=${id}`,
         `/api/court-popularity?club_id=${id}`,
         `/api/membership-members?club_id=${id}`,
-      ].forEach(url => apiFetch(url).catch(() => {}));
+      ].forEach(url => api(url, { timeoutMs: API_SLOW_TIMEOUT_MS }).catch(() => {}));
     }, delay);
   });
 }
@@ -2994,9 +3068,7 @@ function showClubsError() {
 async function boot() {
   let list;
   try {
-    const r = await fetch('/api/clubs');
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const d = await r.json();
+    const d = await api('/api/clubs');
     list = (d && Array.isArray(d.clubs) ? d.clubs : []).filter(c => c && typeof c.id === 'string' && typeof c.name === 'string');
     if (!list.length) throw new Error('empty club list');
   } catch (_) {
@@ -3020,11 +3092,11 @@ async function boot() {
   setupClubSelector();
   Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]).then(() => {
     loadStats(); loadCourtPopularity();
-    setTimeout(() => { if (!clubLoaded) loadClubInfo(); }, 200);
-    setTimeout(() => { if (!compareLoaded) loadCompare(); }, 500);
-    setTimeout(() => { if (!revLoaded) loadRevenue(); }, 3000);
-    // Warm server-side cache for all other clubs so switching is instant
-    setTimeout(() => warmOtherClubs(), 6000);
+    whenVisible(() => { if (!clubLoaded) loadClubInfo(); }, 200);
+    whenVisible(() => { if (!compareLoaded) loadCompare(); }, 500);
+    whenVisible(() => { if (!revLoaded) loadRevenue(); }, 3000);
+    // Warm server-side cache for all other clubs so switching is instant (only while the tab is visible)
+    whenVisible(() => warmOtherClubs(), 6000);
   });
   setInterval(pollWatches, NOTIFY_POLL_MS);
 }

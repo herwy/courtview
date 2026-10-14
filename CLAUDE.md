@@ -21,7 +21,7 @@ CourtView runs as the unprivileged system user `courtview` (nologin, no home) in
 
 | Path | Purpose |
 |------|---------|
-| `/opt/courtview/releases/<ts>/`, `/opt/courtview/current` | Root-owned, read-only code (`courtview.py`, `courtview.html`, `web/`, `cv_*.py`, units). `current` is a symlink to the live release; the newest 3 plus current and previous are kept. gunicorn serves plain HTTP on 127.0.0.1:8766, with TLS terminated in front. For on-RPi curl use `http://127.0.0.1:8766/...?token=$(cat /root/.courtview_token)`; `https://localhost` hangs |
+| `/opt/courtview/releases/<ts>/`, `/opt/courtview/current` | Root-owned, read-only code (`courtview.py`, `courtview_app/`, `courtview.html`, `web/`, `cv_*.py`, units). `current` is a symlink to the live release; the newest 3 plus current and previous are kept. gunicorn serves plain HTTP on 127.0.0.1:8766, with TLS terminated in front. For on-RPi curl use `http://127.0.0.1:8766/...?token=$(cat /root/.courtview_token)`; `https://localhost` hangs |
 | `/var/lib/courtview/` | Data dir (courtview:courtview 0700; env `COURTVIEW_DATA_DIR`). Holds `courtview_cache.db` (SQLite cache and Racketeer archive, plus `payments` + `payments_sync`: amounts, dates, status and an HMAC `customer_key`, no personal data; tables in the internals doc; availability keeps only today..today+27; `job_state` persists the availability (6h), heatmap (24h) and payments (30 min) schedules so a restart never resets or re-runs them), `access.log` (JSONL, rotates at 1 MiB, keeps `.1` to `.5`), `status/` and `backups/`. DB, WAL and logs are 0600 |
 | `/root/projects/courtview/status` | Symlink to `/var/lib/courtview/status`. `availability.json` (every 6h, retry 30 min) and `payments.json` (every 30 min), `{job,last_run,last_ok,ok,calls,errors}`, mode 0644 in a 0755 dir. labs_heartbeat (root) reads them at this path: do not move it. `GET /api/health` (token) has upstream counters, breaker state and `job_state` |
 | `/var/lib/courtview-notify/` | Root-only notifier state: `unit_failure_state.json` and the Telegram alert outbox. Kept apart from the data dir so the sandboxed user cannot tamper with it |
@@ -34,11 +34,11 @@ System Python only, no venv: `python3 -m pip install --break-system-packages`.
 
 ## Access
 
-`https://courtview.labs.doxx:47200/` (Caddy -> 127.0.0.1:8766): dashboard, `/access` (access log, its html/js/css are CourtView's own files in `web/`), `/api/*` (proxy, whitelisted by `ALLOWED_PATHS`). All need the token. The app is GET/HEAD-only (other methods get 403/405, no CORS headers), and `?token=` is honoured on GET/HEAD only.
+`https://courtview.labs.doxx:47200/` (Caddy -> 127.0.0.1:8766): dashboard, `/access` (access log, its html/js/css are CourtView's own files in `web/`), `/api/*` (proxy, whitelisted by `ALLOWED_PATHS` in `courtview_app/upstream.py`). All need the token. The app is GET/HEAD-only (other methods get 403/405, no CORS headers), and `?token=` is honoured on GET/HEAD only.
 
 ## Clubs
 
-The `CLUBS` array in courtview.html is Racketeer, Padium Canary Wharf and Rocket Padel Ilford; `COMPARE_CLUBS` is Padium and Rocket only. The selected club is stored in localStorage `cv-club-id`.
+The club list is defined once in `courtview_app/clubs.py` (Racketeer, Padium Canary Wharf, Rocket Padel Ilford, with payments/heatmap/compare flags) and served at the token-gated `/api/clubs`; the Python club sets are derived from it and courtview.html holds no club ids (compare covers Padium and Rocket only). The selected club is stored in localStorage `cv-club-id`.
 - **Racketeer** left Padelmates on 2026-07-01 (booking revenue fell to £0). Background polling is off. Every live `/api/*` route returns 410 for it; only `/api/archive/*` serves it (archive views cover 2026-06-15 to 06-30).
 - **Stratford (TPC Matchpoint)** was removed on 2026-07-24: a second platform with no revenue data, not worth maintaining.
 
@@ -48,6 +48,10 @@ Only Flask contacts Padelmates; the browser never does. Padelmates sees the RPi'
 - `/club/follower/crud` (15,308+ users' name, email and phone) and `/club/member/` are NOT proxied. `/club/membership/member` (member lists) is never called: member counts come from `total_members` in the plan listing.
 - Revenue (`/club/statistics/financial*`) is proxied for local research.
 - Every call goes through `UPSTREAM` (`UpstreamClient`: 4 in flight, bounded retries, breaker, counters); `tests/test_pii.py` fails on any other `cffi_requests` or `TARGET` use. Failures, error shapes and empty fallbacks are never cached.
+
+## Code layout
+
+`courtview.py` is the gunicorn entry (`courtview:app`, 20 lines). The app is the `courtview_app/` package: `create_app()` in `__init__.py`, one module per concern, cross-module references always qualified (`security._gate()`). Module map and test setup: `.claude/docs/courtview-internals.md`.
 
 ## Rules
 
