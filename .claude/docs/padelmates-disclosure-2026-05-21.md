@@ -1,6 +1,6 @@
 # Padelmates API - Responsible Disclosure Findings
 
-Status: not sent as of 2026-10-14.
+Status: not sent as of 2026-10-14. Findings not re-tested since Padelmates began requiring auth on some endpoints (2026-10-14).
 
 Discovered: 2026-05-21 during CourtView development (Android APK reverse engineering via jadx + API exploration).
 

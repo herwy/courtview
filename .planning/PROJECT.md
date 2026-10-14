@@ -13,8 +13,13 @@ All Padelmates traffic goes server-side with Android OkHttp headers, so the brow
 ### Validated
 
 - ✓ Whitelisted `/api/*` proxy with token auth, per-IP rate limiting, SQLite cache and background refresh threads
-- ✓ Heatmap, court popularity, revenue, top spenders and compare views across clubs
-- ✓ systemd supervision with restart backoff, a deploy-time MainPID port check and plain-English Telegram failure alerts (quick-28/29)
+- ✓ Heatmap, court popularity, revenue, anonymous top spenders and compare views
+- ✓ systemd supervision with restart backoff and plain-English Telegram alerts (quick-28/29)
+- ✓ No personal data stored or shown: allowlists, PII scrubbing, HMAC `customer_key`, encrypted nightly backups (Phase 1, quick-37)
+- ✓ Load and reliability: shared `UpstreamClient`, persisted job schedules, read-only payment routes, status JSON and `/api/health` (Phase 2, quick-38)
+- ✓ Security hygiene: CSP, safe static route, gated 404, 401 handling (Phase 3, quick-40)
+- ✓ Non-root sandboxed service, release dirs with health-checked auto-rollback, pinned deps with pip-audit (Phase 4, quick-41)
+- ✓ `courtview_app` package, single club config at `/api/clubs`, frontend `api()` data layer (Phase 5, quick-42)
 
 ### Active
 
@@ -22,9 +27,11 @@ All Padelmates traffic goes server-side with Android OkHttp headers, so the brow
 
 ### Out of Scope
 
-- Proxying PII endpoints (`/club/follower/crud`, `/club/member/`); see `.claude/docs/padelmates-disclosure-2026-05-21.md`
+- Proxying PII endpoints (`/club/follower/crud`, `/club/member/`, `/club/membership/member`); see `.claude/docs/padelmates-disclosure-2026-05-21.md`
+- Storing or showing personal data (payment search and coach bios removed in Phase 1)
+- Endpoints that need Padelmates auth: `/club/club_extras` and `/home/activity/get_booked_hours` retired on 2026-10-14; no credentials will be added
 - Non-Padelmates platforms (TPC Matchpoint removed 2026-07-24)
 
 ## Context
 
-Details live in CLAUDE.md (deploy, RPi layout, clubs, headers). Deploy with `cv-deploy`; the Mac is the canonical source.
+Navigation in CLAUDE.md; reference in `.claude/docs/courtview-internals.md`. Deploy with `cv-deploy`; the Mac is the canonical source.

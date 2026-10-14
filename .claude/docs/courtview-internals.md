@@ -1,10 +1,10 @@
 # CourtView internals
 
-Verified against code 2026-10-14. Route list: `grep -n "ROUTES" -A12 courtview_app/routes_*.py` (rule, view, options per module; registration order is `_ROUTE_ORDER` in `courtview_app/__init__.py`).
+Verified against code and the RPi on 2026-10-14. Route list: `grep -n "ROUTES" -A12 courtview_app/routes_*.py` (registration order: `_ROUTE_ORDER` in `courtview_app/__init__.py`).
 
 ## Module map
 
-`courtview.py` is the gunicorn entry (`app = create_app()`, runs `startup._startup()` unless `COURTVIEW_SKIP_STARTUP=1`). The code is the `courtview_app` package. Layers, lowest first; a module imports only lower ones, always as `from . import module` at the top (no `from .mod import name`, no imports inside functions; `tests/test_pii.py` enforces it) and refers to other modules qualified, so a test patches a name in the module that owns it.
+`courtview.py` is the gunicorn entry (`app = create_app()`, then `startup._startup()` unless `COURTVIEW_SKIP_STARTUP=1`). Layers, lowest first. A module imports only lower ones, always as `from . import module` at the top, and refers to other modules qualified (`security._gate()`), so a test patches a name in the module that owns it. `tests/test_pii.py` enforces the import rule.
 
 | Module | Holds |
 |---|---|
@@ -21,145 +21,173 @@ Verified against code 2026-10-14. Route list: `grep -n "ROUTES" -A12 courtview_a
 | `routes_core`, `routes_availability`, `routes_club`, `routes_payments`, `routes_archive` | views plus a `ROUTES` table each |
 | `startup` | `_startup()` (schema, assets, threads) |
 
-`create_app()` registers hooks in the original order (before: `_allow_only_get_head`, `_block_archived_club`; after: `_security_headers`, `log_req`; 404 handler `_not_found`). `/api/clubs` returns `{"clubs": [...]}` with only `id, name, sub, short, courts, archived, compare`; the dashboard loads it in `boot()` before anything club-dependent runs.
+`create_app()` registers hooks in this order: before `_allow_only_get_head`, `_block_archived_club`; after `_security_headers`, `log_req`; 404 handler `_not_found`. `/api/clubs` returns `{"clubs": [...]}` with only `id, name, sub, short, courts, archived, compare`. The dashboard loads it in `boot()` before anything club-dependent runs; courtview.html holds no club ids.
 
-Dashboard data layer: every request goes through `api(url, {key, timeoutMs})` in courtview.html (20 s default, 60 s for the slow aggregate endpoints, JSON parsing, `ApiError` with `kind/status/error`, a new request with the same `key` aborts the previous one). Preloads and cache warm-up run through `whenVisible()` and wait while the tab is hidden; `pollWatches` is a user-requested alert and keeps its interval.
+Dashboard data layer: every request goes through `api(url, {key, timeoutMs})` in courtview.html. Timeouts are 20 s, or 60 s for the slow aggregate endpoints. It parses JSON and rejects with `ApiError` (`kind/status/error`). A new request with the same `key` aborts the previous one. Preloads and warm-up run through `whenVisible()` and wait while the tab is hidden; `pollWatches` keeps its interval.
 
 ## Padelmates API
 
-Base `https://fastapi-production-fargate.padelmates.io`, no auth. Every call goes through `UPSTREAM` (`UpstreamClient`, the only code that touches `cffi_requests` or `TARGET`; `AstTests` enforces it) with `impersonate="chrome110"` plus Android OkHttp headers (`com.padelmates/8.5.9`, build 1031, `X-Platform: android`) taken from the APK. iOS headers were never reverse-engineered, so don't invent them.
+Base `https://fastapi-production-fargate.padelmates.io`. Every call goes through `UPSTREAM` (`UpstreamClient`, the only code that touches `cffi_requests` or `TARGET`; `AstTests` in `tests/test_pii.py` enforces it). It sends `impersonate="chrome110"` plus Android OkHttp headers (`com.padelmates/8.5.9`, build 1031, `X-Platform: android`) taken from the APK. iOS headers were never reverse-engineered, so don't invent them. The browser never contacts Padelmates.
 
 `UpstreamClient` rules:
 - Pooled `curl_cffi` Sessions, at most 4 requests in flight (`BoundedSemaphore`, 20 s wait, else `UpstreamUnavailable`).
-- Retries (max 2): connection errors, 502/503/504 and 429. Backoff 0.5 s then 2 s, each x uniform(0.5, 1.5). `Retry-After` (integer seconds) is honoured up to 10 s, a larger value returns the 429 unretried. A 500 and other 4xx are not retried. The slot is released during backoff.
+- Retries (max 2): connection errors, 502/503/504 and 429. Backoff 0.5 s then 2 s, each x uniform(0.5, 1.5); the slot is released during backoff. `Retry-After` (integer seconds) is honoured up to 10 s; a larger value returns the 429 unretried. A 500 and other 4xx are not retried.
 - Breaker: 5 consecutive failed calls (exception, 5xx, 429 after retries) open it for 300 s, then one half-open probe. A non-429 4xx counts as reachable.
-- Counters per path (calls, ok, non_200, errors, unauthorized, last_status, last_at) plus totals (retries, rejected, unauthorized) and breaker state in `/api/health`. Logs carry path and status only (`[upstream] non-200 status=422 path=/club/`), never the query string or an exception message.
-- 401 rule: on 2026-10-14 `/club/club_extras` and `/home/activity/get_booked_hours` started answering 401 (Padelmates is adding auth, other endpoints may follow). Both are retired: not in `ALLOWED_PATHS`, no code calls them, `/api/booked-hours` answers 410 `{error: "unavailable", message: "No longer available from Padelmates"}` after the token gate with zero upstream calls, and the UI shows "No longer available from Padelmates" (Club Info has no extras section, Stats KPIs and the Compare Activities/Occupancy columns are gone). A 401 is never retried, never a breaker failure, never cached, logged once per endpoint per process (`[upstream] auth required status=401 path=...`), counted as `unauthorized` (totals and per endpoint in `/api/health`) and relayed by the generic proxy as 502 `{error: "upstream_auth_required"}`. CourtView must not add credentials or auth headers to reach those endpoints.
+- Counters per path (calls, ok, non_200, errors, unauthorized, last_status, last_at) plus totals (retries, rejected, unauthorized) and breaker state, all in `/api/health`. Logs carry path and status only, never the query string or an exception message.
+- 401: never retried, cached or counted as a breaker failure. It is logged once per endpoint per process (`[upstream] auth required status=401 path=...`), counted as `unauthorized`, and relayed by the generic proxy as 502 `{error: "upstream_auth_required"}`. CourtView must not add credentials to reach such endpoints.
+- Retired on 2026-10-14 when Padelmates started requiring auth: `/club/club_extras` and `/home/activity/get_booked_hours`. No code calls them, and `/api/booked-hours` answers 410 `{error: "unavailable"}` after the token gate. The UI shows "No longer available from Padelmates".
 - Test seam: patch `cv.upstream.UPSTREAM._new_session` with an object whose `get(url, **kw)` returns the fake response, and call `cv.upstream.UPSTREAM.reset()` in `setUp`.
 
 | Endpoint | Used for |
 |---|---|
-| `/player/player_booking/all_courts_slot_prices_v3` | Availability grid; `reservedBookings` covers all booking types (v2 had open matches only) |
+| `/player/player_booking/all_courts_slot_prices_v3` | Availability grid; `reservedBookings` covers all booking types |
 | `/home/activity/filtered_activities` | Day bookings, activity mix, training rates |
 | `/club/statistics/financial/v2` | Revenue cards, DOW bars, subscriptions |
-| `/club/statistics/online_payment_history` | Payment sync into the local `payments` table (history paging and top spenders read it) |
+| `/club/statistics/online_payment_history` | Payment sync into the local `payments` table |
 | `/club/statistics/coach` | Coaching stats |
 | `/club/statistics/operational` | Heatmap and court popularity |
-| `/club/global_search` | Coach bios |
-| `/club/membership/` | Plan listing; `total_members` gives per-plan member counts. `/club/membership/member` (member lists) is never called |
+| `/club/`, `/club/creditpackage/` | Club Info profile and credit packages |
+| `/club/membership/` | Plan listing; `total_members` gives per-plan member counts |
+
+The generic proxy (`/api/<path>`) passes only exact `ALLOWED_PATHS` matches: the above plus `search_clubs` and `/club/statistics/financial`.
 
 Quirks:
 - `operational` needs `club_ids` (plural). `club_id` gives a MongoDB `$in needs an array` error.
 - `filtered_activities` and `online_payment_history` reject `limit` > 100 with a 422.
-- `online_payment_history` returns oldest first, about 100 per day per club, and rejects ranges over about 31 days. See Payment history paging below.
+- `online_payment_history` returns oldest first, about 100 per day per club, and rejects ranges over about 31 days.
 - `activity_type` must be `Book Court`, `Match`, `Tournament` or `Training`. `Match` returns `Book Court|OPEN_MATCH` records.
-- `financial/v2`: `total_combined_subscription_payments` is always 0 and `total_combined_payments` excludes subscriptions. The real subscription figure is `total_current_subscription_amount` (= sum of `membership_subscription`). The dashboard's `revTotalInclSubs()` adds it to the total for the Revenue and Compare tabs.
+- `financial/v2`: `total_combined_subscription_payments` is always 0 and `total_combined_payments` excludes subscriptions. The real figure is `total_current_subscription_amount`; the dashboard's `revTotalInclSubs()` adds it for the Revenue and Compare tabs.
 - Rocket Padel Ilford times out on full-month activity ranges. The backend retries with the last 14 days.
 
 ## Racketeer guard
 
-the `before_request` hook `security._block_archived_club` returns 410 `{error: "archived"}` for any `/api/` path except `/api/archive/` when `club_id` or `club_ids` is Racketeer. Cache-only routes (`/api/month`, `/api/heatmap`, `/api/court-popularity`) are included. Racketeer payments are served from `archive_financial` only (`/api/archive/financial?endpoint=payment-history`), sanitised, never contacting upstream. The token is checked first without recording failures, so unauthenticated callers still get 403. Each 410 logs `[archived] 410 METHOD path` to the journal; a clean UI load produces none.
+`security._block_archived_club` (`before_request`) returns 410 `{error: "archived"}` for any `/api/` path except `/api/archive/` when `club_id` or `club_ids` is Racketeer, cache-only routes included. The token is checked first without recording failures, so unauthenticated callers still get 403. Each 410 logs `[archived] 410 METHOD path`; a clean UI load produces none. Racketeer payments come from `archive_financial` only (`/api/archive/financial?endpoint=payment-history`), sanitised.
 
 ## Payment history paging
 
-Revenue walks back by Europe/London day within the selected month, newest day first. Within a day it pages `skip += 100` while `has_more`. `/api/payment-history` reads the local `payments` table (limit <= 100, skip <= `PAYMENTS_MAX_SKIP` = 20,000, newest first); rows are `{id, createdAt, description, amount, status}` and `has_more` is exact. One chunk fetches until 25 rows, 7 requests or the month start; the same rule applies to the initial load and every Load More click. Rows are deduplicated, sorted newest first and shown in UK local time. The logic is the DOM-free block between `PAY-PAGER:BEGIN` and `PAY-PAGER:END` in courtview.html, tested by `node --test tests/test_pay_pager.mjs`. `tests/e2e_dashboard.py` (Playwright, needs `CV_TOKEN`) checks the Racketeer and Padium UI.
+Revenue walks back by Europe/London day within the selected month, newest day first, paging `skip += 100` within a day while `has_more`. `/api/payment-history` reads the local `payments` table (limit <= 100, skip <= `PAYMENTS_MAX_SKIP` = 20,000, newest first). Rows are `{id, createdAt, description, amount, status}` and `has_more` is exact. One chunk fetches until 25 rows, 7 requests or the month start, on the initial load and on every Load More. The logic is the DOM-free block between `PAY-PAGER:BEGIN` and `PAY-PAGER:END` in courtview.html.
 
 ## Payments table and sync
 
-- `payments`: PK `(club_id, transaction_id)`. Columns: `created_utc` (epoch ms), `local_day` (Europe/London), `created_at` (raw upstream string), `customer_key`, `source_type`, `description`, `amount` (raw string), `amount_gbp`, `status`, `synced_at`. Indexes `(club_id, created_utc)` and `(club_id, customer_key)`. A missing upstream id falls back to `synthetic:` + first 24 hex of sha256(createdAt|customer_key|amount|status), never an email.
-- `customer_key` = hex HMAC-SHA256(secret, lower-cased stripped email). Upstream payment records carry no player id (keys: amount, createdAt, description, player_email, player_name, player_phone, receiptUrl, source_type, status, transaction_id), so the email is the only stable basis. The secret is `/root/.courtview_hmac_key` (0600 root, outside repo and DB, never logged, not in backups); the service reads it as `$CREDENTIALS_DIRECTORY/hmac_key` (`LoadCredential`). If it is missing or short, payment storage is disabled and payment routes return 503. Losing it only changes keys for new rows.
-- `description` is cleaned of the customer's own name tokens, email and phone, then kept only if its template (digits, month names and tz labels abstracted) is in `DESCRIPTION_TEMPLATES` (31 templates shared by >= 5 customers, scan of 2026-10-14); otherwise it becomes the `source_type`.
+- `payments`: PK `(club_id, transaction_id)`. Columns: `created_utc` (epoch ms), `local_day` (Europe/London), `created_at` (raw upstream string), `customer_key`, `source_type`, `description`, `amount` (raw string), `amount_gbp`, `status`, `synced_at`. Indexes `(club_id, created_utc)` and `(club_id, customer_key)`. A missing upstream id falls back to `synthetic:` + first 24 hex of sha256(createdAt|customer_key|amount|status).
+- `customer_key` = hex HMAC-SHA256(secret, lower-cased stripped email). Upstream payments carry no player id, so the email is the only stable basis. The secret is `/root/.courtview_hmac_key` (created by deploy.sh, never logged, not backed up), read as `$CREDENTIALS_DIRECTORY/hmac_key`. If it is missing or short, payment storage is disabled and payment routes return 503. A new key changes `customer_key` for new rows only.
+- `description` is cleaned of the customer's name tokens, email and phone. It is kept only if its template (digits, month names and tz labels abstracted) is in `DESCRIPTION_TEMPLATES` (31 templates); otherwise it becomes the `source_type`.
 - `payments_sync`: one row per `(club_id, local_day)` with `synced_at`, `complete`, `pages`, `rows`.
-- `_fetch_payment_page` is the only caller of `online_payment_history` (APP_HEADERS, chrome110, timeout 15, limit <= 100) and returns sanitised records only (`_sanitise_payment` allowlist), so raw name, email, phone and receipt never reach a caller.
-- Sync unit is one London day, paged `skip += 100` with 0.1-0.25 s jitter; up to 3 days in parallel; 200 pages/day cap marks the day incomplete.
-- Freshness: skip a day synced < 10 min ago. Otherwise sync unless final (`complete=1` and synced after day close + 10 min). Today/yesterday refresh at most every 10 min; failed days retry at most every 10 min.
-- Background loop (`_payments_sync_loop`): runs previous + current London month per `HEATMAP_CLUBS` club every 30 min (schedule persisted in `job_state`, so a restart does not re-run it), touching only non-final days. It also drains the on-demand queue below.
-- Club allowlists: payment-history, payment-leaderboard and membership-members accept `PAYMENT_CLUB_IDS` (Padium, Rocket) only (400 `club not allowed`; Racketeer gets 410 first). `/api/archive/financial` accepts `ARCHIVE_CLUB_IDS` (Racketeer) only.
-- `/api/payment-history` and `/api/payment-leaderboard` never sync: they read the table and return `complete` (every London day in the window has `complete=1`), `synced_through` (ISO 8601 Z, oldest `synced_at` among non-final days, the window end when all are final, null when a day has no row) and `queued`. An incomplete window is queued (`_enqueue_payment_window`, max 16, deduplicated per club and day range) and the loop thread syncs it within seconds; the Revenue tab polls the leaderboard every 15 s (max 8) while `queued` and shows "Data up to HH:MM". `/api/payment-leaderboard` groups `PAYMENT_SUCCESS` rows by `customer_key` and returns the top 5 as `{customer_id, bookings, total, pct}`; `customer_id` is the first 4 hex of `customer_key`, upper-case (the dashboard shows "Customer #XXXX"). Rows without a key are skipped.
-- Payment search and coach bios were removed (they needed names).
-- Unit tests (`tests/test_payments.py`, `tests/test_pii.py`, `tests/test_purge.py`, `tests/test_reliability.py`, `tests/test_auth.py`, `tests/test_cv_notify_fail.py`, `tests/test_cv_telegram.py`, `tests/test_paths.py`) need Flask and curl_cffi on Python 3.10+, so run them on the RPi from a temp copy of every root `*.py`, `courtview_app/`, courtview.html, `web/` and `tests/`: `D=$(rpi 'mktemp -d'); COPYFILE_DISABLE=1 tar --exclude __pycache__ -cf - courtview.py courtview.html cv_*.py courtview_app web tests/*.py | rpi "tar xf - -C $D"; rpi "cd $D && COURTVIEW_SKIP_STARTUP=1 python3 -m unittest tests.test_security tests.test_reliability tests.test_pii tests.test_payments tests.test_auth tests.test_purge tests.test_cv_notify_fail tests.test_cv_telegram tests.test_paths tests.test_clubs"`, then remove the temp dir. Each module sets `COURTVIEW_DATA_DIR` to a temp dir, so tests never touch `/var/lib/courtview`. `tests/cvload.py` loads a fresh copy of the package per test module (`cv = cvload.load(alias)`, then `cv.security._gate`, `cv.config.DB_PATH`), which keeps each module's environment-driven state independent.
-- `tests/test_reliability.py` covers the client (retries, breaker, cap, log hygiene), never-cache and single-flight, health, job_state, the availability window and purge, status JSON, read-only payment routes and the fresh-availability route.
+- `_fetch_payment_page` is the only caller of `online_payment_history` and returns `_sanitise_payment` allowlisted records only.
+- Sync unit is one London day, paged `skip += 100` with 0.1-0.25 s jitter; up to 3 days in parallel; a 200-page cap marks the day incomplete.
+- Freshness: a day synced < 10 min ago is skipped. Otherwise it syncs unless final (`complete=1` and synced after day close + 10 min).
+- Background loop (`_payments_sync_loop`): previous + current London month per `HEATMAP_CLUBS` club every 30 min, non-final days only. It also drains the on-demand queue.
+- Club allowlists: payment-history, payment-leaderboard and membership-members accept `PAYMENT_CLUB_IDS` (Padium, Rocket) only (400 `club not allowed`). `/api/archive/financial` accepts `ARCHIVE_CLUB_IDS` (Racketeer) only.
+- `/api/payment-history` and `/api/payment-leaderboard` never sync. They return `complete`, `synced_through` (oldest `synced_at` among non-final days, ISO 8601 Z) and `queued`. An incomplete window is queued (`_enqueue_payment_window`, max 16, deduplicated) and the loop syncs it within seconds. The Revenue tab polls the leaderboard every 15 s (max 8) while `queued`.
+- `/api/payment-leaderboard` groups `PAYMENT_SUCCESS` rows by `customer_key` and returns the top 5 as `{customer_id, bookings, total, pct}`. `customer_id` is the first 4 hex of `customer_key`, upper-case ("Customer #XXXX").
+- Payment search and coach bios were removed because they needed names.
+
+## Tests
+
+Unit tests need Flask and curl_cffi on Python 3.10+, so run them on the RPi from a temp copy:
+
+```bash
+D=$(rpi 'mktemp -d'); COPYFILE_DISABLE=1 tar --exclude __pycache__ -cf - courtview.py courtview.html cv_*.py courtview_app web tests/*.py | rpi "tar xf - -C $D"
+rpi "cd $D && COURTVIEW_SKIP_STARTUP=1 python3 -m unittest tests.test_security tests.test_reliability tests.test_pii tests.test_payments tests.test_auth tests.test_purge tests.test_cv_notify_fail tests.test_cv_telegram tests.test_paths tests.test_clubs; rm -rf $D"
+```
+
+- Each module sets `COURTVIEW_DATA_DIR` to a temp dir. `tests/cvload.py` loads a fresh package copy per module (`cv = cvload.load(alias)`).
+- Pager: `node --test tests/test_pay_pager.mjs`. UI: `tests/e2e_dashboard.py` (Playwright, needs `CV_TOKEN`).
+- New upstream shapes need a test in `tests/test_pii.py`: scrubbing cannot catch a name under an unknown key.
 
 ## Data protection
 
-- No personal data is stored or returned. `_scrub_pii` (recursive) drops name/email/phone/id/receipt keys, person containers (players, participants, members, coaches, ...) and `PLAYER:` titles, and `_redact_text` removes emails and UK phone numbers from every remaining string. It runs on upstream JSON before it is cached or returned (generic proxy, availability cache, club-info, booked-hours, revenue-summary) and again on read for availability, club-info and archive payloads.
-- Allowlists instead of scrubbing where the shape is known: payment records (`_sanitise_payment`), `/api/day-activities` (`_activity_view`: timing, courts, type, spots, price), `/api/membership-members` (counts only).
-- Coaches are anonymised in `/api/coach-stats`: "Coach 1..n" ordered by sessions desc, a pseudonymous `coach_id` (also the `coach_rates` key in activity-summary) and numeric stats only.
-- `PRAGMA secure_delete=ON` on every connection. `cv_purge_pii.py` (run by deploy.sh while `--check` says it is needed; stops the service, rebuilds `payments`, rewrites archive payloads, scrubs or deletes availability, clears the stats/club-info/membership caches, then `wal_checkpoint(TRUNCATE)` + `VACUUM`) is idempotent and records `schema_meta.pii_purge`.
-- Files: DB, `-wal`, `-shm` and `access.log*` live in `/var/lib/courtview` and are `600 courtview` (deploy.sh fixes existing modes and fails if any is not); `courtview.service` and `courtview-backup.service` set `UMask=0077`.
-- Scrubbing cannot catch a personal name under an unknown key; new upstream shapes need a test in `tests/test_pii.py`.
+- No personal data is stored or returned. `_scrub_pii` (recursive) drops name/email/phone/id/receipt keys, person containers (players, participants, members, coaches, ...) and `PLAYER:` titles. `_redact_text` removes emails and UK phone numbers from remaining strings. Both run on upstream JSON before it is cached or returned, and again on read for availability, club-info and archive payloads.
+- Allowlists where the shape is known: payment records (`_sanitise_payment`), `/api/day-activities` (`_activity_view`), `/api/membership-members` (counts only; member lists are never fetched).
+- `/api/coach-stats` anonymises coaches as "Coach 1..n" by sessions desc, with a pseudonymous `coach_id` and numeric stats only.
+- `PRAGMA secure_delete=ON` on every connection. `cv_purge_pii.py` is idempotent and records `schema_meta.pii_purge`; deploy.sh runs it as `courtview` while `--check` says it is needed.
+- DB, `-wal`, `-shm` and `access.log*` are `600 courtview`; both CourtView units set `UMask=0077`.
 
 ## Backup and restore
 
-- `courtview-backup.timer` (03:30 UK +- 10 min, `Persistent=true`) runs `cv_backup.py`: sqlite backup API, `integrity_check`, `gpg --encrypt --recipient-file courtview-backup.pub.asc`, then `/var/lib/courtview/backups/courtview-YYYYMMDD.db.gpg` (0600, keep 7). The unit runs as `courtview` (network-less sandbox, score 1.2) and reads the public key from the release dir. Only the public key is on the RPi; the plaintext temp file is always removed.
-- gpg key "CourtView Backup 2026-10 RSA <courtview-backup@doxx.local>", fingerprint `CFA832B6B2983DD121CACB830317325FB7C4A6F9` (rsa4096 sign + rsa4096 encrypt, no passphrase, no expiry). The private key is in the Mac keyring and exported to the user's password manager. Never print it: export straight to a file.
-- Why RSA: the first key (`0C6DF971…`, ed25519/cv25519, 2026-10-14) didn't survive export/import under GnuPG 2.5.24 (the cv25519 keygrip changes on import, leaving a `ssb#` stub that can't decrypt). It was also partly exposed in a session transcript, so it was rotated the same day and its backups deleted. Test any future key with a fresh-`GNUPGHOME` round trip before relying on it.
-- The Mac pulls via launchd (`launchd/net.doxx.courtview-backup-pull.plist`, 09:15 daily plus RunAtLoad) running `scripts/courtview-backup-pull.sh`: tries `pi-cmd` then `pi-wan`, copies new files to `~/Backups/courtview/` (0700 dir, 0600 files, keep 7), logs to `pull.log` and warns when the newest remote file is older than 36 h. That log is the only staleness signal (the timer has no `OnFailure`).
-- Restore check: `zsh scripts/courtview-backup-verify.sh` decrypts the newest backup in a temp dir, prints `integrity_check`, the PII column count and email/mobile byte counts, then deletes the plaintext.
-- Restore: `scripts/courtview-restore.sh [--key KEYFILE] [BACKUP]` decrypts (newest in `~/Backups/courtview` by default) and checks integrity; add `--apply` to confirm, copy to the RPi, stop the service, swap the DB (dropping -wal/-shm), `chmod 600` and start it again.
-- The HMAC key is deliberately not backed up: keeping it beside the data would weaken the pseudonymisation. After a restore on a new host a fresh key changes `customer_key` for new rows only.
+- `courtview-backup.timer` (03:30 +- 10 min, `Persistent=true`) runs `cv_backup.py` as `courtview` (no network, exposure 1.2): sqlite backup API, `integrity_check`, `gpg --encrypt --recipient-file courtview-backup.pub.asc`, then `/var/lib/courtview/backups/courtview-YYYYMMDD.db.gpg` (0600, keep 7). Only the public key is on the RPi.
+- gpg key "CourtView Backup 2026-10 RSA", fingerprint `CFA832B6B2983DD121CACB830317325FB7C4A6F9` (rsa4096, no passphrase, no expiry). The private key is in the Mac keyring and the user's password manager. Never print it.
+- RSA because the earlier cv25519 key failed export/import under GnuPG 2.5.24. Test any new key with a fresh-`GNUPGHOME` round trip.
+- The Mac pulls via launchd (`launchd/net.doxx.courtview-backup-pull.plist`, 09:15 daily plus RunAtLoad) running `scripts/courtview-backup-pull.sh`. It tries pi-cmd then pi-wan and copies new files to `~/Backups/courtview/` (keep 7). `pull.log` warns when the newest file is older than 36 h; it is the only staleness signal.
+- Restore check: `zsh scripts/courtview-backup-verify.sh` decrypts the newest backup in a temp dir and prints `integrity_check` and PII counts.
+- Restore: `scripts/courtview-restore.sh [--key KEYFILE] [BACKUP]` decrypts and checks; `--apply` then swaps the DB on the RPi (stop, drop -wal/-shm, chmod 600, start).
+- The HMAC key is deliberately not backed up: keeping it beside the data would weaken the pseudonymisation.
 
 ## Heatmap
 
-One `operational` call per club every 24h (background thread, schedule in `job_state`; Padium and Rocket only). The payload is validated before any write: all three arrays must be lists and not all empty, otherwise nothing is written and the run is retried after 30 min. It uses `hottest_time_slots` (30-min buckets aggregated per hour), `week_day_wise_activity_count_combined_graph` (DOW) and `court_wise_activity_count_combined_graph` (court popularity). The DOW x hour matrix is normalised hour signal x DOW signal.
+One `operational` call per club every 24h (Padium and Rocket). The payload is validated first: all three arrays must be lists and not all empty, else nothing is written and the run retries after 30 min. It uses `hottest_time_slots` (30-min buckets aggregated per hour), `week_day_wise_activity_count_combined_graph` (DOW) and `court_wise_activity_count_combined_graph` (court popularity). The DOW x hour matrix is normalised hour signal x DOW signal.
 
 ## SQLite cache (`courtview_cache.db`, WAL)
 
 | Table | TTL |
 |---|---|
-| `availability` | Only London days today..today+27 are kept. Refreshed every 6h (~56 calls: 28 days x 2 clubs); `_purge_availability` runs at thread start and every cycle and deletes past-day, non-numeric-key and Racketeer rows |
+| `availability` | London days today..today+27 only. Refreshed every 6h (28 days x 2 clubs); `_purge_availability` deletes past-day, non-numeric-key and Racketeer rows each cycle |
 | `heatmap_cache`, `heatmap_hour_signal`, `heatmap_dow_signal`, `court_popularity` | 24h |
 | `membership_members_cache` (counts only), `stats_cache` | 6h |
 | `club_info_cache` | 10 min |
-| `payments`, `payments_sync` | none (persistent; amounts, dates, status and an HMAC customer_key, no personal data) |
+| `payments`, `payments_sync` | persistent |
 
-- `job_state` (job, last_run, ok, calls, errors, updated_at, last_ok): schedule for `availability` (6h), `heatmap` (24h) and `payments` (30 min); a failed run is due again after 30 min. With no row it is seeded from data (MAX availability `fetched_at`, oldest club `heatmap_cache`, MAX `payments_sync.synced_at`), so the first deploy does not re-run a job; an empty DB is due now. `last_ok` is the start time of the latest ok run: set on ok, carried unchanged on a failed run, null if never ok. `init_db` adds the column to an old table and seeds it from `last_run` where `ok=1`. Loops re-check every <= 5 min and log `[job] next run in Nm (persisted)`.
-- Never cached: activity-summary when the mix call failed (502) or training failed (served, uncached), club-info with any failed sub-fetch (last stored row served with `X-CourtView-Stale: 1`, else the partial result uncached), membership failures (stored counts with the stale header, else 502), availability that is not a dict with `allSlots` or a non-empty list, a heatmap payload with a missing array. Club-info, membership and availability misses are single-flight (`_single_flight_lock`).
-- `_stats_key()` rounds `end` to a 6h bucket. Without it, every millisecond-precision request misses the cache.
+- `job_state` (job, last_run, ok, calls, errors, updated_at, last_ok) persists the `availability` (6h), `heatmap` (24h) and `payments` (30 min) schedules, so a restart neither resets nor re-runs them. A failed run is due again after 30 min. With no row it is seeded from data; an empty DB is due now. `last_ok` is the start of the latest ok run, carried unchanged on a failed run. Loops re-check every <= 5 min and log `[job] next run in Nm (persisted)`.
+- Never cached: failures, error shapes and empty fallbacks. Club-info and membership failures serve the last stored row with `X-CourtView-Stale: 1`, else the partial result uncached (club-info) or 502 (membership). Club-info, membership and availability misses are single-flight (`_single_flight_lock`).
+- `_stats_key()` rounds `end` to a 6h bucket; without it every millisecond-precision request misses.
 - `get_cached` treats an empty `[]` payload as a miss.
-- `archive_heatmap`, `archive_club_info` and `archive_financial` hold Racketeer only, 2026-06-15 to 06-30, and nothing writes them any more. `archive_heatmap.hour_norm` and `dow_norm` are NULL on every row, so the archived signal chart is empty and can't be backfilled.
+- `archive_heatmap`, `archive_club_info` and `archive_financial` hold Racketeer only, 2026-06-15 to 06-30; nothing writes them. `archive_heatmap.hour_norm` and `dow_norm` are NULL, so the archived signal chart is empty.
 
 ## Dashboard gotchas
 
-- Court grid tooltips: the `.tt` inside `.cell` is a template. Show the body-level portal instead, because `.grid-scroll` overflow clips the inline one.
-- Archive selector (Racketeer only, on the Club Info, Stats and Revenue tabs): CSS defaults it to `display:none`, so `showArchiveSelector` must set `'flex'`, not `''`. It has no Live option and auto-loads the latest snapshot. `switchClub()` must hide all three selectors. For Racketeer every `load*` function returns after its archive branch; falling through to a live fetch now just gets a 410.
-- Membership plans: `hidden=True` plans still show, and `price=None` shows as "Free / partner". Rocket's paid plans are all hidden, and Padium has only corporate plans.
-- `/?token=x` sets the cookie and redirects (302) to `/`, which strips the token from the URL and history.
-- `_read_token` is keyed on `(st_mtime_ns, st_size)` and keeps the last good token when the file is empty, unreadable or missing (not cached, so the next request retries). Transitions log `[token] ...` to the journal (never the value). With no good token at startup it returns "" and everything is denied. A `before_request` guard (`_allow_only_get_head`) returns 403 for any method other than GET/HEAD, `?token=` is ignored on other methods, and no response carries `Access-Control-*` headers.
-- Tabs pre-load in the background after availability loads. Other clubs warm up after 6s.
+- Court grid tooltips: the `.tt` inside `.cell` is a template. Show the body-level portal, because `.grid-scroll` overflow clips the inline one.
+- Archive selector (Racketeer only, Club Info, Stats and Revenue tabs): CSS defaults it to `display:none`, so `showArchiveSelector` must set `'flex'`, not `''`. It has no Live option and auto-loads the latest snapshot. `switchClub()` must hide all three selectors. For Racketeer every `load*` returns after its archive branch.
+- Membership plans: `hidden=True` plans still show, and `price=None` shows as "Free / partner". Rocket's paid plans are all hidden; Padium has only corporate plans.
+- `/?token=x` sets the cookie and redirects (302) to `/`, stripping the token from the URL.
+- `_read_token` is keyed on `(st_mtime_ns, st_size)` and keeps the last good token when the file is empty, unreadable or missing. Transitions log `[token] ...` (never the value). With no good token everything is denied.
+- Tabs preload after availability loads; other clubs warm up after 6 s.
 
 ## Status JSON and health
 
-- `/root/projects/courtview/status/availability.json` (a symlink to `/var/lib/courtview/status`, kept for labs_heartbeat; every 6h, retry 30 min after a failed run) and `payments.json` (every 30 min): exactly `{job, last_run, last_ok, ok, calls, errors}` (that order), `last_run` and `last_ok` ISO 8601 Z (`last_ok` null if the job never succeeded). `last_ok` comes from `job_state.last_ok` (seeded from ok rows on first deploy, carried on failed runs, survives restarts) and `_rewrite_status_files()` regenerates both files from `job_state` at startup so a deploy publishes it without waiting for a run. Written atomically (temp file + `os.replace`), mode 0644 in a 0755 dir (set explicitly because the unit has `UMask=0077`). `COURTVIEW_STATUS_DIR` overrides the directory (default `$COURTVIEW_DATA_DIR/status`). An availability run is `ok` unless the breaker stopped it or at least half the calls failed.
-- `GET /api/health` (token): `started_at`, `breaker`, `totals`, `endpoints` (paths only) and `jobs` (from `job_state`, each with `last_run`, `last_ok`, `ok`, `calls`, `errors`). No personal data or query strings.
-- `GET /api/availability-fresh?club_id&start_datetime&end_datetime`: availability at most 5 min old (single-flight), live clubs only, window start within now-36h..now+48h and span <= 26h. Used by the dashboard's watch polling instead of the 6h cache. On upstream failure it serves the stored row with `X-CourtView-Stale: 1`, else 502.
+- `status/availability.json` (every 6h, retry 30 min) and `status/payments.json` (every 30 min) hold exactly `{job, last_run, last_ok, ok, calls, errors}`, timestamps ISO 8601 Z, `last_ok` null if never ok. `_rewrite_status_files()` regenerates both from `job_state` at startup. Writes are atomic, mode 0644 in a 0755 dir (set explicitly because of `UMask=0077`). `COURTVIEW_STATUS_DIR` overrides the directory.
+- labs_heartbeat (root) reads them via `/root/projects/courtview/status`, a symlink to `/var/lib/courtview/status`.
+- An availability run is `ok` unless the breaker stopped it or at least half the calls failed.
+- `GET /api/health` (token): `started_at`, `breaker`, `totals`, `endpoints` (paths only) and `jobs`. No personal data or query strings.
+- `GET /api/availability-fresh?club_id&start_datetime&end_datetime`: availability at most 5 min old (single-flight), live clubs only, start within now-36h..now+48h, span <= 26h. Watches use it instead of the 6h cache. On upstream failure it serves the stored row with `X-CourtView-Stale: 1`, else 502.
 
 ## Security headers and access log
 
-- Every response carries `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` (`_security_headers`). `/api/*` and `/access/data` also get `Cache-Control: no-store`.
-- Content-Security-Policy has three profiles, set with `setdefault` so `_forbidden`'s own CSP survives: `/` gets the dashboard CSP (`CSP_DASHBOARD_TMPL`), `/access` gets `CSP_ACCESS`, everything else `CSP_API` (`default-src 'none'`). `script-src` on the dashboard is `'self'` plus one `'sha256-...'` computed in `_load_dashboard` from the exact bytes of the single inline `<script>` (if it cannot be found the page breaks visibly, the CSP never loosens). There are no inline `on*=` handlers (the duration buttons use one delegated listener) and `tests/test_security.py` fails if one comes back. `style-src` keeps `'unsafe-inline'` because the dashboard has about 40 static `style=` attributes plus many generated in innerHTML templates, which no hash or nonce can cover without a rewrite. Editing the inline script changes the hash automatically (it is computed at load), but a second inline script would drop the dashboard to `script-src 'self'`.
-- Static route (`/<path:filename>`) is token-gated first (no 404 oracle), rejects `..`, backslash, `%`, NUL, leading `/` and raw `%2e/%2f/%5c`, resolves with werkzeug `safe_join`, then applies the extension allowlist. Flask's built-in `/static` route is disabled (`static_folder=None`) and a 404 handler gates unmatched URLs too, so every URL answers 403 without a token. `merge_slashes` is off so `//x` is not redirected before auth.
-- `MAX_CONTENT_LENGTH` is 1 MiB. Non-GET/HEAD is already 403.
-- The generic proxy ignores the upstream content-type: a body that parses as JSON is served as `application/json`, anything else becomes 502 `{error: "upstream returned non-JSON"}`. Error JSON never carries exception text: unexpected exceptions return 500 `internal error` or 502 `upstream unavailable` and the journal gets `[error] <ExceptionType> path=...` (`_exc_error`).
-- `tests/test_security.py` walks `app.url_map`: every endpoint must be in `EXPECTED_ENDPOINTS` and return 403 for GET and HEAD without a token. `PUBLIC_ENDPOINTS` is an explicit empty frozenset, so a new route or a public one fails the test until someone decides.
-- Access log: the label comes from the gate result (`g.cv_auth`: OK, TOKEN, BLOCKED, RATE_LIMITED; archived-club 410 with a valid token is OK), so an authenticated 404 is OK and an unauthenticated one is BLOCKED. `access.log` is opened 0600 and rotated at 1 MiB keeping `access.log.1` to `.5` (all 0600); startup preloads only the current file. The access page, `access.js` and `dashboard.css` are CourtView-owned files in `web/` (title `CourtView Access Log`, no Wireslammer tab), loaded at startup; a missing file logs a startup warning.
+- GET/HEAD only: `_allow_only_get_head` returns 403 for other methods, `?token=` is ignored on them, and no response carries `Access-Control-*` headers. Failed token checks are rate-limited per IP (10 per 60 s).
+- Every response carries `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`. `/api/*` and `/access/data` also get `Cache-Control: no-store`.
+- CSP has three profiles, set with `setdefault` so `_forbidden`'s own CSP survives: `/` gets `CSP_DASHBOARD_TMPL`, `/access` gets `CSP_ACCESS`, everything else `CSP_API` (`default-src 'none'`).
+- Dashboard `script-src` is `'self'` plus one `'sha256-...'` computed at load from the single inline `<script>`. A second inline script drops it to `'self'`; the CSP never loosens. There are no inline `on*=` handlers and `tests/test_security.py` fails if one comes back. `style-src` keeps `'unsafe-inline'` because of many static and generated `style=` attributes.
+- Static route (`/<path:filename>`) is token-gated first (no 404 oracle), rejects `..`, backslash, `%`, NUL, leading `/` and raw `%2e/%2f/%5c`, resolves with `safe_join`, then applies an extension allowlist. Flask's `/static` is disabled (`static_folder=None`), the 404 handler is gated, and `merge_slashes` is off, so every URL answers 403 without a token.
+- `MAX_CONTENT_LENGTH` is 1 MiB.
+- The generic proxy serves a body that parses as JSON as `application/json`; anything else becomes 502 `{error: "upstream returned non-JSON"}`. Error JSON never carries exception text: `_exc_error` returns 500 `internal error` or 502 `upstream unavailable` and logs `[error] <ExceptionType> path=...`.
+- `tests/test_security.py` walks `app.url_map`: every endpoint must be in `EXPECTED_ENDPOINTS` and return 403 without a token. `PUBLIC_ENDPOINTS` is an empty frozenset, so a new or public route fails until someone decides.
+- Access log labels come from the gate result (`g.cv_auth`: OK, TOKEN, BLOCKED, RATE_LIMITED). `access.log` is 0600, rotated at 1 MiB keeping `.1` to `.5`. The access page, `access.js` and `dashboard.css` are CourtView's own files in `web/`, loaded at startup.
 
 ## Runtime user and sandbox
 
-- `courtview.service` runs as `courtview` (system user, nologin, no home) from `/opt/courtview/current` (root-owned, read-only to it, `PYTHONDONTWRITEBYTECODE=1`; releases are precompiled by deploy). Data: `StateDirectory=courtview` (`/var/lib/courtview`, 0700). Secrets: `LoadCredential` copies `/root/.courtview_token` and `/root/.courtview_hmac_key` at start (path order in code: `COURTVIEW_TOKEN_PATH`/`COURTVIEW_HMAC_KEY_PATH` env, then `$CREDENTIALS_DIRECTORY/<name>`, then the legacy /root path).
-- Sandbox: ProtectSystem=strict (only `/var/lib/courtview` writable), ProtectHome, PrivateTmp/Devices, kernel and cgroup protections, `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`, `SystemCallFilter=@system-service`, empty capability sets, NoNewPrivileges, MemoryMax=512M. Score 9.6 UNSAFE -> 1.5 OK.
-- `MemoryDenyWriteExecute=yes` was KEPT: a pre-flight `systemd-run` probe with the full property set (python imports, a curl_cffi chrome110 GET, `gunicorn --check-config`, and gpg --recipient-file for the backup flow) passed, and the live service runs with it. No property was dropped. Re-run that probe if curl_cffi or Python is upgraded.
-- gunicorn 26 tries to create a control socket under the home dir (`[Errno 30] /nonexistent`), so ExecStart passes `--no-control-socket`.
-- The notifier units (`notify-telegram@`, `courtview-recovery@`) stay root: they need systemctl, journalctl and SO_BINDTODEVICE. Their state is `/var/lib/courtview-notify` (root 0700), deliberately outside the data dir the sandboxed user owns.
+- `courtview.service` runs as `courtview` (system user, nologin, home `/nonexistent`) from `/opt/courtview/current` with `PYTHONDONTWRITEBYTECODE=1`. gunicorn: 1 gthread worker, 4 threads, `127.0.0.1:8766`, plain HTTP behind Caddy.
+- Data: `StateDirectory=courtview` (`/var/lib/courtview`, 0700). Secrets: `LoadCredential` copies `/root/.courtview_token` and `/root/.courtview_hmac_key` at start. Lookup order: `COURTVIEW_TOKEN_PATH`/`COURTVIEW_HMAC_KEY_PATH` env, then `$CREDENTIALS_DIRECTORY/<name>`, then the /root path.
+- Sandbox: ProtectSystem=strict (only `/var/lib/courtview` writable), ProtectHome, PrivateTmp/Devices, kernel and cgroup protections, `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`, `SystemCallFilter=@system-service`, empty capability sets, NoNewPrivileges, MemoryDenyWriteExecute, MemoryMax=512M. `systemd-analyze security courtview`: 1.5 OK.
+- Re-run a `systemd-run` probe with the full property set (imports, a curl_cffi chrome110 GET, `gunicorn --check-config`, gpg) after upgrading curl_cffi or Python: MemoryDenyWriteExecute could break them.
+- ExecStart passes `--no-control-socket`: gunicorn 26 otherwise tries to create a socket under the home dir.
+- Restart backoff: `RestartSec=5`, `RestartSteps=5`, `RestartMaxDelaySec=300`, `StartLimitIntervalSec=0` (never gives up).
+- The notifier units (`notify-telegram@`, `courtview-recovery@`) stay root: they need systemctl, journalctl and SO_BINDTODEVICE. Their state is `/var/lib/courtview-notify` (root 0700), outside the data dir the sandboxed user owns.
 
-## Releases and rollback
+## Deploy and releases
 
-- `deploy.sh` uploads to `/opt/courtview/releases/<ts>.partial`, normalises owner and modes, compiles, renames to `<ts>`, runs the pip-audit and pin-drift gates (a missing pip-audit blocks; nothing is auto-installed), installs units, runs the PII purge check as `courtview`, flips `/opt/courtview/current` (ln + `mv -T`), restarts and health-checks `/api/health` over HTTP (token from `/root/.courtview_token`, read in-process, never in argv; `started_at` must be newer than the restart).
-- Then MainPID owning :8766, MainPID user `courtview`, and `600 courtview` data files. Any failure renames the release `<ts>.failed`, restores the previous symlink and units, restarts and re-checks, and exits 1 ("ROLLED BACK to <prev>").
-- The one-off 2026-10-14 migration copied (never moved) `/root/projects/courtview` data to `/var/lib/courtview`, comparing `integrity_check` and per-table counts against a sqlite-backup safety copy, and aborts to the old root unit if anything differs. `--finalize-migration` removes the old copies only after the post-migration checks.
-- Pins: `requirements.in` + `requirements.txt` (full closure) + `cv_closure.py`.
+- `deploy.sh` (via `cv-deploy`) uploads to `/opt/courtview/releases/<UTC ts>.partial`, normalises owner and modes, compiles, and renames it to `<ts>`.
+- Gates: pip-audit must be installed and clean, and `requirements.txt` pins must match the installed packages. Deploy never installs anything.
+- It then installs units, runs the PII purge check as `courtview`, flips `/opt/courtview/current` (ln + `mv -T`) and restarts.
+- Health checks: authenticated `GET /api/health` over HTTP with `started_at` newer than the restart, MainPID among the :8766 listeners, MainPID user `courtview`, data files `600 courtview`.
+- Any failure renames the release `<ts>.failed`, restores the previous symlink and units, restarts, and exits 1 with "ROLLED BACK to <ts> (reason)".
+- Kept releases: the newest 3 plus current and previous.
+- Manual rollback (a bad release that passed the checks): `rpi 'cd /opt/courtview && ln -sfn releases/<previous ts> current.tmp && mv -T current.tmp current && cp current/*.service current/*.timer /etc/systemd/system/ && systemctl daemon-reload && systemctl restart courtview'`.
+- Dependencies: system Python, no venv (`python3 -m pip install --break-system-packages`). `requirements.in` lists top-level packages and `requirements.txt` pins the full closure; the upgrade steps are in its header (regenerate with `python3 -I cv_closure.py requirements.in` on the RPi).
+- The 2026-10-14 migration from `/root/projects/courtview` is finalised. Only a README and the `status` symlink remain there.
 
 ## Notifier
 
-- `cv_telegram.send_telegram(message, silent=...)`: default route, then eth0 (SO_BINDTODEVICE); the whole send is retried once after 3 s. On final failure it logs `[cv_telegram] send failed: <ExceptionType>` (never the token or text) and appends the alert to `alert_outbox.json` (0600, entries older than 24 h dropped). A 4xx other than 429 is permanent and not queued. `flush_outbox()` resends oldest first and runs at the start of every notifier invocation.
-- `cv_notify_fail.py` opens an incident on a red alert (a queued alert counts as raised) and runs `systemctl start courtview-recovery@<unit>.timer`. The timer (enabled, `OnBootSec=2min`, `OnUnitActiveSec=1min`) runs `--check-recovery`: one silent green once the unit has been active 60 s, then on the next run (no incident, empty outbox) `systemctl stop` of the timer. Alert outcomes are logged as `[cv_notify_fail] <red down|red loop|green> alert <sent|queued>`. Verified by a drill with a throwaway crash-looping unit: 1 red, 1 silent green, timer self-disarmed.
+- `cv_notify_fail.py` runs as `OnFailure` of courtview.service. It sends a red "down" alert if the unit is still failed after 15 s, or a red "crash-looping" alert on 3+ failures in 10 min (1h cooldown).
+- A red alert (sent or queued) opens an incident and starts `courtview-recovery@courtview.timer` (`OnBootSec=2min`, `OnUnitActiveSec=1min`). Its `--check-recovery` run sends one silent green "back" once the unit has been active 60 s. The next run, with no incident and an empty outbox, stops the timer.
+- `cv_telegram.send_telegram(message, silent=...)` tries the default route, then eth0 (SO_BINDTODEVICE), and retries the whole send once after 3 s. A 4xx other than 429 is permanent. Other final failures are logged (`[cv_telegram] send failed: ...`, never the token or text) and queued in `alert_outbox.json` (0600, entries older than 24 h dropped). `flush_outbox()` runs at the start of every notifier invocation.
+- Alert outcomes log as `[cv_notify_fail] <label> alert <sent|queued>`.
+- Message style: `~/dev/doxxnet-labs/.claude/docs/telegram-style.md`.
