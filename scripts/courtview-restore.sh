@@ -8,7 +8,7 @@ set -euo pipefail
 
 FPR=CFA832B6B2983DD121CACB830317325FB7C4A6F9
 DEST="$HOME/Backups/courtview"
-REMOTE_DB=/root/projects/courtview/courtview_cache.db
+REMOTE_DB=/var/lib/courtview/courtview_cache.db
 GPG=$(command -v gpg)
 
 apply=0; key=""; backup=""
@@ -43,7 +43,7 @@ elif ssh -o BatchMode=yes -o ConnectTimeout=10 pi-wan true 2>/dev/null; then hos
 else echo "RPi unreachable (pi-cmd, pi-wan)" >&2; exit 1; fi
 
 scp -q "$work/restore.db" "$host:$REMOTE_DB.restore"
-ssh "$host" "set -e; chmod 600 $REMOTE_DB.restore; systemctl stop courtview; \
+ssh "$host" "set -e; chown courtview:courtview $REMOTE_DB.restore; chmod 600 $REMOTE_DB.restore; systemctl stop courtview; \
   rm -f $REMOTE_DB-wal $REMOTE_DB-shm; mv $REMOTE_DB.restore $REMOTE_DB; \
   systemctl start courtview; sleep 3; systemctl is-active courtview"
 echo "Restored ${backup:t} on $host."

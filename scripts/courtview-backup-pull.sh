@@ -4,7 +4,7 @@
 set -euo pipefail
 
 DEST="$HOME/Backups/courtview"
-REMOTE_DIR="/root/projects/courtview/backups"
+REMOTE_DIR="/var/lib/courtview/backups"
 KEEP=7
 STALE_HOURS=36
 mkdir -p "$DEST"

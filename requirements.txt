@@ -1,3 +1,26 @@
-curl-cffi
-flask
-gunicorn
+# Pinned dependency closure, installed on the RPi (python3 3.13 system packages).
+# deploy.sh fails if the installed closure differs from these pins, or if pip-audit
+# is missing or reports a vulnerability. Nothing is installed at deploy time.
+#
+# Upgrade procedure:
+#   1. on the RPi: python3 -m pip install --break-system-packages -U curl-cffi flask gunicorn
+#   2. regenerate this list: python3 -I cv_closure.py requirements.in  (keep this header)
+#   3. run the test suites (see .claude/docs/courtview-internals.md)
+#   4. deploy (the audit runs then)
+blinker==1.9.0
+certifi==2026.5.20
+cffi==2.0.0
+click==8.4.0
+curl-cffi==0.15.0
+flask==3.1.3
+gunicorn==26.0.0
+itsdangerous==2.2.0
+jinja2==3.1.6
+markdown-it-py==4.2.0
+markupsafe==3.0.3
+mdurl==0.1.2
+packaging==25.0
+pycparser==3.0
+pygments==2.20.0
+rich==15.0.0
+werkzeug==3.1.9

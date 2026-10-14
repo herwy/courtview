@@ -1,7 +1,20 @@
 [Unit]
 Description=Telegram failure notification for %i
 
+# Runs as root: it needs systemctl (arms the recovery timer), journalctl and, for the eth0
+# fallback, SO_BINDTODEVICE. State (incident file, alert outbox) is root-only and kept
+# apart from the sandboxed service's data dir.
 [Service]
 Type=oneshot
 TimeoutStartSec=30
-ExecStart=/usr/bin/python3 /root/projects/courtview/cv_notify_fail.py %i
+ExecStart=/usr/bin/python3 /opt/courtview/current/cv_notify_fail.py %i
+Environment=PYTHONDONTWRITEBYTECODE=1
+LoadCredential=telegram_token:/root/.telegram_token
+StateDirectory=courtview-notify
+StateDirectoryMode=0700
+UMask=0077
+ProtectSystem=strict
+ReadWritePaths=/var/lib/courtview-notify
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes

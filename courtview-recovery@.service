@@ -1,0 +1,20 @@
+[Unit]
+Description=CourtView recovery check for %i
+
+# Started by courtview-recovery@%i.timer, which the notifier arms when it opens an incident.
+# Sends one silent "back" message once the unit has been up long enough, flushes the alert
+# outbox, and disarms the timer when there is nothing left to do.
+[Service]
+Type=oneshot
+TimeoutStartSec=120
+ExecStart=/usr/bin/python3 /opt/courtview/current/cv_notify_fail.py --check-recovery %i
+Environment=PYTHONDONTWRITEBYTECODE=1
+LoadCredential=telegram_token:/root/.telegram_token
+StateDirectory=courtview-notify
+StateDirectoryMode=0700
+UMask=0077
+ProtectSystem=strict
+ReadWritePaths=/var/lib/courtview-notify
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes
