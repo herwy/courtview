@@ -367,28 +367,53 @@ def _record_auth_fail(ip: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Token reader - mtime-cached so disk is not read on every request
+# Token reader - keyed on (st_mtime_ns, st_size), keeps the last good token
 # ---------------------------------------------------------------------------
 
-_token_cache: dict = {"value": None, "mtime": -1.0}
+_token_cache: dict = {"value": None, "key": None, "state": None}
 _token_lock = threading.Lock()
 
 
+def _token_log(state: str, msg: str) -> None:
+    """Log a token reader state transition (never the value or its length)."""
+    if _token_cache["state"] != state:
+        _token_cache["state"] = state
+        print(f"[token] {msg}", flush=True)
+
+
 def _read_token() -> str:
-    """Return the current token, re-reading the file if it has changed on disk."""
+    """Return the current token, re-reading the file when (mtime_ns, size) changes.
+
+    A transient empty or unreadable file (non-atomic rotation) keeps the last good
+    token and is NOT cached, so the next request retries. With no previous good
+    token (startup) this returns "" and every gate denies (fail closed).
+    """
     with _token_lock:
+        last = _token_cache["value"]
         try:
-            mtime = os.path.getmtime(TOKEN_PATH)
+            st = os.stat(TOKEN_PATH)
         except OSError:
-            return ""
-        if mtime != _token_cache["mtime"]:
-            try:
-                with open(TOKEN_PATH) as fh:
-                    _token_cache["value"] = fh.read().strip()
-                _token_cache["mtime"] = mtime
-            except OSError:
-                return ""
-        return _token_cache["value"] or ""
+            _token_log("degraded", "reload failed (missing), "
+                       + ("keeping last good token" if last else "no valid token, denying all"))
+            return last or ""
+        key = (st.st_mtime_ns, st.st_size)
+        if key == _token_cache["key"]:
+            return last or ""
+        try:
+            with open(TOKEN_PATH) as fh:
+                value = fh.read().strip()
+            reason = "empty"
+        except OSError:
+            value = ""
+            reason = "unreadable"
+        if not value:
+            _token_log("degraded", f"reload failed ({reason}), "
+                       + ("keeping last good token" if last else "no valid token, denying all"))
+            return last or ""
+        _token_cache["value"] = value
+        _token_cache["key"] = key
+        _token_log("ok", "loaded")
+        return value
 
 
 def _constant_time_eq(a: str, b: str) -> bool:
@@ -399,17 +424,6 @@ def _constant_time_eq(a: str, b: str) -> bool:
     for x, y in zip(a, b):
         result |= ord(x) ^ ord(y)
     return result == 0
-
-
-def _check_token(req) -> bool:
-    """Return True if the request carries a valid courtview token."""
-    expected = _read_token()
-    if not expected:
-        return False
-    query_token  = req.args.get("token", "")
-    cookie_token = req.cookies.get(COOKIE_NAME, "")
-    provided = query_token or cookie_token
-    return _constant_time_eq(provided, expected)
 
 
 def _set_cookie(response, token: str) -> None:
@@ -700,13 +714,18 @@ def _forbidden() -> Response:
                     headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:"})
 
 
+def _provided_token() -> tuple[str, str]:
+    """Return (query_token, cookie_token). ?token= counts on GET/HEAD only."""
+    query_token = request.args.get("token", "") if request.method in ("GET", "HEAD") else ""
+    return query_token, request.cookies.get(COOKIE_NAME, "")
+
+
 def _gate() -> tuple[bool, str]:
     """Check rate limit and token. Return (passed, token_value)."""
     ip = _get_client_ip()
     if _is_rate_limited(ip):
         return False, ""
-    query_token  = request.args.get("token", "")
-    cookie_token = request.cookies.get(COOKIE_NAME, "")
+    query_token, cookie_token = _provided_token()
     provided = query_token or cookie_token
     expected = _read_token()
     if not expected or not provided:
@@ -717,6 +736,14 @@ def _gate() -> tuple[bool, str]:
         print(f"[auth] fail from {html.escape(ip)}")
         return False, ""
     return True, query_token  # return query_token so caller knows if cookie should be set
+
+
+@app.before_request
+def _allow_only_get_head():
+    """Defence in depth: the dashboard never issues methods other than GET/HEAD."""
+    if request.method not in ("GET", "HEAD"):
+        return _forbidden()
+    return None
 
 
 @app.before_request
@@ -731,13 +758,10 @@ def _block_archived_club():
         return None
     ids = {request.args.get("club_id", "").strip()}
     ids.update(c.strip() for c in request.args.get("club_ids", "").split(","))
-    if request.method == "POST":
-        body = request.get_json(silent=True)
-        if isinstance(body, dict):
-            ids.add(str(body.get("club_id", "")).strip())
     if RACKETEER_CLUB_ID not in ids:
         return None
-    provided = request.args.get("token", "") or request.cookies.get(COOKIE_NAME, "")
+    query_token, cookie_token = _provided_token()
+    provided = query_token or cookie_token
     expected = _read_token()
     if not provided or not expected or not _constant_time_eq(provided, expected):
         return None
@@ -2117,19 +2141,11 @@ def api_coach_bios():
     return resp
 
 
-@app.route("/api/<path:p>", methods=["GET", "POST", "OPTIONS"])
+@app.route("/api/<path:p>", methods=["GET"], provide_automatic_options=False)
 def proxy(p):
     passed, via_query = _gate()
     if not passed:
         return _forbidden()
-
-    if request.method == "OPTIONS":
-        resp = Response(status=204)
-        # Reflect the request Origin rather than wildcard - this is a private single-user dashboard
-        resp.headers["Access-Control-Allow-Origin"]  = request.headers.get("Origin", "")
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        return resp
 
     full_path = "/" + p
     if full_path not in ALLOWED_PATHS:
@@ -2161,21 +2177,12 @@ def proxy(p):
             url += "?" + urlencode(qs_pairs)
 
     try:
-        if request.method == "POST":
-            upstream = cffi_requests.post(
-                url,
-                json=request.get_json(silent=True),
-                headers=APP_HEADERS,
-                timeout=15,
-                impersonate="chrome110",
-            )
-        else:
-            upstream = cffi_requests.get(
-                url,
-                headers=APP_HEADERS,
-                timeout=15,
-                impersonate="chrome110",
-            )
+        upstream = cffi_requests.get(
+            url,
+            headers=APP_HEADERS,
+            timeout=15,
+            impersonate="chrome110",
+        )
 
         # Store in cache if this is the availability path
         if full_path == CACHED_PATH and upstream.status_code == 200:
