@@ -134,8 +134,9 @@ class MainTests(unittest.TestCase):
     def tearDown(self):
         for p in self.patches:
             p.stop()
-        if os.path.exists(self.path):
-            os.remove(self.path)
+        for f in (self.path, self.path + '.lock'):
+            if os.path.exists(f):
+                os.remove(f)
 
     def state(self):
         with open(self.path) as fh:
@@ -194,6 +195,24 @@ class MainTests(unittest.TestCase):
         self.assertIn('CourtView back</b> · down 43 min', msg)
         self.assertIsNone(self.state().get('courtview', {}).get('incident_since'))
         cv.main(['--check-recovery', 'courtview'])
+        self.assertEqual(len(SENT), 1)
+
+    def test_concurrent_recovery_sends_once(self):
+        import threading
+        real_send = sys.modules['notify'].send_telegram
+
+        def slow_send(msg, *a, **kw):
+            import time as _t
+            _t.sleep(0.05)
+            return real_send(msg, *a, **kw)
+
+        with open(self.path, 'w') as fh:
+            json.dump({'courtview': {'calls': [], 'alerted': None, 'incident_since': T_BST - 600}}, fh)
+        threads = [threading.Thread(target=cv.check_recovery, args=('courtview', slow_send)) for _ in range(4)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
         self.assertEqual(len(SENT), 1)
 
     def test_bad_unit(self):

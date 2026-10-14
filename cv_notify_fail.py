@@ -29,6 +29,7 @@ Ported from doxxnet-labs scripts/notify_unit_failure.py.
 Usage: cv_notify_fail.py <unit>                   (the %i of the template)
        cv_notify_fail.py --check-recovery <unit>
 """
+import fcntl
 import html
 import json
 import os
@@ -229,6 +230,17 @@ def _open_incident(entry, since):
 
 
 def check_recovery(unit, send_telegram):
+    # Every start schedules its own check timer, and a crash loop leaves several
+    # pending that fire together. Serialise them so only one sends the "back" message.
+    fd = os.open(STATE_FILE + '.lock', os.O_CREAT | os.O_RDWR, STATE_MODE)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return _check_recovery_locked(unit, send_telegram)
+    finally:
+        os.close(fd)
+
+
+def _check_recovery_locked(unit, send_telegram):
     now = time.time()
     state = _prune(_load_state(), now)
     entry = state.get(unit)
