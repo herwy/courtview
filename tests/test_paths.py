@@ -6,20 +6,20 @@ import unittest
 from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+from tests import cvload  # noqa: E402
+
 PATH_ENV = ("COURTVIEW_DATA_DIR", "COURTVIEW_DB_PATH", "COURTVIEW_ACCESS_LOG_PATH", "COURTVIEW_STATUS_DIR",
             "COURTVIEW_TOKEN_PATH", "COURTVIEW_HMAC_KEY_PATH", "CREDENTIALS_DIRECTORY")
 
 
 def load(**env):
-    """Import courtview.py fresh under a controlled environment."""
+    """Import the package fresh under a controlled environment; returns its config module."""
     clean = {k: v for k, v in os.environ.items() if k not in PATH_ENV}
     clean["COURTVIEW_SKIP_STARTUP"] = "1"
     clean.update(env)
     with mock.patch.dict(os.environ, clean, clear=True):
-        spec = importlib.util.spec_from_file_location("courtview_paths_under_test", os.path.join(REPO, "courtview.py"))
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["courtview_paths_under_test"] = mod
-        spec.loader.exec_module(mod)
+        mod = cvload.load("courtview_paths_under_test").config
     return mod
 
 

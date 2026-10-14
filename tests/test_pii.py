@@ -4,13 +4,13 @@ Run on the RPi (needs Flask and curl_cffi): python3 -m unittest tests.test_pii -
 All sentinels are obviously fake (example.test addresses, Ofcom drama-range numbers).
 """
 import ast
-import importlib.util
 import json
 import os
 import re
 import sqlite3
 import sys
 import tempfile
+import time
 import types
 import unittest
 from datetime import datetime, timezone
@@ -28,13 +28,13 @@ os.environ["COURTVIEW_DB_PATH"] = os.path.join(_TMP, "t.db")
 os.environ["COURTVIEW_DATA_DIR"] = _TMP
 os.environ["COURTVIEW_HMAC_KEY_PATH"] = _KEY
 
-_spec = importlib.util.spec_from_file_location("courtview_pii_under_test", os.path.join(REPO, "courtview.py"))
-cv = importlib.util.module_from_spec(_spec)
-sys.modules["courtview_pii_under_test"] = cv
-_spec.loader.exec_module(cv)
+sys.path.insert(0, REPO)
+from tests import cvload  # noqa: E402
 
-CLUB = cv.HEATMAP_CLUBS[0]["id"]
-RACK = cv.RACKETEER_CLUB_ID
+cv = cvload.load("courtview_pii_under_test")
+
+CLUB = cv.clubs.HEATMAP_CLUBS[0]["id"]
+RACK = cv.clubs.RACKETEER_CLUB_ID
 
 S_NAME = "Zed Sentinelson"
 S_FIRST = "Sentinelson"
@@ -91,7 +91,7 @@ class Upstream:
                     pay_rec("t3", "2026-09-11 11:00:00", email=" Zed.Sentinelson@Example.TEST ", amount="7.50 GBP"),
                     pay_rec("t4", "2026-09-12 09:00:00", email="other.person@example.test", name="Other Person",
                             amount="3.00 GBP")]
-            recs = [r for r in recs if start <= cv._parse_created_utc(r["createdAt"]) <= end]
+            recs = [r for r in recs if start <= cv.payments._parse_created_utc(r["createdAt"]) <= end]
             return Resp(recs[skip:skip + 100])
         if path == "/club/membership/member":
             return Resp([{"name": S_NAME, "email": S_EMAIL}])
@@ -139,23 +139,23 @@ class Base(unittest.TestCase):
     def setUp(self):
         for ext in ("", "-wal", "-shm"):
             try:
-                os.remove(cv.DB_PATH + ext)
+                os.remove(cv.config.DB_PATH + ext)
             except FileNotFoundError:
                 pass
-        cv.init_db()
-        cv._load_dashboard()
-        cv.PAYMENTS_PAGE_DELAY = (0, 0)
+        cv.db.init_db()
+        cv.security._load_dashboard()
+        cv.payments.PAYMENTS_PAGE_DELAY = (0, 0)
         self.now = ms(2026, 9, 20, 12)
-        for p in (mock.patch.object(cv, "_now", lambda: self.now / 1000),
-                  mock.patch.object(cv, "_gate", lambda: (True, "")),
-                  mock.patch.object(cv, "_resolve_ip", lambda ip: None),
-                  mock.patch.object(cv.time, "sleep", lambda s: None)):
+        for p in (mock.patch.object(cv.config, "_now", lambda: self.now / 1000),
+                  mock.patch.object(cv.security, "_gate", lambda: (True, "")),
+                  mock.patch.object(cv.accesslog, "_resolve_ip", lambda ip: None),
+                  mock.patch.object(time, "sleep", lambda s: None)):
             p.start()
             self.addCleanup(p.stop)
         self.up = Upstream()
-        cv.UPSTREAM.reset()
-        self.addCleanup(cv.UPSTREAM.reset)
-        p = mock.patch.object(cv.UPSTREAM, "_new_session",
+        cv.upstream.UPSTREAM.reset()
+        self.addCleanup(cv.upstream.UPSTREAM.reset)
+        p = mock.patch.object(cv.upstream.UPSTREAM, "_new_session",
                               lambda: types.SimpleNamespace(get=self.up, close=lambda: None))
         p.start()
         self.addCleanup(p.stop)
@@ -165,7 +165,7 @@ class Base(unittest.TestCase):
         return f"club_id={CLUB}&start={ms(2026, 9, 1)}&end={ms(2026, 9, 19, 23, 59)}"
 
     def db(self):
-        return sqlite3.connect(cv.DB_PATH)
+        return sqlite3.connect(cv.config.DB_PATH)
 
 
 def has_pii(text):
@@ -195,34 +195,44 @@ class AstTests(unittest.TestCase):
     def test_cffi_calls_compliant(self):
         """All upstream traffic goes through UpstreamClient: cffi_requests and TARGET appear nowhere
         else, and inside the class every Session and session.get carries APP_HEADERS and chrome110."""
-        tree = ast.parse(open(os.path.join(REPO, "courtview.py")).read())
-        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "UpstreamClient")
-        inside = {id(n) for n in ast.walk(cls)}
+        files = cvload.source_files()
+        self.assertGreaterEqual(len(files), 17)  # courtview.py + the 16 package modules
+        defined_in = []
         outside = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and node.id == "cffi_requests" and id(node) not in inside:
-                if not isinstance(node.ctx, ast.Store):
-                    outside.append(("cffi_requests", node.lineno))
-            if isinstance(node, ast.Name) and node.id == "TARGET" and isinstance(node.ctx, ast.Load) \
-                    and id(node) not in inside:
-                outside.append(("TARGET", node.lineno))
-            if isinstance(node, ast.Attribute) and node.attr == "TARGET" and id(node) not in inside:
-                outside.append(("TARGET", node.lineno))
         sess = gets = bad = 0
-        for node in ast.walk(cls):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-                continue
-            recv = node.func.value
-            is_ctor = isinstance(recv, ast.Name) and recv.id == "cffi_requests" and node.func.attr == "Session"
-            is_get = isinstance(recv, ast.Name) and recv.id == "session" and node.func.attr == "get"
-            if not (is_ctor or is_get):
-                continue
-            sess += is_ctor
-            gets += is_get
-            kws = {k.arg: k.value for k in node.keywords}
-            ok = isinstance(kws.get("headers"), ast.Name) and kws["headers"].id == "APP_HEADERS" \
-                and isinstance(kws.get("impersonate"), ast.Constant) and kws["impersonate"].value == "chrome110"
-            bad += 0 if ok else 1
+        for path in files:
+            with open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
+            name = os.path.basename(path)
+            classes = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "UpstreamClient"]
+            if classes:
+                defined_in.append(name)
+            cls = classes[0] if classes else None
+            inside = {id(n) for n in ast.walk(cls)} if cls else set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and node.id == "cffi_requests" and id(node) not in inside:
+                    if not isinstance(node.ctx, ast.Store):
+                        outside.append((name, "cffi_requests", node.lineno))
+                if isinstance(node, ast.Name) and node.id == "TARGET" and isinstance(node.ctx, ast.Load) \
+                        and id(node) not in inside:
+                    outside.append((name, "TARGET", node.lineno))
+                if isinstance(node, ast.Attribute) and node.attr == "TARGET" and id(node) not in inside:
+                    outside.append((name, "TARGET", node.lineno))
+            for node in ast.walk(cls) if cls else ():
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                    continue
+                recv = node.func.value
+                is_ctor = isinstance(recv, ast.Name) and recv.id == "cffi_requests" and node.func.attr == "Session"
+                is_get = isinstance(recv, ast.Name) and recv.id == "session" and node.func.attr == "get"
+                if not (is_ctor or is_get):
+                    continue
+                sess += is_ctor
+                gets += is_get
+                kws = {k.arg: k.value for k in node.keywords}
+                ok = isinstance(kws.get("headers"), ast.Name) and kws["headers"].id == "APP_HEADERS" \
+                    and isinstance(kws.get("impersonate"), ast.Constant) and kws["impersonate"].value == "chrome110"
+                bad += 0 if ok else 1
+        self.assertEqual(defined_in, ["upstream.py"])
         print(f"\nAST: {sess} Session ctor, {gets} session.get calls, {bad} non-compliant, "
               f"{len(outside)} cffi_requests/TARGET uses outside UpstreamClient")
         self.assertEqual(outside, [])
@@ -230,10 +240,39 @@ class AstTests(unittest.TestCase):
         self.assertGreaterEqual(gets, 1)
         self.assertEqual(bad, 0)
 
+    def test_package_import_rules(self):
+        """Package modules import siblings only as `from . import module` at top level (so a patched
+        name has exactly one home and tests can reload the package), never inside functions, and
+        curl_cffi is imported by upstream.py alone."""
+        pkg_dir = os.path.join(REPO, "courtview_app")
+        modules = {n[:-3] for n in os.listdir(pkg_dir) if n.endswith(".py") and n != "__init__.py"}
+        self.assertGreaterEqual(len(modules), 16)
+        curl_importers = []
+        for name in sorted(os.listdir(pkg_dir)):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(pkg_dir, name), encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for sub in ast.walk(node):
+                        if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                            self.fail(f"{name}:{sub.lineno} import inside a function")
+                if isinstance(node, ast.ImportFrom) and node.level >= 1:
+                    self.assertEqual(node.level, 1, f"{name}:{node.lineno}")
+                    self.assertIsNone(node.module, f"{name}:{node.lineno} use `from . import module`")
+                    for alias in node.names:
+                        self.assertIn(alias.name, modules, f"{name}:{node.lineno} {alias.name} is not a package module")
+                if isinstance(node, ast.Import) and any(a.name.split(".")[0] == "curl_cffi" for a in node.names):
+                    curl_importers.append(name)
+                if isinstance(node, ast.ImportFrom) and node.level == 0 and (node.module or "").split(".")[0] == "curl_cffi":
+                    curl_importers.append(name)
+        self.assertEqual(curl_importers, ["upstream.py"])
+
 
 class PrimitiveTests(unittest.TestCase):
     def test_scrubber(self):
-        out = cv._scrub_pii({
+        out = cv.privacy._scrub_pii({
             "title": f"PLAYER: {S_NAME}", "activity_title": "Open match", "players": [{"name": S_NAME}],
             "player_email": S_EMAIL, "note": f"mail {S_EMAIL} or call {S_PHONE}", "address": "1 High St",
             "n": 3, "members": 5, "nested": [{"phoneNumber": S_PHONE, "ok": "fine"}], "userId": S_PID})
@@ -241,22 +280,22 @@ class PrimitiveTests(unittest.TestCase):
                                "n": 3, "members": 5, "nested": [{"ok": "fine"}]})
 
     def test_customer_key_normalised(self):
-        a = cv._customer_key("Zed@Example.test ")
-        b = cv._customer_key("zed@example.test")
+        a = cv.privacy._customer_key("Zed@Example.test ")
+        b = cv.privacy._customer_key("zed@example.test")
         self.assertEqual(a, b)
         self.assertRegex(a, r"^[0-9a-f]{64}$")
-        self.assertIsNone(cv._customer_key(""))
+        self.assertIsNone(cv.privacy._customer_key(""))
 
     def test_regexes_ignore_ids_and_epochs(self):
         for text in ("5f3a9c0b7d4e2a1b8c6d9e0f", "1789012345678", "ab07700900123cd"):
-            self.assertEqual(cv._redact_text(text), text)
-        self.assertEqual(cv._redact_text("call 07700 900123 now"), "call  now")
-        self.assertEqual(cv._redact_text("call +44 7700 900123 now"), "call  now")
+            self.assertEqual(cv.privacy._redact_text(text), text)
+        self.assertEqual(cv.privacy._redact_text("call 07700 900123 now"), "call  now")
+        self.assertEqual(cv.privacy._redact_text("call +44 7700 900123 now"), "call  now")
 
 
 class IngestTests(Base):
     def sync(self):
-        return cv._sync_payments(CLUB, ms(2026, 9, 1), ms(2026, 9, 19, 23, 59))
+        return cv.payments._sync_payments(CLUB, ms(2026, 9, 1), ms(2026, 9, 19, 23, 59))
 
     def test_db_has_no_pii_after_ingest(self):
         self.sync()
@@ -266,7 +305,7 @@ class IngestTests(Base):
                     f"/api/player/player_booking/all_courts_slot_prices_v3?club_id={CLUB}&start_datetime=1&end_datetime=2"):
             self.assertEqual(self.client.get(url).status_code, 200, url)
         self.assertEqual(self.client.get(f"/api/booked-hours?{self.window()}").status_code, 410)
-        cv._fetch_heatmap_for_club(CLUB, 7)
+        cv.refresh._fetch_heatmap_for_club(CLUB, 7)
         c = self.db()
         try:
             hits, rows = [], 0
@@ -300,18 +339,18 @@ class IngestTests(Base):
 
     def test_description_template_rule(self):
         keep = "Booked court of Padium Canary Wharf: September 10, 2026 10:00 - 11:00 BST"
-        kept = cv._sanitise_payment(pay_rec("a", "2026-09-10 10:00:00", desc=keep))
+        kept = cv.payments._sanitise_payment(pay_rec("a", "2026-09-10 10:00:00", desc=keep))
         self.assertEqual(kept["description"], keep)
         winter = keep.replace("September", "December").replace("BST", "GMT")
-        self.assertEqual(cv._sanitise_payment(pay_rec("a", "2026-09-10 10:00:00", desc=winter))["description"], winter)
-        odd = cv._sanitise_payment(pay_rec("a", "2026-09-10 10:00:00", desc="Court with Bob Rareperson"))
+        self.assertEqual(cv.payments._sanitise_payment(pay_rec("a", "2026-09-10 10:00:00", desc=winter))["description"], winter)
+        odd = cv.payments._sanitise_payment(pay_rec("a", "2026-09-10 10:00:00", desc="Court with Bob Rareperson"))
         self.assertEqual(odd["description"], "booking")
 
     def test_synthetic_ids_have_no_email(self):
         rec = pay_rec("x", "2026-09-10 10:00:00")
         del rec["transaction_id"]
-        clean = cv._sanitise_payment(rec)
-        tid = cv._payment_txn_id(clean)
+        clean = cv.payments._sanitise_payment(rec)
+        tid = cv.payments._payment_txn_id(clean)
         self.assertTrue(tid.startswith("synthetic:"))
         self.assertNotIn("@", tid)
         self.assertEqual(set(clean), {"createdAt", "customer_key", "source_type", "description", "amount", "status"})
@@ -319,7 +358,7 @@ class IngestTests(Base):
 
 class LeaderboardTests(Base):
     def test_leaderboard_anonymous_and_stable(self):
-        cv._sync_payments(CLUB, ms(2026, 9, 1), ms(2026, 9, 19, 23, 59))  # routes only read the table
+        cv.payments._sync_payments(CLUB, ms(2026, 9, 1), ms(2026, 9, 19, 23, 59))  # routes only read the table
         url = f"/api/payment-leaderboard?{self.window()}"
         a = self.client.get(url)
         b = self.client.get(url)
@@ -332,7 +371,7 @@ class LeaderboardTests(Base):
             self.assertRegex(leader["customer_id"], r"^[0-9A-F]{4}$")
         top = leaders[0]
         self.assertEqual((top["bookings"], top["total"]), (3, 22.5))  # t1+t2+t3 for the one customer
-        self.assertEqual(top["customer_id"], cv._customer_key(S_EMAIL)[:4].upper())
+        self.assertEqual(top["customer_id"], cv.privacy._customer_key(S_EMAIL)[:4].upper())
         self.assertEqual(has_pii(a.get_data(as_text=True)), [])
 
 
@@ -341,11 +380,11 @@ class HistoryTests(Base):
         recs = [pay_rec(f"p{i}", f"2026-09-10 {8 + i // 60:02d}:{i % 60:02d}:00") for i in range(130)]
         with mock.patch.object(Upstream, "__call__", lambda s, url, **kw: self._page(recs, url)):
             base = f"/api/payment-history?club_id={CLUB}&start={ms(2026, 9, 10)}&end={ms(2026, 9, 10, 23, 59)}"
-            cv._sync_payments(CLUB, ms(2026, 9, 10), ms(2026, 9, 10, 23, 59))  # routes only read the table
+            cv.payments._sync_payments(CLUB, ms(2026, 9, 10), ms(2026, 9, 10, 23, 59))  # routes only read the table
             r1 = self.client.get(base + "&limit=100&skip=0").get_json()
             r2 = self.client.get(base + "&limit=100&skip=100").get_json()
             big = self.client.get(base + "&limit=500&skip=0").get_json()
-            far = self.client.get(base + f"&limit=100&skip={cv.PAYMENTS_MAX_SKIP + 1}")
+            far = self.client.get(base + f"&limit=100&skip={cv.payments.PAYMENTS_MAX_SKIP + 1}")
         self.assertEqual(len(r1["payments"]), 100)
         self.assertTrue(r1["has_more"])
         self.assertEqual(len(r2["payments"]), 30)
@@ -363,7 +402,7 @@ class HistoryTests(Base):
         q = parse_qs(urlparse(url).query)
         start, end = int(q["start_datetime"][0]), int(q["end_datetime"][0])
         skip, limit = int(q["skip"][0]), int(q["limit"][0])
-        rows = [r for r in recs if start <= cv._parse_created_utc(r["createdAt"]) <= end]
+        rows = [r for r in recs if start <= cv.payments._parse_created_utc(r["createdAt"]) <= end]
         return Resp(rows[skip:skip + limit])
 
 
@@ -375,7 +414,7 @@ class AllowlistTests(Base):
         self.assertEqual(self.client.get("/api/membership-members?club_id=zzz").status_code, 400)
         self.assertEqual(self.up.calls, [])
         for path in ("payment-history", "payment-leaderboard"):
-            with mock.patch.object(cv, "_read_token", lambda: "t"):
+            with mock.patch.object(cv.security, "_read_token", lambda: "t"):
                 r = self.client.get(f"/api/{path}?club_id={RACK}&start=1&end=2&token=t")
             self.assertEqual(r.status_code, 410, path)
         self.assertEqual(self.up.calls, [])
@@ -404,8 +443,8 @@ class AllowlistTests(Base):
 
 class KeyTests(Base):
     def test_hmac_key_missing_disables_storage(self):
-        with mock.patch.object(cv, "HMAC_KEY_PATH", os.path.join(_TMP, "missing")):
-            res = cv._sync_payments(CLUB, ms(2026, 9, 1), ms(2026, 9, 19, 23, 59))
+        with mock.patch.object(cv.config, "HMAC_KEY_PATH", os.path.join(_TMP, "missing")):
+            res = cv.payments._sync_payments(CLUB, ms(2026, 9, 1), ms(2026, 9, 19, 23, 59))
             r = self.client.get(f"/api/payment-leaderboard?{self.window()}")
         self.assertEqual(r.status_code, 503)
         self.assertFalse(res["complete"])
@@ -470,7 +509,7 @@ class RouteScanTests(Base):
                         f"{r}?club_id={RACK}&captured_at=100&endpoint=revenue-summary&table=club_info"]
             elif r.startswith("/api/") and "<" not in r:
                 out.append(f"{r}?{win}&club_ids={CLUB}&names=a&limit=100&skip=0&q=ab&start_datetime=1&end_datetime=2")
-        for p in sorted(cv.ALLOWED_PATHS):
+        for p in sorted(cv.upstream.ALLOWED_PATHS):
             out.append(f"/api{p}?club_id={CLUB}&start_datetime=0&end_datetime=1")
             out.append(f"/api{p}?club_id={CLUB}&start_datetime=5&end_datetime=6")
         out.append("/api/not/allowed?x=1")
@@ -478,7 +517,7 @@ class RouteScanTests(Base):
 
     def test_every_route_leaks_no_pii(self):
         self.seed_legacy()
-        cv._sync_payments(CLUB, ms(2026, 9, 1), ms(2026, 9, 19, 23, 59))
+        cv.payments._sync_payments(CLUB, ms(2026, 9, 1), ms(2026, 9, 19, 23, 59))
         urls = self.urls()
         self.assertGreater(len(urls), 25)
         seen_json = 0

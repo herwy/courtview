@@ -5,13 +5,13 @@ Run on the RPi (needs Flask and curl_cffi): python3 -m unittest tests.test_secur
 """
 import base64
 import hashlib
-import importlib.util
 import json
 import os
 import re
 import stat
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -22,14 +22,14 @@ os.environ["COURTVIEW_SKIP_STARTUP"] = "1"
 os.environ["COURTVIEW_DB_PATH"] = os.path.join(_TMP, "t.db")
 os.environ["COURTVIEW_DATA_DIR"] = _TMP
 
-_spec = importlib.util.spec_from_file_location("courtview_sec_under_test", os.path.join(REPO, "courtview.py"))
-cv = importlib.util.module_from_spec(_spec)
-sys.modules["courtview_sec_under_test"] = cv
-_spec.loader.exec_module(cv)
+sys.path.insert(0, REPO)
+from tests import cvload  # noqa: E402
+
+cv = cvload.load("courtview_sec_under_test")
 
 TOKEN = "t" * 32
-PADIUM = cv.HEATMAP_CLUBS[0]["id"]
-RACK = cv.RACKETEER_CLUB_ID
+PADIUM = cv.clubs.HEATMAP_CLUBS[0]["id"]
+RACK = cv.clubs.RACKETEER_CLUB_ID
 
 # Every route must be token-gated. Adding a route without updating this set fails the test.
 PUBLIC_ENDPOINTS = frozenset()
@@ -59,34 +59,34 @@ class SecBase(unittest.TestCase):
         self.token_path = os.path.join(_TMP, "token")
         with open(self.token_path, "w") as fh:
             fh.write(TOKEN + "\n")
-        cv.TOKEN_PATH = self.token_path
-        cv._token_cache.clear()
-        cv._token_cache.update({"value": None, "key": None, "state": None})
-        cv._AUTH_FAILS.clear()
+        cv.config.TOKEN_PATH = self.token_path
+        cv.security._token_cache.clear()
+        cv.security._token_cache.update({"value": None, "key": None, "state": None})
+        cv.security._AUTH_FAILS.clear()
         for ext in ("", "-wal", "-shm"):
             try:
-                os.remove(cv.DB_PATH + ext)
+                os.remove(cv.config.DB_PATH + ext)
             except FileNotFoundError:
                 pass
-        cv.init_db()
-        cv._load_dashboard()
+        cv.db.init_db()
+        cv.security._load_dashboard()
         self.upstream = _Resp()
         self.calls = []
-        cv.UPSTREAM.reset()
-        self.addCleanup(cv.UPSTREAM.reset)
-        p = mock.patch.object(cv.UPSTREAM, "_new_session",
+        cv.upstream.UPSTREAM.reset()
+        self.addCleanup(cv.upstream.UPSTREAM.reset)
+        p = mock.patch.object(cv.upstream.UPSTREAM, "_new_session",
                               lambda: types.SimpleNamespace(get=self._get, close=lambda: None))
         p.start()
         self.addCleanup(p.stop)
-        p = mock.patch.object(cv, "_resolve_ip", lambda ip: None)
+        p = mock.patch.object(cv.accesslog, "_resolve_ip", lambda ip: None)
         p.start()
         self.addCleanup(p.stop)
-        p = mock.patch.object(cv.time, "sleep", lambda s: None)
+        p = mock.patch.object(time, "sleep", lambda s: None)
         p.start()
         self.addCleanup(p.stop)
         self.client = cv.app.test_client()
         self.anon = cv.app.test_client()
-        self.client.set_cookie(cv.COOKIE_NAME, TOKEN)
+        self.client.set_cookie(cv.config.COOKIE_NAME, TOKEN)
 
     def _get(self, url, **kw):
         self.calls.append(url)
@@ -115,14 +115,14 @@ class RouteAuthCoverageTests(SecBase):
                 continue
             for url in urls:
                 for method in ("get", "head"):
-                    cv._AUTH_FAILS.clear()  # the limiter would answer 429 on /access after 10 misses
+                    cv.security._AUTH_FAILS.clear()  # the limiter would answer 429 on /access after 10 misses
                     r = getattr(self.anon, method)(url)
                     self.assertEqual(r.status_code, 403, f"{method} {url} ({endpoint})")
         self.assertEqual(self.calls, [])
 
     def test_wrong_token_403(self):
         c = cv.app.test_client()
-        c.set_cookie(cv.COOKIE_NAME, "x" * 32)
+        c.set_cookie(cv.config.COOKIE_NAME, "x" * 32)
         self.assertEqual(c.get("/api/health").status_code, 403)
 
     def test_unmatched_url_is_gated(self):
@@ -157,7 +157,7 @@ class TraversalTests(SecBase):
 
     def test_403_without_token(self):
         for url in self.URLS:
-            cv._AUTH_FAILS.clear()
+            cv.security._AUTH_FAILS.clear()
             self.assertEqual(self.get_raw(self.anon, url).status_code, 403, url)
 
     def test_raw_uri_encoded_dots_rejected(self):
@@ -173,6 +173,17 @@ class TraversalTests(SecBase):
         r = self.client.get("/" + name)
         self.assertEqual((r.status_code, r.get_data()), (200, b"body{}"))
         self.assertEqual(r.mimetype, "text/css")
+
+    def test_package_sources_not_served(self):
+        for url in ("/courtview_app/config.py", "/courtview_app/__init__.py", "/courtview.py"):
+            self.assertEqual(self.client.get(url).status_code, 404, url)
+            cv.security._AUTH_FAILS.clear()
+            self.assertEqual(self.anon.get(url).status_code, 403, url)
+
+    def test_asset_under_web_dir_still_served(self):
+        r = self.client.get("/web/access.js")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_data(), open(os.path.join(REPO, "web", "access.js"), "rb").read())
 
     def test_unknown_extension_404_with_token_403_without(self):
         self.assertEqual(self.client.get("/nope.php").status_code, 404)
@@ -215,7 +226,7 @@ class HeaderTests(SecBase):
     def test_500_has_headers(self):
         app = cv.app
         app.config["PROPAGATE_EXCEPTIONS"] = False
-        with mock.patch.object(cv, "_job_states", side_effect=RuntimeError("boom")):
+        with mock.patch.object(cv.jobs, "_job_states", side_effect=RuntimeError("boom")):
             r = self.client.get("/api/health")
         self.assertEqual(r.status_code, 500)
         self.check_headers(r, "500")
@@ -243,8 +254,8 @@ class HeaderTests(SecBase):
                          "default-src 'none'; style-src 'unsafe-inline'; img-src data:")
 
     def test_access_and_api_csp_profiles(self):
-        self.assertEqual(self.client.get("/access").headers["Content-Security-Policy"], cv.CSP_ACCESS)
-        self.assertEqual(self.client.get("/api/health").headers["Content-Security-Policy"], cv.CSP_API)
+        self.assertEqual(self.client.get("/access").headers["Content-Security-Policy"], cv.security.CSP_ACCESS)
+        self.assertEqual(self.client.get("/api/health").headers["Content-Security-Policy"], cv.security.CSP_API)
 
     def test_cache_control_no_store(self):
         for url in ("/api/health", "/access/data", "/api/booked-hours?club_id=x", f"/api/club/?club_id={PADIUM}"):
@@ -285,20 +296,24 @@ class RelayTests(SecBase):
         self.assertNotIn(b"secret", r.get_data())
 
     def test_every_api_response_object_uses_json_content_type(self):
-        src = open(os.path.join(REPO, "courtview.py"), encoding="utf-8").read()
-        for m in re.finditer(r"Response\(([^\n]*content_type=)([^\n)]*)", src):
-            ctype = m.group(2)
-            line = src[:m.start()].count("\n") + 1
-            if "/api" in ctype or ctype.startswith("content_types.get("):
-                continue
-            self.assertTrue(ctype.startswith(('"application/json"', '"text/', '"application/javascript"', "'text/",
-                                              '"text/html; charset=utf-8"')),
-                            f"line {line}: {ctype}")
+        files = cvload.source_files()
+        self.assertGreater(len(files), 10)
+        for path in files:
+            with open(path, encoding="utf-8") as fh:
+                src = fh.read()
+            for m in re.finditer(r"Response\(([^\n]*content_type=)([^\n)]*)", src):
+                ctype = m.group(2)
+                line = src[:m.start()].count("\n") + 1
+                if "/api" in ctype or ctype.startswith("content_types.get("):
+                    continue
+                self.assertTrue(ctype.startswith(('"application/json"', '"text/', '"application/javascript"', "'text/",
+                                                  '"text/html; charset=utf-8"')),
+                                f"{os.path.basename(path)} line {line}: {ctype}")
 
 
 class AccessLabelTests(SecBase):
     def labels(self, client, url, **kw):
-        with mock.patch.object(cv, "_log_access") as log:
+        with mock.patch.object(cv.accesslog, "_log_access") as log:
             r = client.get(url, **kw)
         return r, [c.args[2] for c in log.call_args_list]
 
@@ -315,7 +330,7 @@ class AccessLabelTests(SecBase):
         self.assertEqual(labels, ["BLOCKED"])
 
     def test_rate_limited(self):
-        for _ in range(cv.AUTH_RATE_LIMIT + 1):
+        for _ in range(cv.security.AUTH_RATE_LIMIT + 1):
             self.anon.get("/api/health")
         r, labels = self.labels(self.anon, "/api/health")
         self.assertEqual(labels, ["RATE_LIMITED"])
@@ -333,7 +348,7 @@ class AccessLabelTests(SecBase):
         self.assertEqual((r.status_code, labels), (410, ["OK"]))
 
     def test_non_get_never_reaching_gate_blocked(self):
-        with mock.patch.object(cv, "_log_access") as log:
+        with mock.patch.object(cv.accesslog, "_log_access") as log:
             self.client.post("/api/health")
         self.assertEqual([c.args[2] for c in log.call_args_list], ["BLOCKED"])
 
@@ -343,44 +358,46 @@ class AccessAssetsTests(SecBase):
 
     @classmethod
     def setUpClass(cls):
-        cls._saved = cv._ACCESS_HTML_BYTES, cv._ACCESS_JS_BYTES, cv._DASHBOARD_CSS_BYTES
-        cv._load_web_assets()
+        cls._saved = cv.accesslog._ACCESS_HTML_BYTES, cv.accesslog._ACCESS_JS_BYTES, cv.accesslog._DASHBOARD_CSS_BYTES
+        cv.accesslog._load_web_assets()
 
     @classmethod
     def tearDownClass(cls):
-        cv._ACCESS_HTML_BYTES, cv._ACCESS_JS_BYTES, cv._DASHBOARD_CSS_BYTES = cls._saved
+        cv.accesslog._ACCESS_HTML_BYTES, cv.accesslog._ACCESS_JS_BYTES, cv.accesslog._DASHBOARD_CSS_BYTES = cls._saved
 
     def test_assets_dir_is_repo_web(self):
-        self.assertEqual(cv.WEB_ASSETS_DIR, os.path.join(REPO, "web"))
+        self.assertEqual(cv.config.WEB_ASSETS_DIR, os.path.join(REPO, "web"))
         for name in ("access.html", "access.js", "dashboard.css"):
             self.assertTrue(os.path.isfile(os.path.join(REPO, "web", name)), name)
 
     def test_title_and_no_wireslammer(self):
-        html = cv._ACCESS_HTML_BYTES
+        html = cv.accesslog._ACCESS_HTML_BYTES
         self.assertIn(b"<title>CourtView Access Log</title>", html)
         self.assertNotIn(b"Wireslammer", html)
         title = re.search(rb"<title>(.*?)</title>", html).group(1)
         self.assertNotIn(b"doxxnet", title.lower())
-        self.assertNotIn(b"loadWS", cv._ACCESS_JS_BYTES)
-        self.assertNotIn(b"Wireslammer", cv._ACCESS_JS_BYTES)
+        self.assertNotIn(b"loadWS", cv.accesslog._ACCESS_JS_BYTES)
+        self.assertNotIn(b"Wireslammer", cv.accesslog._ACCESS_JS_BYTES)
 
     def test_routes_serve_assets_with_csp(self):
         c = self.client
         page = c.get("/access")
         self.assertEqual(page.status_code, 200)
-        self.assertEqual(page.headers["Content-Security-Policy"], cv.CSP_ACCESS)
+        self.assertEqual(page.headers["Content-Security-Policy"], cv.security.CSP_ACCESS)
         for url in ("/access.js", "/dashboard.css"):
             r = c.get(url)
             self.assertEqual(r.status_code, 200, url)
             self.assertTrue(r.data, url)
-            self.assertEqual(r.headers["Content-Security-Policy"], cv.CSP_API)
+            self.assertEqual(r.headers["Content-Security-Policy"], cv.security.CSP_API)
 
     def test_strip_function_gone_and_no_labs_reads(self):
-        self.assertFalse(hasattr(cv, "_strip_wireslammer"))
-        for name in os.listdir(REPO):
-            if name.endswith(".py") and not name.startswith("."):
-                with open(os.path.join(REPO, name), encoding="utf-8") as fh:
-                    self.assertNotIn("/root/labs", fh.read(), name)
+        for mod in cvload.MODULES:
+            self.assertFalse(hasattr(getattr(cv, mod), "_strip_wireslammer"), mod)
+        files = [os.path.join(REPO, n) for n in os.listdir(REPO) if n.endswith(".py") and not n.startswith(".")]
+        files += cvload.source_files()
+        for path in files:
+            with open(path, encoding="utf-8") as fh:
+                self.assertNotIn("/root/labs", fh.read(), path)
 
 
 class AccessRotationTests(unittest.TestCase):
@@ -389,18 +406,18 @@ class AccessRotationTests(unittest.TestCase):
         path = os.path.join(d, "access.log")
         old = os.umask(0o022)
         try:
-            with mock.patch.object(cv, "ACCESS_LOG_PATH", path), \
-                    mock.patch.object(cv, "ACCESS_LOG_MAX_BYTES", 300), \
-                    mock.patch.object(cv, "ACCESS_LOG_KEEP", 3), \
-                    mock.patch.object(cv, "_resolve_ip", lambda ip: None), \
-                    mock.patch.object(cv, "_ACCESS_FD", None):
-                cv._ACCESS_FD = cv._open_access_log()
+            with mock.patch.object(cv.config, "ACCESS_LOG_PATH", path), \
+                    mock.patch.object(cv.accesslog, "ACCESS_LOG_MAX_BYTES", 300), \
+                    mock.patch.object(cv.accesslog, "ACCESS_LOG_KEEP", 3), \
+                    mock.patch.object(cv.accesslog, "_resolve_ip", lambda ip: None), \
+                    mock.patch.object(cv.accesslog, "_ACCESS_FD", None):
+                cv.accesslog._ACCESS_FD = cv.accesslog._open_access_log()
                 try:
                     for i in range(60):
-                        cv._log_access("10.0.0.1", f"/p{i}", "OK", "ua")
+                        cv.accesslog._log_access("10.0.0.1", f"/p{i}", "OK", "ua")
                 finally:
                     try:
-                        cv._ACCESS_FD.close()
+                        cv.accesslog._ACCESS_FD.close()
                     except Exception:
                         pass
         finally:

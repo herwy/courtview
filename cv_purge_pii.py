@@ -15,10 +15,11 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 os.environ.setdefault("COURTVIEW_SKIP_STARTUP", "1")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import courtview as cv  # noqa: E402
+from courtview_app import config, db, payments, privacy  # noqa: E402
 
 EXIT_NEEDED, EXIT_CLEAN, EXIT_REFUSED = 0, 1, 2
 CACHE_TABLES = ("membership_members_cache", "stats_cache", "club_info_cache")
@@ -42,7 +43,7 @@ def _marker_present(conn) -> bool:
 def _legacy_payments(conn) -> bool:
     if "payments" not in _tables(conn):
         return False
-    return _payment_columns(conn) != set(cv._PAYMENTS_COLUMNS)
+    return _payment_columns(conn) != set(db._PAYMENTS_COLUMNS)
 
 
 def needs_purge(conn) -> bool:
@@ -59,10 +60,10 @@ def _sanitised_archive_payment(rec):
         src = dict(rec)
         if str(tid or "").startswith("synthetic:"):
             src.pop("transaction_id", None)
-        clean = cv._sanitise_payment(src)
+        clean = payments._sanitise_payment(src)
     else:
         clean = {k: rec.get(k) for k in ("createdAt", "customer_key", "source_type", "amount", "status")}
-        clean["description"] = cv._redact_text(str(rec.get("description") or ""))
+        clean["description"] = privacy._redact_text(str(rec.get("description") or ""))
         if tid and not str(tid).startswith("synthetic:"):
             clean["transaction_id"] = str(tid)
     return clean
@@ -78,14 +79,14 @@ def _rewrite_payment_history(text):
     records = doc.get("payments")
     rows = [r for r in (_sanitised_archive_payment(x) for x in (records if isinstance(records, list) else []))
             if r is not None]
-    out = cv._scrub_pii({k: v for k, v in doc.items() if k != "payments"})
+    out = privacy._scrub_pii({k: v for k, v in doc.items() if k != "payments"})
     out["payments"] = rows
     return json.dumps(out)
 
 
 def _scrubbed_or_none(text):
     try:
-        return json.dumps(cv._scrub_pii(json.loads(text)))
+        return json.dumps(privacy._scrub_pii(json.loads(text)))
     except (ValueError, TypeError):
         return None
 
@@ -116,7 +117,7 @@ def plan_counts(conn) -> dict:
             except (ValueError, TypeError):
                 changed += 1  # unparseable payloads are deleted
                 continue
-            if cv._scrub_pii(doc) != doc:
+            if privacy._scrub_pii(doc) != doc:
                 changed += 1
     counts["availability_rows"] = total
     counts["availability_rows_that_change"] = changed
@@ -131,7 +132,7 @@ def rebuild_payments(conn) -> dict:
     if not _legacy_payments(conn):
         return stats
     conn.execute("DROP TABLE IF EXISTS payments_new")
-    conn.execute(cv.PAYMENTS_DDL.replace("CREATE TABLE IF NOT EXISTS payments (", "CREATE TABLE payments_new ("))
+    conn.execute(db.PAYMENTS_DDL.replace("CREATE TABLE IF NOT EXISTS payments (", "CREATE TABLE payments_new ("))
     cur = conn.execute("SELECT * FROM payments")
     names = [d[0] for d in cur.description]
     for values in cur:
@@ -144,8 +145,8 @@ def rebuild_payments(conn) -> dict:
         synthetic = tid.startswith("synthetic:")
         if tid and not synthetic:
             rec["transaction_id"] = tid
-        clean = cv._sanitise_payment(rec)
-        new_tid = cv._payment_txn_id(clean)
+        clean = payments._sanitise_payment(rec)
+        new_tid = payments._payment_txn_id(clean)
         if synthetic:
             stats["synthetic_ids_rewritten"] += 1
         if not clean.get("customer_key"):
@@ -220,7 +221,7 @@ def purge(conn) -> dict:
         stats["cache_rows_deleted"] = deleted
         conn.execute("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT)")
         conn.execute("INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('pii_purge', ?)",
-                     (cv.datetime.now(cv.timezone.utc).isoformat(timespec="seconds"),))
+                     (datetime.now(timezone.utc).isoformat(timespec="seconds"),))
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -242,10 +243,10 @@ def _service_active() -> bool:
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     check = "--check" in args
-    if not os.path.exists(cv.DB_PATH):
+    if not os.path.exists(config.DB_PATH):
         print("nothing to purge: database does not exist")
         return EXIT_CLEAN
-    conn = cv._db_connect()
+    conn = db._db_connect()
     conn.isolation_level = None
     try:
         if check:
@@ -255,7 +256,7 @@ def main(argv=None) -> int:
                 for k, v in sorted(plan_counts(conn).items()):
                     print(f"WOULD {k}={v}")
             return EXIT_NEEDED if needed else EXIT_CLEAN
-        if cv._hmac_key() is None:
+        if privacy._hmac_key() is None:
             print("refusing: HMAC key missing or short")
             return EXIT_REFUSED
         if "COURTVIEW_DB_PATH" not in os.environ and _service_active():

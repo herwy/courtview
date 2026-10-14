@@ -22,18 +22,21 @@ os.environ["COURTVIEW_DATA_DIR"] = _TMP
 os.environ["COURTVIEW_HMAC_KEY_PATH"] = _KEY
 sys.path.insert(0, REPO)
 
+from tests import cvload  # noqa: E402
+
+cvload.purge()  # bind the package to this module's environment, as `import courtview` did before
 _spec = importlib.util.spec_from_file_location("cv_purge_under_test", os.path.join(REPO, "cv_purge_pii.py"))
 purge = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(purge)
-cv = purge.cv
+cv = cvload.snapshot()
 
 S_NAME = "Zed Sentinelson"
 S_EMAIL = "zed.sentinelson@example.test"
 S_PHONE = "07700 900123"
 S_RECEIPT = "https://receipts.example.test/zed-sentinelson-0001.pdf"
 RAW_SENTINELS = [S_NAME.encode(), b"Sentinelson", S_EMAIL.encode(), S_PHONE.encode(), b"example.test", b"900123"]
-CLUB = cv.HEATMAP_CLUBS[0]["id"]
-RACK = cv.RACKETEER_CLUB_ID
+CLUB = cv.clubs.HEATMAP_CLUBS[0]["id"]
+RACK = cv.clubs.RACKETEER_CLUB_ID
 
 # Legacy payments schema, copied literally from git show a05a910:courtview.py
 LEGACY_PAYMENTS = """CREATE TABLE IF NOT EXISTS payments (
@@ -60,11 +63,11 @@ class PurgeTests(unittest.TestCase):
     def setUp(self):
         for ext in ("", "-wal", "-shm"):
             try:
-                os.remove(cv.DB_PATH + ext)
+                os.remove(cv.config.DB_PATH + ext)
             except FileNotFoundError:
                 pass
-        cv.init_db()
-        c = sqlite3.connect(cv.DB_PATH)
+        cv.db.init_db()
+        c = sqlite3.connect(cv.config.DB_PATH)
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("DROP TABLE payments")
         c.execute(LEGACY_PAYMENTS)
@@ -108,7 +111,7 @@ class PurgeTests(unittest.TestCase):
         out = b""
         for ext in ("", "-wal"):
             try:
-                with open(cv.DB_PATH + ext, "rb") as fh:
+                with open(cv.config.DB_PATH + ext, "rb") as fh:
                     out += fh.read()
             except FileNotFoundError:
                 pass
@@ -129,13 +132,13 @@ class PurgeTests(unittest.TestCase):
         self.assertIn("payments_rows_rebuilt=4", out)
         self.assertIn("synthetic_ids_rewritten=1", out)
 
-        c = sqlite3.connect(cv.DB_PATH)
+        c = sqlite3.connect(cv.config.DB_PATH)
         try:
             cols = {r[1] for r in c.execute("PRAGMA table_info(payments)")}
-            self.assertEqual(cols, set(cv._PAYMENTS_COLUMNS))
+            self.assertEqual(cols, set(cv.db._PAYMENTS_COLUMNS))
             rows = {r[0]: r for r in c.execute("SELECT transaction_id, customer_key, description, amount FROM payments")}
             self.assertEqual(len(rows), 4)
-            self.assertEqual(rows["t1"][1], cv._customer_key(S_EMAIL))
+            self.assertEqual(rows["t1"][1], cv.privacy._customer_key(S_EMAIL))
             self.assertEqual(rows["t2"][1], rows["t1"][1])  # case/whitespace variants match
             self.assertNotIn("Sentinelson", rows["t1"][2])
             self.assertEqual(rows["t1"][3], "10.00 GBP")
@@ -150,7 +153,7 @@ class PurgeTests(unittest.TestCase):
             self.assertEqual(doc["payments"][0]["amount"], "12.00 GBP")
             self.assertEqual(doc["payments"][0]["createdAt"], "2026-06-16 10:00:00")
             self.assertEqual(doc["payments"][0]["status"], "PAYMENT_SUCCESS")
-            self.assertEqual(doc["payments"][0]["customer_key"], cv._customer_key(S_EMAIL))
+            self.assertEqual(doc["payments"][0]["customer_key"], cv.privacy._customer_key(S_EMAIL))
             self.assertEqual(c.execute("SELECT COUNT(*) FROM availability").fetchone()[0], 1)
             self.assertEqual(c.execute("SELECT value FROM schema_meta WHERE key='pii_purge'").fetchone() is not None, True)
         finally:
@@ -165,26 +168,26 @@ class PurgeTests(unittest.TestCase):
 
     def test_forced_second_run_changes_nothing(self):
         self.run_main()
-        c = sqlite3.connect(cv.DB_PATH)
+        c = sqlite3.connect(cv.config.DB_PATH)
         before = c.execute("SELECT customer_key, transaction_id, description FROM payments ORDER BY 2").fetchall()
         c.close()
         rc, out = self.run_main()
         self.assertEqual(rc, 0)
         self.assertIn("payments_rows_rebuilt=0", out)
-        c = sqlite3.connect(cv.DB_PATH)
+        c = sqlite3.connect(cv.config.DB_PATH)
         after = c.execute("SELECT customer_key, transaction_id, description FROM payments ORDER BY 2").fetchall()
         c.close()
         self.assertEqual(before, after)
 
     def test_refuses_without_key(self):
-        old = cv.HMAC_KEY_PATH
-        cv.HMAC_KEY_PATH = os.path.join(_TMP, "missing")
+        old = cv.config.HMAC_KEY_PATH
+        cv.config.HMAC_KEY_PATH = os.path.join(_TMP, "missing")
         try:
             rc, out = self.run_main()
         finally:
-            cv.HMAC_KEY_PATH = old
+            cv.config.HMAC_KEY_PATH = old
         self.assertEqual(rc, 2)
-        c = sqlite3.connect(cv.DB_PATH)
+        c = sqlite3.connect(cv.config.DB_PATH)
         try:
             self.assertIn("player_name", {r[1] for r in c.execute("PRAGMA table_info(payments)")})
         finally:

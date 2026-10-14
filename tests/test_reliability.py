@@ -3,7 +3,6 @@ bounded availability refresh, read-only payment routes, status JSON and the fres
 
 Run on the RPi (needs Flask and curl_cffi): python3 -m unittest tests.test_reliability -v
 """
-import importlib.util
 import json
 import os
 import re
@@ -31,14 +30,14 @@ os.environ["COURTVIEW_DATA_DIR"] = _TMP
 os.environ["COURTVIEW_HMAC_KEY_PATH"] = _KEY
 os.environ["COURTVIEW_STATUS_DIR"] = os.path.join(_TMP, "status")
 
-_spec = importlib.util.spec_from_file_location("courtview_rel_under_test", os.path.join(REPO, "courtview.py"))
-cv = importlib.util.module_from_spec(_spec)
-sys.modules["courtview_rel_under_test"] = cv
-_spec.loader.exec_module(cv)
+sys.path.insert(0, REPO)
+from tests import cvload  # noqa: E402
 
-CLUB = cv.HEATMAP_CLUBS[0]["id"]
-CLUB2 = cv.HEATMAP_CLUBS[1]["id"]
-RACK = cv.RACKETEER_CLUB_ID
+cv = cvload.load("courtview_rel_under_test")
+
+CLUB = cv.clubs.HEATMAP_CLUBS[0]["id"]
+CLUB2 = cv.clubs.HEATMAP_CLUBS[1]["id"]
+RACK = cv.clubs.RACKETEER_CLUB_ID
 REAL_SLEEP = time.sleep
 S_EMAIL = "zed.sentinelson@example.test"
 S_NAME = "Zed Sentinelson"
@@ -79,7 +78,7 @@ class Script:
 
 
 def make_client(outcomes=(), **kw):
-    c = cv.UpstreamClient(base="https://up.example.test", **kw)
+    c = cv.upstream.UpstreamClient(base="https://up.example.test", **kw)
     script = Script(outcomes)
     c._new_session = lambda: session_of(script)
     c.sleeps = []
@@ -134,7 +133,7 @@ class ClientTests(unittest.TestCase):
         c, script = make_client([ConnectionError("boom club_id=SECRET"), 200])
         self.assertEqual(c.get("/p").status_code, 200)
         c2, s2 = make_client([OSError("a"), OSError("b"), OSError("c"), 200])
-        with self.assertRaises(cv.UpstreamError) as cm:
+        with self.assertRaises(cv.upstream.UpstreamError) as cm:
             c2.get("/p", {"club_id": "SECRET"})
         self.assertNotIn("SECRET", str(cm.exception))
         self.assertEqual(len(s2.calls), 3)
@@ -145,11 +144,11 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(c.get("/p").status_code, 500)
         self.assertEqual(c.snapshot()["breaker"]["state"], "open")
         before = len(script.calls)
-        with self.assertRaises(cv.UpstreamUnavailable):
+        with self.assertRaises(cv.upstream.UpstreamUnavailable):
             c.get("/p")
         self.assertEqual(len(script.calls), before)  # session untouched
         c.now[0] += 299
-        with self.assertRaises(cv.UpstreamUnavailable):
+        with self.assertRaises(cv.upstream.UpstreamUnavailable):
             c.get("/p")
         c.now[0] += 2  # past 300 s: exactly one half-open probe
         self.assertEqual(c.get("/p").status_code, 200)
@@ -165,7 +164,7 @@ class ClientTests(unittest.TestCase):
         c.now[0] += 301
         self.assertEqual(c.get("/p").status_code, 500)  # failed probe
         self.assertEqual(c.snapshot()["breaker"]["state"], "open")
-        with self.assertRaises(cv.UpstreamUnavailable):
+        with self.assertRaises(cv.upstream.UpstreamUnavailable):
             c.get("/p")
 
     def test_4xx_counts_as_reachable(self):
@@ -186,11 +185,11 @@ class ClientTests(unittest.TestCase):
         c.get("/p", [("a", "1")], timeout=7)
         url, kw = script.calls[0]
         self.assertEqual(url, "https://up.example.test/p?a=1")
-        self.assertEqual(kw, {"headers": cv.APP_HEADERS, "impersonate": "chrome110", "timeout": 7})
-        real = cv.UpstreamClient(base="https://up.example.test")
-        with mock.patch.object(cv.cffi_requests, "Session") as sess:
+        self.assertEqual(kw, {"headers": cv.upstream.APP_HEADERS, "impersonate": "chrome110", "timeout": 7})
+        real = cv.upstream.UpstreamClient(base="https://up.example.test")
+        with mock.patch.object(cv.upstream.cffi_requests, "Session") as sess:
             real._new_session()
-        sess.assert_called_once_with(impersonate="chrome110", headers=cv.APP_HEADERS)
+        sess.assert_called_once_with(impersonate="chrome110", headers=cv.upstream.APP_HEADERS)
 
     def test_concurrency_cap(self):
         lock = threading.Lock()
@@ -205,7 +204,7 @@ class ClientTests(unittest.TestCase):
                 state["now"] -= 1
             return Resp(200)
 
-        c = cv.UpstreamClient(base="https://up.example.test", max_concurrency=4)
+        c = cv.upstream.UpstreamClient(base="https://up.example.test", max_concurrency=4)
         c._new_session = lambda: session_of(fake)
         threads = [threading.Thread(target=c.get, args=("/p",)) for _ in range(10)]
         for t in threads:
@@ -230,7 +229,7 @@ class ClientTests(unittest.TestCase):
     def test_slot_timeout_is_unavailable_and_not_a_breaker_failure(self):
         c, _ = make_client([], max_concurrency=1, acquire_timeout=0.05)
         c._sem.acquire()
-        with self.assertRaises(cv.UpstreamUnavailable):
+        with self.assertRaises(cv.upstream.UpstreamUnavailable):
             c.get("/p")
         self.assertEqual(c.snapshot()["totals"]["rejected"], 1)
         self.assertEqual(c.snapshot()["breaker"]["consecutive_failures"], 0)
@@ -244,7 +243,7 @@ class ClientTests(unittest.TestCase):
             c.get("/p", {"club_id": "SECRETCLUB"})
             try:
                 c.get("/p", {"club_id": "SECRETCLUB"})
-            except cv.UpstreamError:
+            except cv.upstream.UpstreamError:
                 pass
         lines = [ln for ln in buf.getvalue().splitlines() if ln.startswith("[upstream]")]
         self.assertTrue(any("non-200 status=500 path=/p" in ln for ln in lines), lines)
@@ -266,23 +265,23 @@ class RouteBase(unittest.TestCase):
     def setUp(self):
         for ext in ("", "-wal", "-shm"):
             try:
-                os.remove(cv.DB_PATH + ext)
+                os.remove(cv.config.DB_PATH + ext)
             except FileNotFoundError:
                 pass
-        cv.init_db()
-        cv._load_dashboard()
-        cv.PAYMENTS_PAGE_DELAY = (0, 0)
+        cv.db.init_db()
+        cv.security._load_dashboard()
+        cv.payments.PAYMENTS_PAGE_DELAY = (0, 0)
         self.calls = []
         self.handler = lambda path, q: Resp(200, {})
-        cv.UPSTREAM.reset()
-        self.addCleanup(cv.UPSTREAM.reset)
-        saved = cv.UPSTREAM._sleep
-        cv.UPSTREAM._sleep = lambda s: None
-        self.addCleanup(setattr, cv.UPSTREAM, "_sleep", saved)
-        for p in (mock.patch.object(cv, "_gate", lambda: (True, "")),
-                  mock.patch.object(cv, "_resolve_ip", lambda ip: None),
-                  mock.patch.object(cv.time, "sleep", lambda s: None),
-                  mock.patch.object(cv.UPSTREAM, "_new_session", lambda: session_of(self._fake))):
+        cv.upstream.UPSTREAM.reset()
+        self.addCleanup(cv.upstream.UPSTREAM.reset)
+        saved = cv.upstream.UPSTREAM._sleep
+        cv.upstream.UPSTREAM._sleep = lambda s: None
+        self.addCleanup(setattr, cv.upstream.UPSTREAM, "_sleep", saved)
+        for p in (mock.patch.object(cv.security, "_gate", lambda: (True, "")),
+                  mock.patch.object(cv.accesslog, "_resolve_ip", lambda ip: None),
+                  mock.patch.object(time, "sleep", lambda s: None),
+                  mock.patch.object(cv.upstream.UPSTREAM, "_new_session", lambda: session_of(self._fake))):
             p.start()
             self.addCleanup(p.stop)
         self.client = cv.app.test_client()
@@ -297,7 +296,7 @@ class RouteBase(unittest.TestCase):
         return [c for c in self.calls if c[0] == path]
 
     def db(self):
-        return sqlite3.connect(cv.DB_PATH)
+        return sqlite3.connect(cv.config.DB_PATH)
 
     def count(self, table):
         c = self.db()
@@ -449,7 +448,7 @@ class HealthTests(RouteBase):
         self.assertIn("/club/", body["endpoints"])
         self.assertEqual(has_pii(r.get_data(as_text=True)), [])
         self.assertNotIn("?", r.get_data(as_text=True))
-        with mock.patch.object(cv, "_gate", lambda: (False, "")):
+        with mock.patch.object(cv.security, "_gate", lambda: (False, "")):
             self.assertEqual(self.client.get("/api/health").status_code, 403)
 
 
@@ -471,8 +470,8 @@ class WindowTests(RouteBase):
 
     def test_refresh_targets_are_today_forward_only(self):
         now = time.time()
-        today = datetime.fromtimestamp(now, cv._LONDON_TZ).date()
-        keys = cv._london_day_keys(today)
+        today = datetime.fromtimestamp(now, cv.config._LONDON_TZ).date()
+        keys = cv.refresh._london_day_keys(today)
         lo = int(keys[0][1])
         day = 86400 * 1000
         self.put(CLUB, lo - 3 * day, lo - 3 * day + 86399999)       # past
@@ -480,9 +479,9 @@ class WindowTests(RouteBase):
         self.put(CLUB, lo + 40 * day, lo + 40 * day + 86399999)     # beyond +28 d
         self.put("other-live", lo + 2 * day, lo + 2 * day + 86399999)  # extra in-window row: kept
         self.put(CLUB, keys[3][1], keys[3][2])                      # duplicate of a generated key
-        targets = cv._availability_refresh_targets(now)
+        targets = cv.refresh._availability_refresh_targets(now)
         self.assertEqual(len(targets), len(set(targets)))
-        expected = {(c["id"], k[1], k[2]) for c in cv.HEATMAP_CLUBS for k in keys}
+        expected = {(c["id"], k[1], k[2]) for c in cv.clubs.HEATMAP_CLUBS for k in keys}
         self.assertEqual(len(expected), 56)
         self.assertEqual(set(targets), expected | {("other-live", str(lo + 2 * day), str(lo + 2 * day + 86399999))})
         self.assertFalse(any(t[0] == RACK for t in targets))
@@ -491,8 +490,8 @@ class WindowTests(RouteBase):
 
     def test_purge_removes_past_nonnumeric_and_racketeer(self):
         now = time.time()
-        today = datetime.fromtimestamp(now, cv._LONDON_TZ).date()
-        keys = cv._london_day_keys(today, 3)
+        today = datetime.fromtimestamp(now, cv.config._LONDON_TZ).date()
+        keys = cv.refresh._london_day_keys(today, 3)
         lo = int(keys[0][1])
         day = 86400 * 1000
         self.put(CLUB, lo - day, lo - 1)
@@ -500,7 +499,7 @@ class WindowTests(RouteBase):
         self.put(RACK, keys[1][1], keys[1][2])
         self.put(CLUB, keys[0][1], keys[0][2])   # today stays
         self.put(CLUB, keys[2][1], keys[2][2])   # future stays
-        self.assertEqual(cv._purge_availability(now), 3)
+        self.assertEqual(cv.refresh._purge_availability(now), 3)
         c = self.db()
         left = c.execute("SELECT club_id, start_datetime FROM availability ORDER BY start_datetime").fetchall()
         c.close()
@@ -509,25 +508,25 @@ class WindowTests(RouteBase):
     def test_cycle_fetches_only_targets_and_records_state_and_status(self):
         self.handler = lambda path, q: Resp(200, {"allSlots": [], "reservedBookings": []})
         now = time.time()
-        keys = cv._london_day_keys(datetime.fromtimestamp(now, cv._LONDON_TZ).date())
+        keys = cv.refresh._london_day_keys(datetime.fromtimestamp(now, cv.config._LONDON_TZ).date())
         self.put(CLUB, int(keys[0][1]) - 86400000, int(keys[0][1]) - 1)  # past: purged, not fetched
-        ok, attempted, refreshed = cv._availability_cycle()
+        ok, attempted, refreshed = cv.refresh._availability_cycle()
         self.assertEqual((ok, attempted, refreshed), (True, 56, 56))
         self.assertEqual(len(self.calls), 56)
         self.assertEqual(self.count("availability"), 56)
-        st = cv._job_states()["availability"]
+        st = cv.jobs._job_states()["availability"]
         self.assertEqual((st["ok"], st["calls"], st["errors"]), (True, 56, 0))
-        status = json.load(open(os.path.join(cv.STATUS_DIR, "availability.json")))
+        status = json.load(open(os.path.join(cv.config.STATUS_DIR, "availability.json")))
         self.assertEqual(status["job"], "availability")
         self.assertEqual(status["calls"], 56)
 
     def test_cycle_stops_when_breaker_opens(self):
         self.handler = lambda path, q: Resp(500)
-        ok, attempted, refreshed = cv._availability_cycle()
+        ok, attempted, refreshed = cv.refresh._availability_cycle()
         self.assertFalse(ok)
         self.assertEqual(refreshed, 0)
         self.assertLess(attempted, 56)
-        self.assertFalse(cv._job_states()["availability"]["ok"])
+        self.assertFalse(cv.jobs._job_states()["availability"]["ok"])
 
 
 class JobStateTests(RouteBase):
@@ -536,27 +535,27 @@ class JobStateTests(RouteBase):
     def setUp(self):
         super().setUp()
         self.clock = [self.T]
-        p = mock.patch.object(cv, "_now", lambda: self.clock[0])
+        p = mock.patch.object(cv.config, "_now", lambda: self.clock[0])
         p.start()
         self.addCleanup(p.stop)
 
     def test_empty_db_is_due_now(self):
         for job in ("availability", "heatmap", "payments"):
-            self.assertEqual(cv._job_due_in(job, 21600, 1800), 0.0)
+            self.assertEqual(cv.jobs._job_due_in(job, 21600, 1800), 0.0)
 
     def test_persisted_run_survives_restart(self):
-        cv._job_record("availability", self.T, True, 56, 0)
+        cv.jobs._job_record("availability", self.T, True, 56, 0)
         self.clock[0] = self.T + 3600
-        self.assertAlmostEqual(cv._job_due_in("availability", 21600, 1800), 18000, delta=1)
+        self.assertAlmostEqual(cv.jobs._job_due_in("availability", 21600, 1800), 18000, delta=1)
         # a restart re-reads job_state only: no in-memory timer exists to reset
-        self.assertAlmostEqual(cv._job_due_in("availability", 21600, 1800), 18000, delta=1)
+        self.assertAlmostEqual(cv.jobs._job_due_in("availability", 21600, 1800), 18000, delta=1)
 
     def test_failed_run_retries_after_30_min(self):
-        cv._job_record("heatmap", self.T, False, 2, 1)
+        cv.jobs._job_record("heatmap", self.T, False, 2, 1)
         self.clock[0] = self.T + 1000
-        self.assertAlmostEqual(cv._job_due_in("heatmap", 86400, 1800), 800, delta=1)
+        self.assertAlmostEqual(cv.jobs._job_due_in("heatmap", 86400, 1800), 800, delta=1)
         self.clock[0] = self.T + 1801
-        self.assertEqual(cv._job_due_in("heatmap", 86400, 1800), 0.0)
+        self.assertEqual(cv.jobs._job_due_in("heatmap", 86400, 1800), 0.0)
 
     def test_seeds_from_existing_data(self):
         c = self.db()
@@ -567,9 +566,9 @@ class JobStateTests(RouteBase):
         c.execute("INSERT INTO payments_sync VALUES (?,?,?,?,?,?)", (CLUB, "2026-10-01", self.T - 600, 1, 1, 1))
         c.commit()
         c.close()
-        self.assertAlmostEqual(cv._job_due_in("availability", 21600, 1800), 21600 - 100, delta=1)
-        self.assertAlmostEqual(cv._job_due_in("heatmap", 86400, 1800), 86400 - 7200, delta=1)  # oldest club
-        self.assertAlmostEqual(cv._job_due_in("payments", 1800, 1800), 1800 - 600, delta=1)
+        self.assertAlmostEqual(cv.jobs._job_due_in("availability", 21600, 1800), 21600 - 100, delta=1)
+        self.assertAlmostEqual(cv.jobs._job_due_in("heatmap", 86400, 1800), 86400 - 7200, delta=1)  # oldest club
+        self.assertAlmostEqual(cv.jobs._job_due_in("payments", 1800, 1800), 1800 - 600, delta=1)
         self.assertEqual(self.count("job_state"), 3)
 
     def test_heatmap_with_one_club_never_fetched_is_due(self):
@@ -577,12 +576,12 @@ class JobStateTests(RouteBase):
         c.execute("INSERT INTO heatmap_cache VALUES (?,?,?,?,?,?)", (CLUB, 0, 8, 0.5, 30, self.T - 60))
         c.commit()
         c.close()
-        self.assertEqual(cv._job_due_in("heatmap", 86400, 1800), 0.0)
+        self.assertEqual(cv.jobs._job_due_in("heatmap", 86400, 1800), 0.0)
 
     def test_wait_for_job_returns_immediately_when_due_and_logs_persisted_wait(self):
         import contextlib
         import io
-        cv._job_record("availability", self.T, True, 1, 0)
+        cv.jobs._job_record("availability", self.T, True, 1, 0)
         sleeps = []
 
         def fake_sleep(n):
@@ -590,8 +589,8 @@ class JobStateTests(RouteBase):
             self.clock[0] += n
 
         buf = io.StringIO()
-        with mock.patch.object(cv.time, "sleep", fake_sleep), contextlib.redirect_stdout(buf):
-            cv._wait_for_job("availability", 700, 100)
+        with mock.patch.object(time, "sleep", fake_sleep), contextlib.redirect_stdout(buf):
+            cv.jobs._wait_for_job("availability", 700, 100)
         self.assertEqual(sleeps, [300, 300, 100])
         self.assertEqual(buf.getvalue().count("next run in 11m (persisted)"), 1)
 
@@ -604,10 +603,10 @@ class JobStateTests(RouteBase):
             if len(calls) > 1:
                 raise SystemExit
 
-        with mock.patch.object(cv, "_wait_for_job", waiter):
+        with mock.patch.object(cv.jobs, "_wait_for_job", waiter):
             with self.assertRaises(SystemExit):
-                cv._heatmap_refresh_loop()
-        st = cv._job_states()["heatmap"]
+                cv.refresh._heatmap_refresh_loop()
+        st = cv.jobs._job_states()["heatmap"]
         self.assertEqual((st["ok"], st["calls"], st["errors"]), (False, 2, 2))
         self.assertEqual(self.count("heatmap_cache"), 0)
 
@@ -618,10 +617,10 @@ class JobStateTests(RouteBase):
         for bad in ({k: v for k, v in arrays.items() if k != "court_wise_activity_count_combined_graph"},
                     {k: [] for k in arrays}, {"detail": "boom"}):
             self.handler = lambda path, q, b=bad: Resp(200, b)
-            self.assertFalse(cv._fetch_heatmap_for_club(CLUB, 7))
+            self.assertFalse(cv.refresh._fetch_heatmap_for_club(CLUB, 7))
             self.assertEqual(self.count("heatmap_cache"), 0)
         self.handler = lambda path, q: Resp(200, arrays)
-        self.assertTrue(cv._fetch_heatmap_for_club(CLUB, 7))
+        self.assertTrue(cv.refresh._fetch_heatmap_for_club(CLUB, 7))
         self.assertGreater(self.count("heatmap_cache"), 0)
 
 
@@ -630,9 +629,9 @@ class StatusFileTests(unittest.TestCase):
         d = os.path.join(_TMP, "status-test")
         old = os.umask(0o077)
         try:
-            with mock.patch.object(cv, "STATUS_DIR", d):
-                cv._write_job_status("availability", 1_790_000_000, True, 56, 1, 1_790_000_000)
-                cv._write_job_status("availability", 1_790_000_100, False, 2, 2, 1_790_000_000)
+            with mock.patch.object(cv.config, "STATUS_DIR", d):
+                cv.jobs._write_job_status("availability", 1_790_000_000, True, 56, 1, 1_790_000_000)
+                cv.jobs._write_job_status("availability", 1_790_000_100, False, 2, 2, 1_790_000_000)
         finally:
             os.umask(old)
         self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o755)
@@ -641,33 +640,33 @@ class StatusFileTests(unittest.TestCase):
         body = json.load(open(path))
         self.assertEqual(list(body), ["job", "last_run", "last_ok", "ok", "calls", "errors"])
         self.assertRegex(body["last_run"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
-        self.assertEqual(body, {"job": "availability", "last_run": cv._iso_z(1_790_000_100),
-                                "last_ok": cv._iso_z(1_790_000_000), "ok": False, "calls": 2, "errors": 2})
+        self.assertEqual(body, {"job": "availability", "last_run": cv.upstream._iso_z(1_790_000_100),
+                                "last_ok": cv.upstream._iso_z(1_790_000_000), "ok": False, "calls": 2, "errors": 2})
         self.assertEqual(os.listdir(d), ["availability.json"])
 
     def test_never_ok_has_null_last_ok(self):
         d = os.path.join(_TMP, "status-test-null")
-        with mock.patch.object(cv, "STATUS_DIR", d):
-            cv._write_job_status("payments", 1_790_000_000, False, 1, 1, None)
+        with mock.patch.object(cv.config, "STATUS_DIR", d):
+            cv.jobs._write_job_status("payments", 1_790_000_000, False, 1, 1, None)
         self.assertIsNone(json.load(open(os.path.join(d, "payments.json")))["last_ok"])
 
     def test_failure_does_not_raise(self):
-        with mock.patch.object(cv, "STATUS_DIR", "/proc/definitely/not/writable"):
-            cv._write_job_status("payments", 1, True, 0, 0)
+        with mock.patch.object(cv.config, "STATUS_DIR", "/proc/definitely/not/writable"):
+            cv.jobs._write_job_status("payments", 1, True, 0, 0)
 
 
 class LastOkTests(RouteBase):
     T = 1_790_000_000
 
     def test_ok_sets_failed_carries_restart_reads(self):
-        self.assertEqual(cv._job_record("payments", self.T, True, 1, 0), self.T)
-        self.assertEqual(cv._job_record("payments", self.T + 100, False, 1, 1), self.T)
-        self.assertEqual(cv._job_states()["payments"]["last_ok"], cv._iso_z(self.T))
-        self.assertEqual(cv._job_record("payments", self.T + 200, True, 1, 0), self.T + 200)
+        self.assertEqual(cv.jobs._job_record("payments", self.T, True, 1, 0), self.T)
+        self.assertEqual(cv.jobs._job_record("payments", self.T + 100, False, 1, 1), self.T)
+        self.assertEqual(cv.jobs._job_states()["payments"]["last_ok"], cv.upstream._iso_z(self.T))
+        self.assertEqual(cv.jobs._job_record("payments", self.T + 200, True, 1, 0), self.T + 200)
 
     def test_never_ok_is_null(self):
-        self.assertIsNone(cv._job_record("availability", self.T, False, 1, 1))
-        self.assertIsNone(cv._job_states()["availability"]["last_ok"])
+        self.assertIsNone(cv.jobs._job_record("availability", self.T, False, 1, 1))
+        self.assertIsNone(cv.jobs._job_states()["availability"]["last_ok"])
 
     def test_migration_seeds_from_ok_rows_and_is_idempotent(self):
         c = self.db()
@@ -678,8 +677,8 @@ class LastOkTests(RouteBase):
         c.execute("INSERT INTO job_state VALUES ('heatmap', ?, 0, 5, 3, 1)", (self.T,))
         c.commit()
         c.close()
-        cv.init_db()
-        cv.init_db()
+        cv.db.init_db()
+        cv.db.init_db()
         c = self.db()
         try:
             rows = dict(c.execute("SELECT job, last_ok FROM job_state").fetchall())
@@ -689,27 +688,32 @@ class LastOkTests(RouteBase):
 
     def test_rewrite_status_files_from_job_state(self):
         d = os.path.join(_TMP, "status-rewrite")
-        cv._job_record("availability", self.T, True, 56, 0)
-        cv._job_record("payments", self.T, True, 4, 0)
-        cv._job_record("payments", self.T + 50, False, 4, 2)
-        with mock.patch.object(cv, "STATUS_DIR", d):
-            cv._rewrite_status_files()
+        cv.jobs._job_record("availability", self.T, True, 56, 0)
+        cv.jobs._job_record("payments", self.T, True, 4, 0)
+        cv.jobs._job_record("payments", self.T + 50, False, 4, 2)
+        with mock.patch.object(cv.config, "STATUS_DIR", d):
+            cv.jobs._rewrite_status_files()
         self.assertEqual(sorted(os.listdir(d)), ["availability.json", "payments.json"])
         pay = json.load(open(os.path.join(d, "payments.json")))
         self.assertEqual((pay["ok"], pay["last_ok"], pay["last_run"]),
-                         (False, cv._iso_z(self.T), cv._iso_z(self.T + 50)))
+                         (False, cv.upstream._iso_z(self.T), cv.upstream._iso_z(self.T + 50)))
 
     def test_rewrite_skips_jobs_without_row(self):
         d = os.path.join(_TMP, "status-rewrite-empty")
-        with mock.patch.object(cv, "STATUS_DIR", d):
-            cv._rewrite_status_files()
+        with mock.patch.object(cv.config, "STATUS_DIR", d):
+            cv.jobs._rewrite_status_files()
         self.assertFalse(os.path.exists(d) and os.listdir(d))
 
 
 class RetiredEndpointTests(RouteBase):
     def test_not_in_allowlist_or_code(self):
-        self.assertNotIn("/club/club_extras", cv.ALLOWED_PATHS)
-        code = [ln for ln in open(os.path.join(REPO, "courtview.py")) if not ln.strip().startswith("#")]
+        self.assertNotIn("/club/club_extras", cv.upstream.ALLOWED_PATHS)
+        files = cvload.source_files()
+        self.assertGreater(len(files), 10)
+        code = []
+        for path in files:
+            with open(path, encoding="utf-8") as fh:
+                code += [ln for ln in fh if not ln.strip().startswith("#")]
         self.assertEqual([ln for ln in code if "club_extras" in ln or "get_booked_hours" in ln], [])
 
     def test_booked_hours_410_no_upstream(self):
@@ -719,7 +723,7 @@ class RetiredEndpointTests(RouteBase):
         self.assertEqual(self.calls, [])
 
     def test_booked_hours_denied_without_token(self):
-        with mock.patch.object(cv, "_gate", lambda: (False, "")):
+        with mock.patch.object(cv.security, "_gate", lambda: (False, "")):
             self.assertEqual(self.client.get("/api/booked-hours?club_id=x").status_code, 403)
 
     def test_club_info_three_calls_no_extras(self):
@@ -767,7 +771,7 @@ class UnauthorizedRuleTests(RouteBase):
         self.assertNotIn("non-200 status=401", out)
         self.assertEqual(self.count("availability"), 0)
         self.assertEqual(self.count("stats_cache"), 0)
-        snap = cv.UPSTREAM.snapshot()
+        snap = cv.upstream.UPSTREAM.snapshot()
         self.assertEqual(snap["totals"]["unauthorized"], 4)
         self.assertEqual(snap["endpoints"]["/club/membership/"]["unauthorized"], 2)
         self.assertEqual(snap["breaker"]["state"], "closed")
@@ -806,19 +810,19 @@ class PaymentRouteTests(RouteBase):
 
     def setUp(self):
         super().setUp()
-        p = mock.patch.object(cv, "_now", lambda: self.NOW / 1000)
+        p = mock.patch.object(cv.config, "_now", lambda: self.NOW / 1000)
         p.start()
         self.addCleanup(p.stop)
-        cv._PAY_QUEUE.clear()
-        self.addCleanup(cv._PAY_QUEUE.clear)
+        cv.payments._PAY_QUEUE.clear()
+        self.addCleanup(cv.payments._PAY_QUEUE.clear)
 
     def window(self):
         return f"club_id={CLUB}&start={ms_utc(2026, 9, 10)}&end={ms_utc(2026, 9, 12)}"
 
     def test_routes_never_sync_inline_and_queue_the_window(self):
         boom = mock.Mock(side_effect=AssertionError("inline sync"))
-        with mock.patch.object(cv, "_sync_payments", boom), mock.patch.object(cv, "_sync_payment_day", boom), \
-                mock.patch.object(cv, "_fetch_payment_page", boom):
+        with mock.patch.object(cv.payments, "_sync_payments", boom), mock.patch.object(cv.payments, "_sync_payment_day", boom), \
+                mock.patch.object(cv.payments, "_fetch_payment_page", boom):
             for route in ("payment-leaderboard", "payment-history"):
                 r = self.client.get(f"/api/{route}?{self.window()}")
                 self.assertEqual(r.status_code, 200, route)
@@ -827,7 +831,7 @@ class PaymentRouteTests(RouteBase):
                 self.assertIsNone(body["synced_through"])
                 self.assertTrue(body["queued"])
         self.assertEqual(self.calls, [])
-        self.assertEqual(list(cv._PAY_QUEUE), [(CLUB, "2026-09-10", "2026-09-12")])
+        self.assertEqual(list(cv.payments._PAY_QUEUE), [(CLUB, "2026-09-10", "2026-09-12")])
 
     def test_complete_window_is_not_queued(self):
         c = self.db()
@@ -838,57 +842,57 @@ class PaymentRouteTests(RouteBase):
         body = self.client.get(f"/api/payment-leaderboard?{self.window()}").get_json()
         self.assertTrue(body["complete"])
         self.assertFalse(body["queued"])
-        self.assertEqual(cv._PAY_QUEUE, {})
+        self.assertEqual(cv.payments._PAY_QUEUE, {})
 
     def test_enqueue_rules(self):
         s, e = ms_utc(2026, 9, 10), ms_utc(2026, 9, 11)
-        self.assertFalse(cv._enqueue_payment_window(RACK, s, e))
-        self.assertFalse(cv._enqueue_payment_window("unknown", s, e))
-        self.assertTrue(cv._enqueue_payment_window(CLUB, s, e))
-        self.assertTrue(cv._enqueue_payment_window(CLUB, s, e))  # same window: still one entry
-        self.assertEqual(len(cv._PAY_QUEUE), 1)
+        self.assertFalse(cv.payments._enqueue_payment_window(RACK, s, e))
+        self.assertFalse(cv.payments._enqueue_payment_window("unknown", s, e))
+        self.assertTrue(cv.payments._enqueue_payment_window(CLUB, s, e))
+        self.assertTrue(cv.payments._enqueue_payment_window(CLUB, s, e))  # same window: still one entry
+        self.assertEqual(len(cv.payments._PAY_QUEUE), 1)
         for i in range(1, 30):
-            cv._enqueue_payment_window(CLUB2, ms_utc(2026, 8, 1) + i * 86400000, ms_utc(2026, 8, 1) + i * 86400000)
-        self.assertEqual(len(cv._PAY_QUEUE), cv.PAYMENTS_QUEUE_MAX)
-        self.assertFalse(cv._enqueue_payment_window(CLUB2, ms_utc(2026, 7, 1), ms_utc(2026, 7, 1)))
+            cv.payments._enqueue_payment_window(CLUB2, ms_utc(2026, 8, 1) + i * 86400000, ms_utc(2026, 8, 1) + i * 86400000)
+        self.assertEqual(len(cv.payments._PAY_QUEUE), cv.payments.PAYMENTS_QUEUE_MAX)
+        self.assertFalse(cv.payments._enqueue_payment_window(CLUB2, ms_utc(2026, 7, 1), ms_utc(2026, 7, 1)))
 
     def test_drain_syncs_each_window_once(self):
-        cv._enqueue_payment_window(CLUB, ms_utc(2026, 9, 10), ms_utc(2026, 9, 12))
+        cv.payments._enqueue_payment_window(CLUB, ms_utc(2026, 9, 10), ms_utc(2026, 9, 12))
         seen = []
-        with mock.patch.object(cv, "_sync_payments", lambda club, s, e: seen.append((club, s, e)) or {}):
-            self.assertEqual(cv._drain_payment_queue(), 1)
-            self.assertEqual(cv._drain_payment_queue(), 0)
+        with mock.patch.object(cv.payments, "_sync_payments", lambda club, s, e: seen.append((club, s, e)) or {}):
+            self.assertEqual(cv.payments._drain_payment_queue(), 1)
+            self.assertEqual(cv.payments._drain_payment_queue(), 0)
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0][0], CLUB)
-        self.assertEqual(cv._london_day(seen[0][1]), "2026-09-10")
-        self.assertEqual(cv._london_day(seen[0][2]), "2026-09-12")
+        self.assertEqual(cv.payments._london_day(seen[0][1]), "2026-09-10")
+        self.assertEqual(cv.payments._london_day(seen[0][2]), "2026-09-12")
 
     def test_window_sync_status(self):
         s, e = ms_utc(2026, 9, 10, 6), ms_utc(2026, 9, 11, 21)
-        self.assertEqual(cv._window_sync_status(CLUB, s, e), {"complete": False, "synced_through": None})
+        self.assertEqual(cv.payments._window_sync_status(CLUB, s, e), {"complete": False, "synced_through": None})
         c = self.db()
-        close_0910 = cv._london_day_bounds("2026-09-10")[1]
+        close_0910 = cv.payments._london_day_bounds("2026-09-10")[1]
         c.execute("INSERT INTO payments_sync VALUES (?,?,?,?,?,?)",
                   (CLUB, "2026-09-10", close_0910 // 1000 + 3600, 1, 1, 0))      # final: counts as its close
         c.execute("INSERT INTO payments_sync VALUES (?,?,?,?,?,?)",
                   (CLUB, "2026-09-11", ms_utc(2026, 9, 11, 10) // 1000, 1, 1, 0))  # not final
         c.commit()
-        res = cv._window_sync_status(CLUB, s, e)
+        res = cv.payments._window_sync_status(CLUB, s, e)
         self.assertTrue(res["complete"])
-        self.assertEqual(res["synced_through"], cv._iso_z(ms_utc(2026, 9, 11, 10) / 1000))  # the open day
+        self.assertEqual(res["synced_through"], cv.upstream._iso_z(ms_utc(2026, 9, 11, 10) / 1000))  # the open day
         self.assertRegex(res["synced_through"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
-        done = cv._window_sync_status(CLUB, s, ms_utc(2026, 9, 10, 12))  # only the final day: window end
-        self.assertEqual(done["synced_through"], cv._iso_z(ms_utc(2026, 9, 10, 12) / 1000))
+        done = cv.payments._window_sync_status(CLUB, s, ms_utc(2026, 9, 10, 12))  # only the final day: window end
+        self.assertEqual(done["synced_through"], cv.upstream._iso_z(ms_utc(2026, 9, 10, 12) / 1000))
         c.execute("UPDATE payments_sync SET complete=0 WHERE local_day='2026-09-11'")
         c.commit()
-        self.assertFalse(cv._window_sync_status(CLUB, s, e)["complete"])
+        self.assertFalse(cv.payments._window_sync_status(CLUB, s, e)["complete"])
         # clamped to the window end
         early_end = ms_utc(2026, 9, 10, 6, 30)
         c.execute("UPDATE payments_sync SET synced_at=? WHERE local_day='2026-09-10'", (ms_utc(2026, 9, 10, 12) // 1000,))
         c.execute("UPDATE payments_sync SET complete=0 WHERE local_day='2026-09-10'")
         c.commit()
         c.close()
-        self.assertEqual(cv._window_sync_status(CLUB, s, early_end)["synced_through"], cv._iso_z(early_end / 1000))
+        self.assertEqual(cv.payments._window_sync_status(CLUB, s, early_end)["synced_through"], cv.upstream._iso_z(early_end / 1000))
 
 
 # ---------------------------------------------------------------------------
@@ -899,8 +903,8 @@ class FreshRouteTests(RouteBase):
     def setUp(self):
         super().setUp()
         now = time.time()
-        today = datetime.fromtimestamp(now, cv._LONDON_TZ).date()
-        _d, self.start, self.end = cv._london_day_keys(today, 1)[0]
+        today = datetime.fromtimestamp(now, cv.config._LONDON_TZ).date()
+        _d, self.start, self.end = cv.refresh._london_day_keys(today, 1)[0]
         self.url = f"/api/availability-fresh?club_id={CLUB}&start_datetime={self.start}&end_datetime={self.end}"
 
     def seed(self, age):

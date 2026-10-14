@@ -3,7 +3,6 @@ the dashboard HTML carries no hardcoded club ids.
 
 Run on the RPi (needs Flask and curl_cffi): python3 -m unittest tests.test_clubs -v
 """
-import importlib.util
 import json
 import os
 import sys
@@ -18,12 +17,12 @@ os.environ["COURTVIEW_SKIP_STARTUP"] = "1"
 os.environ["COURTVIEW_DB_PATH"] = os.path.join(_TMP, "t.db")
 os.environ["COURTVIEW_DATA_DIR"] = _TMP
 
-_spec = importlib.util.spec_from_file_location("courtview_clubs_under_test", os.path.join(REPO, "courtview.py"))
-cv = importlib.util.module_from_spec(_spec)
-sys.modules["courtview_clubs_under_test"] = cv
-_spec.loader.exec_module(cv)
+sys.path.insert(0, REPO)
+from tests import cvload  # noqa: E402
 
-from courtview_app import clubs  # noqa: E402
+cv = cvload.load("courtview_clubs_under_test")
+
+clubs = cv.clubs
 
 TOKEN = "t" * 32
 PADIUM = "47d2eb0db7194a9dbd29783c3a2a82ad"
@@ -39,12 +38,16 @@ class ClubConfigTests(unittest.TestCase):
         self.assertEqual(clubs.ARCHIVE_CLUB_IDS, frozenset({RACKETEER}))
         self.assertEqual(clubs.RACKETEER_CLUB_ID, RACKETEER)
 
-    def test_courtview_uses_the_clubs_objects(self):
-        self.assertIs(cv.HEATMAP_CLUBS, clubs.HEATMAP_CLUBS)
-        self.assertIs(cv.PAYMENT_SYNC_CLUB_IDS, clubs.PAYMENT_SYNC_CLUB_IDS)
-        self.assertIs(cv.PAYMENT_CLUB_IDS, clubs.PAYMENT_CLUB_IDS)
-        self.assertIs(cv.ARCHIVE_CLUB_IDS, clubs.ARCHIVE_CLUB_IDS)
-        self.assertEqual(cv.RACKETEER_CLUB_ID, clubs.RACKETEER_CLUB_ID)
+    def test_club_ids_defined_only_in_clubs_py(self):
+        files = cvload.source_files()
+        self.assertGreater(len(files), 10)
+        for path in files:
+            if os.path.basename(path) == "clubs.py":
+                continue
+            with open(path, encoding="utf-8") as fh:
+                src = fh.read()
+            for club in clubs.CLUBS:
+                self.assertNotIn(club["id"], src, f"{os.path.basename(path)} hardcodes {club['name']}")
 
     def test_public_clubs_shape(self):
         pub = clubs.public_clubs()
@@ -62,23 +65,23 @@ class ApiClubsTests(unittest.TestCase):
         self.token_path = os.path.join(_TMP, "token")
         with open(self.token_path, "w") as fh:
             fh.write(TOKEN + "\n")
-        cv.TOKEN_PATH = self.token_path
-        cv._token_cache.clear()
-        cv._token_cache.update({"value": None, "key": None, "state": None})
-        cv._AUTH_FAILS.clear()
-        cv.UPSTREAM.reset()
-        self.addCleanup(cv.UPSTREAM.reset)
+        cv.config.TOKEN_PATH = self.token_path
+        cv.security._token_cache.clear()
+        cv.security._token_cache.update({"value": None, "key": None, "state": None})
+        cv.security._AUTH_FAILS.clear()
+        cv.upstream.UPSTREAM.reset()
+        self.addCleanup(cv.upstream.UPSTREAM.reset)
         self.calls = []
-        p = mock.patch.object(cv.UPSTREAM, "_new_session",
+        p = mock.patch.object(cv.upstream.UPSTREAM, "_new_session",
                               lambda: types.SimpleNamespace(get=self._get, close=lambda: None))
         p.start()
         self.addCleanup(p.stop)
-        p = mock.patch.object(cv, "_resolve_ip", lambda ip: None)
+        p = mock.patch.object(cv.accesslog, "_resolve_ip", lambda ip: None)
         p.start()
         self.addCleanup(p.stop)
         self.client = cv.app.test_client()
         self.anon = cv.app.test_client()
-        self.client.set_cookie(cv.COOKIE_NAME, TOKEN)
+        self.client.set_cookie(cv.config.COOKIE_NAME, TOKEN)
 
     def _get(self, url, **kw):
         self.calls.append(url)
@@ -93,7 +96,7 @@ class ApiClubsTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.mimetype, "application/json")
         self.assertEqual(r.headers["Cache-Control"], "no-store")
-        self.assertEqual(r.headers["Content-Security-Policy"], cv.CSP_API)
+        self.assertEqual(r.headers["Content-Security-Policy"], cv.security.CSP_API)
         body = json.loads(r.data)
         self.assertEqual(set(body), {"clubs"})
         self.assertEqual(len(body["clubs"]), 3)
@@ -106,7 +109,7 @@ class ApiClubsTests(unittest.TestCase):
     def test_token_query_sets_cookie(self):
         r = self.anon.get("/api/clubs?token=" + TOKEN)
         self.assertEqual(r.status_code, 200)
-        self.assertIn(cv.COOKIE_NAME, r.headers.get("Set-Cookie", ""))
+        self.assertIn(cv.config.COOKIE_NAME, r.headers.get("Set-Cookie", ""))
 
 
 class HtmlHasNoClubIdsTests(unittest.TestCase):
