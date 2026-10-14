@@ -3,7 +3,8 @@
 
 Usage: CV_TOKEN=... python3 tests/e2e_dashboard.py [base_url]
 Scenario R: Racketeer selected, every tab visited, no live Racketeer request.
-Scenario P: Padium selected, Revenue payment history paging and Best Times.
+Scenario P: Padium selected, Revenue payment history paging, anonymous top spenders and Best Times.
+Both scenarios count email and UK mobile pattern matches over every /api/ JSON body (must be 0).
 The token is only ever set as a cookie; it is never printed.
 """
 import os
@@ -21,6 +22,12 @@ RECS_WAIT_MS = 30000
 TABS = ["book", "club", "stats", "compare", "revenue"]
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
 
+EMAIL_RE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
+MOBILE_RE = re.compile(r"(?<![0-9A-Za-z])(?:\+44 ?\(?0?\)?|0)7\d{3} ?\d{3} ?\d{3}(?![0-9A-Za-z])")
+PAY_HEADERS = ["Date", "Description", "Amount", "Status"]
+LEADER_RE = re.compile(r"^\d\. Customer #[0-9A-F]{4}")
+scan = {"bodies": 0, "email": 0, "mobile": 0}
+
 failures = 0
 
 
@@ -29,6 +36,19 @@ def check(name, ok, detail=""):
     if not ok:
         failures += 1
     print(f"{'PASS' if ok else 'FAIL'}: {name}{(' - ' + detail) if detail and not ok else ''}")
+
+
+def scan_body(resp):
+    """Count PII-pattern matches in /api/ JSON bodies; never keeps or prints a body."""
+    try:
+        if "/api/" not in resp.url or "json" not in (resp.headers.get("content-type") or ""):
+            return
+        text = resp.text()
+    except Exception:
+        return
+    scan["bodies"] += 1
+    scan["email"] += len(EMAIL_RE.findall(text))
+    scan["mobile"] += len(MOBILE_RE.findall(text))
 
 
 def new_page(browser, base, club_id, token):
@@ -40,6 +60,7 @@ def new_page(browser, base, club_id, token):
     reqs, statuses = [], []
     page.on("request", lambda r: reqs.append(r.url))
     page.on("response", lambda r: statuses.append((r.status, r.url)))
+    page.on("response", scan_body)
     return ctx, page, reqs, statuses
 
 
@@ -47,14 +68,6 @@ def open_tab(page, tab):
     page.click(f"#tab-{tab}-btn")
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(500)
-
-
-def search_token(page):
-    """Last whitespace token (len >= 3) of the first row's Player cell, or None."""
-    name = page.eval_on_selector(
-        "#revPayOut tbody tr td:nth-child(2)", "e => e.textContent.trim()")
-    toks = [t for t in name.split() if len(t) >= 3]
-    return toks[-1] if toks else None
 
 
 def scenario_racketeer(browser, base, token):
@@ -68,18 +81,9 @@ def scenario_racketeer(browser, base, token):
     page.wait_for_timeout(1500)
 
     page.wait_for_selector("#revPayOut table", timeout=30000)
-    tok = search_token(page)
-    if tok:
-        page.fill("#revPaySearch", tok)
-        page.wait_for_function(
-            "() => document.getElementById('revPayMeta').textContent.includes('match')", timeout=30000)
-        check("Racketeer archive search shows matches", "match" in page.inner_text("#revPayMeta"))
-        page.fill("#revPaySearch", "")
-        page.wait_for_function(
-            "() => document.getElementById('revPayMeta').textContent.includes('archived')", timeout=30000)
-        check("clearing Racketeer search restores archived meta", "archived" in page.inner_text("#revPayMeta"))
-    else:
-        print("SKIP: no searchable player token in Racketeer archive")
+    headers = page.eval_on_selector_all("#revPayOut thead th", "els => els.map(e => e.textContent.trim())")
+    check("Racketeer archive payment table headers", headers == PAY_HEADERS, str(headers))
+    check("no payment search box", page.locator("#revPaySearch").count() == 0)
 
     live = [u for u in reqs if RACKETEER in u and not urlparse(u).path.startswith("/api/archive/")]
     check(f"no non-archive Racketeer requests (count={len(live)})", not live, "; ".join(live[:3]))
@@ -136,30 +140,18 @@ def scenario_padium(browser, base, token):
 
     page.wait_for_function(
         "() => !document.getElementById('revLoadMore').disabled", timeout=60000)
-    tok = search_token(page)
-    if tok:
-        page.fill("#revPaySearch", tok)
-        page.wait_for_function(
-            "() => /\\d+ match(es)? in /.test(document.getElementById('revPayMeta').textContent)", timeout=90000)
-        rows = page.eval_on_selector_all(
-            "#revPayOut tbody tr",
-            "els => els.map(e => [e.children[0].textContent.trim(), e.children[1].textContent, e.children[2].textContent])")
-        low = tok.lower()
-        check(f"search returned rows (count={len(rows)})", len(rows) > 0)
-        check("every result matches the token", all(low in (r[1] + r[2]).lower() for r in rows))
-        check("search results newest first", [r[0] for r in rows] == sorted([r[0] for r in rows], reverse=True))
-        check("Load More hidden during search", page.eval_on_selector("#revLoadMoreWrap", "e => e.hidden"))
-        page.fill("#revPaySearch", tok[0])
-        page.wait_for_timeout(1000)
-        one = page.inner_text("#revPayMeta")
-        check("single character does not leave 'Searching...'", "Searching" not in one, one)
-        page.fill("#revPaySearch", "")
-        page.wait_for_function(
-            "() => document.getElementById('revPayMeta').textContent.includes('loaded · back to')", timeout=30000)
-        check("clearing search restores paged view",
-              page.locator("#revPayOut tbody tr").count() > 0, page.inner_text("#revPayMeta"))
-    else:
-        print("SKIP: no searchable player token in Padium rows")
+    headers = page.eval_on_selector_all("#revPayOut thead th", "els => els.map(e => e.textContent.trim())")
+    check("payment table headers are Date, Description, Amount, Status", headers == PAY_HEADERS, str(headers))
+    check("no payment search box", page.locator("#revPaySearch").count() == 0)
+    leaders = page.eval_on_selector_all("#revLeadersOut .cp-name", "els => els.map(e => e.textContent.trim())")
+    check(f"top spenders are anonymous (count={len(leaders)})",
+          len(leaders) > 0 and all(LEADER_RE.match(t) for t in leaders))
+
+    open_tab(page, "club")
+    open_tab(page, "stats")
+    check("club info shows no email or phone rows",
+          "Email" not in page.inner_text("#clubOut") and "Phone" not in page.inner_text("#clubOut"))
+    open_tab(page, "book")
 
     page.wait_for_timeout(RECS_WAIT_MS)
     open_tab(page, "book")
@@ -179,6 +171,9 @@ def main():
         scenario_racketeer(browser, base, token)
         scenario_padium(browser, base, token)
         browser.close()
+    check(f"no email or UK mobile pattern in /api JSON bodies (bodies={scan['bodies']}, "
+          f"email={scan['email']}, mobile={scan['mobile']})",
+          scan["bodies"] > 0 and scan["email"] == 0 and scan["mobile"] == 0)
     print(f"RESULT: {'FAILED (' + str(failures) + ')' if failures else 'ALL PASS'}")
     return 1 if failures else 0
 

@@ -99,9 +99,10 @@ scp -q \
     "$SCRIPT_DIR/courtview.service" \
     "$SCRIPT_DIR/notify-telegram@.service" \
     "$SCRIPT_DIR/cv_notify_fail.py" \
+    "$SCRIPT_DIR/cv_purge_pii.py" \
     "$SCRIPT_DIR/requirements.txt" \
     "${RPI_HOST}:/root/projects/courtview/" \
-    && ok "  courtview.py courtview.html courtview.service notify-telegram@.service cv_notify_fail.py requirements.txt" \
+    && ok "  courtview.py courtview.html courtview.service notify-telegram@.service cv_notify_fail.py cv_purge_pii.py requirements.txt" \
     || { err "  FAILED: scp"; exit 1; }
 
 # 3. All remote operations in one SSH call
@@ -123,10 +124,53 @@ cp /root/projects/courtview/notify-telegram@.service /etc/systemd/system/notify-
 systemctl daemon-reload
 systemctl enable courtview
 
+# HMAC secret for pseudonymous customer keys: created once, never echoed, never backed up.
+HMAC_KEY=/root/.courtview_hmac_key
+if [[ ! -s "$HMAC_KEY" ]]; then
+    ( umask 077; python3 -c 'import secrets; print(secrets.token_hex(32))' > "${HMAC_KEY}.tmp" )
+    mv "${HMAC_KEY}.tmp" "$HMAC_KEY"
+fi
+chmod 600 "$HMAC_KEY"
+[[ -s "$HMAC_KEY" ]] && echo "HMACKEY:present" || echo "HMACKEY:missing"
+
+# One-off PII purge: runs only while legacy PII columns exist or the purge marker is absent.
+# The service is stopped via systemctl for the purge (it refuses to run against a live service).
+set +e
+chk_out=$(python3 /root/projects/courtview/cv_purge_pii.py --check 2>&1)
+chk_rc=$?
+set -e
+chk_first=$(echo "$chk_out" | head -1)
+if [[ $chk_rc -eq 0 ]]; then
+    systemctl stop courtview
+    set +e
+    purge_out=$(python3 /root/projects/courtview/cv_purge_pii.py 2>&1)
+    purge_rc=$?
+    set -e
+    echo "$purge_out" | sed 's/^/PURGE:/'
+    if [[ $purge_rc -ne 0 ]]; then
+        systemctl start courtview
+        echo "PURGEFAIL:$purge_rc"
+        exit 1
+    fi
+elif [[ $chk_rc -eq 1 && ( "$chk_first" == "clean" || "$chk_first" == nothing\ to\ purge* ) ]]; then
+    echo "PURGE:not needed"
+else
+    echo "PURGEFAIL:check rc=$chk_rc"
+    exit 1
+fi
+
 # Restart via systemctl only. Never pkill or hand-run gunicorn: a stray
 # process holding :8766 crash-loops the unit (2026-10-13 outage).
 systemctl restart courtview
 sleep 2
+
+# Data files must be owner-only (UMask=0077 covers new files; this fixes existing ones)
+for f in courtview_cache.db courtview_cache.db-wal courtview_cache.db-shm access.log; do
+    [[ -e "/root/projects/courtview/$f" ]] && chmod 600 "/root/projects/courtview/$f"
+done
+for f in courtview_cache.db courtview_cache.db-wal courtview_cache.db-shm access.log; do
+    [[ -e "/root/projects/courtview/$f" ]] && echo "MODES:$(stat -c '%a %n' "/root/projects/courtview/$f")"
+done
 
 # The :8766 listener must be systemd's MainPID, not a stray gunicorn
 _main_pid=$(systemctl show courtview -p MainPID --value)
@@ -139,6 +183,11 @@ echo "ACTIVE:$(systemctl is-active courtview)"
 echo "ENABLED:$(systemctl is-enabled courtview)"
 REMOTE
 )
+
+echo "$remote_out" | grep -E "^(HMACKEY|PURGE|PURGEFAIL|MODES):" | sed 's/^/  /'
+if echo "$remote_out" | grep -q "^PURGEFAIL:"; then err "PII purge failed - see output above"; exit 1; fi
+bad_modes=$(echo "$remote_out" | grep "^MODES:" | grep -vE "^MODES:600 " || true)
+[[ -z "$bad_modes" ]] && ok "data file modes all 600" || { err "data files not 0600: $bad_modes"; exit 1; }
 
 cv_active=$(echo "$remote_out" | grep "^ACTIVE:" | sed 's/^ACTIVE://')
 cv_enabled=$(echo "$remote_out" | grep "^ENABLED:" | sed 's/^ENABLED://')
