@@ -65,7 +65,6 @@ ALLOWED_PATHS = {
     "/club/creditpackage/",
     "/club/statistics/financial",
     "/club/statistics/financial/v2",
-    "/club/club_extras",
 }
 
 # Path that uses the SQLite availability cache
@@ -125,7 +124,9 @@ class UpstreamClient:
         with self._lock:
             self._started_at = time.time()
             self._eps = {}
-            self._totals = {"calls": 0, "ok": 0, "non_200": 0, "errors": 0, "retries": 0, "rejected": 0}
+            self._totals = {"calls": 0, "ok": 0, "non_200": 0, "errors": 0, "retries": 0, "rejected": 0,
+                            "unauthorized": 0}
+            self._auth_logged = set()
             self._failures = 0
             self._opened_at = None
             self._probing = False
@@ -202,7 +203,7 @@ class UpstreamClient:
             session = self._checkout()
             with self._lock:
                 ep = self._eps.setdefault(key, {"calls": 0, "ok": 0, "non_200": 0, "errors": 0,
-                                                "last_status": None, "last_at": None})
+                                                "unauthorized": 0, "last_status": None, "last_at": None})
                 ep["calls"] += 1
                 self._totals["calls"] += 1
             try:
@@ -220,6 +221,7 @@ class UpstreamClient:
                 print(f"[upstream] error {type(exc).__name__} path={key}", flush=True)
                 return None, exc
             status = resp.status_code
+            first_auth = False
             with self._lock:
                 ep["last_status"] = status
                 ep["last_at"] = _iso_z(time.time())
@@ -229,7 +231,18 @@ class UpstreamClient:
                 else:
                     ep["non_200"] += 1
                     self._totals["non_200"] += 1
-            if status != 200:
+                if status == 401:
+                    ep["unauthorized"] += 1
+                    self._totals["unauthorized"] += 1
+                    if key not in self._auth_logged:
+                        self._auth_logged.add(key)
+                        first_auth = True
+            if status == 401:
+                # Padelmates now wants auth on some endpoints. We never authenticate or work
+                # around it: count it, log once per endpoint per process, never retry or cache.
+                if first_auth:
+                    print(f"[upstream] auth required status=401 path={key}", flush=True)
+            elif status != 200:
                 print(f"[upstream] non-200 status={status} path={key}", flush=True)
             return resp, None
         finally:
@@ -281,6 +294,8 @@ class UpstreamClient:
                         retryable, delay = True, float(ra)
                     else:
                         retryable = False
+                elif status == 401:
+                    retryable = False  # auth required: never retried, never a breaker failure
                 else:
                     retryable = status in (502, 503, 504)
             if retryable and retries < self._max_retries:
@@ -1060,9 +1075,14 @@ def init_db() -> None:
                    ok         INTEGER,
                    calls      INTEGER,
                    errors     INTEGER,
-                   updated_at INTEGER
+                   updated_at INTEGER,
+                   last_ok    INTEGER
                )"""
         )
+        # Migration: last_ok = start time of the latest ok run. Seeded from last_run where ok=1.
+        if "last_ok" not in [r[1] for r in conn.execute("PRAGMA table_info(job_state)")]:
+            conn.execute("ALTER TABLE job_state ADD COLUMN last_ok INTEGER")
+            conn.execute("UPDATE job_state SET last_ok=last_run WHERE ok=1 AND last_ok IS NULL")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_heatmap_club   ON archive_heatmap   (club_id, captured_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_club_info_club  ON archive_club_info  (club_id, captured_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_financial_club  ON archive_financial  (club_id, captured_at)")
@@ -1204,8 +1224,8 @@ def _job_due_in(job: str, period_s: int, retry_s: int) -> float:
                 seed = _job_seed(conn, job)
                 if not seed:
                     return 0.0
-                conn.execute("INSERT OR IGNORE INTO job_state (job, last_run, ok, calls, errors, updated_at) "
-                             "VALUES (?,?,?,?,?,?)", (job, seed, 1, 0, 0, int(_now())))
+                conn.execute("INSERT OR IGNORE INTO job_state (job, last_run, ok, calls, errors, updated_at, "
+                             "last_ok) VALUES (?,?,?,?,?,?,?)", (job, seed, 1, 0, 0, int(_now()), seed))
                 conn.commit()
                 row = (seed, 1)
         finally:
@@ -1216,18 +1236,24 @@ def _job_due_in(job: str, period_s: int, retry_s: int) -> float:
     return max(0.0, (last_run or 0) + (period_s if ok else retry_s) - _now())
 
 
-def _job_record(job: str, started_at: int, ok: bool, calls: int, errors: int) -> None:
+def _job_record(job: str, started_at: int, ok: bool, calls: int, errors: int):
+    """Persist a run. Returns last_ok (start of the latest ok run, carried over on a failed run;
+    None when the job never succeeded or the write failed)."""
     try:
         conn = _db_connect()
         try:
-            conn.execute("INSERT OR REPLACE INTO job_state (job, last_run, ok, calls, errors, updated_at) "
-                         "VALUES (?,?,?,?,?,?)", (job, int(started_at), int(bool(ok)), int(calls), int(errors),
-                                                  int(_now())))
+            row = conn.execute("SELECT last_ok FROM job_state WHERE job=?", (job,)).fetchone()
+            last_ok = int(started_at) if ok else (row[0] if row else None)
+            conn.execute("INSERT OR REPLACE INTO job_state (job, last_run, ok, calls, errors, updated_at, "
+                         "last_ok) VALUES (?,?,?,?,?,?,?)",
+                         (job, int(started_at), int(bool(ok)), int(calls), int(errors), int(_now()), last_ok))
             conn.commit()
+            return last_ok
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        print(f"[{job}] job_state write error: {exc}", flush=True)
+        print(f"[{job}] job_state write error: {type(exc).__name__}", flush=True)
+        return None
 
 
 def _wait_for_job(job: str, period_s: int, retry_s: int) -> None:
@@ -1243,8 +1269,8 @@ def _wait_for_job(job: str, period_s: int, retry_s: int) -> None:
         time.sleep(min(due, 300))
 
 
-def _write_job_status(job: str, last_run: int, ok: bool, calls: int, errors: int) -> None:
-    """Atomically write STATUS_DIR/<job>.json (0644, dir 0755) for labs_heartbeat. Five keys, no
+def _write_job_status(job: str, last_run: int, ok: bool, calls: int, errors: int, last_ok=None) -> None:
+    """Atomically write STATUS_DIR/<job>.json (0644, dir 0755) for labs_heartbeat. Six keys, no
     personal data. UMask=0077 on the unit means the modes must be set explicitly. Never raises."""
     tmp = None
     try:
@@ -1252,7 +1278,8 @@ def _write_job_status(job: str, last_run: int, ok: bool, calls: int, errors: int
         os.chmod(STATUS_DIR, 0o755)
         fd, tmp = tempfile.mkstemp(dir=STATUS_DIR, prefix="." + job + ".", suffix=".tmp")
         with os.fdopen(fd, "w") as fh:
-            json.dump({"job": job, "last_run": _iso_z(last_run), "ok": bool(ok),
+            json.dump({"job": job, "last_run": _iso_z(last_run),
+                       "last_ok": _iso_z(last_ok) if last_ok else None, "ok": bool(ok),
                        "calls": int(calls), "errors": int(errors)}, fh)
             fh.flush()
             os.fsync(fh.fileno())
@@ -1267,6 +1294,23 @@ def _write_job_status(job: str, last_run: int, ok: bool, calls: int, errors: int
                 os.remove(tmp)
             except OSError:
                 pass
+
+
+def _rewrite_status_files() -> None:
+    """Rewrite availability.json and payments.json from job_state (skips jobs with no row), so a
+    deploy publishes last_ok without waiting for the next run."""
+    try:
+        conn = _db_connect()
+        try:
+            rows = conn.execute("SELECT job, last_run, ok, calls, errors, last_ok FROM job_state "
+                                "WHERE job IN ('availability', 'payments')").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return
+    for job, last_run, ok, calls, errors, last_ok in rows:
+        if last_run:
+            _write_job_status(job, last_run, bool(ok), calls or 0, errors or 0, last_ok)
 
 
 def _london_day_keys(today, n: int = 28) -> list:
@@ -1487,7 +1531,7 @@ def api_heatmap():
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _exc_error(exc, 500)
 
     if not rows:
         return jsonify({"club_id": club_id, "fetched_at": None, "buckets": {}, "hour_signal": {}, "dow_signal": {}}), 200
@@ -1529,7 +1573,7 @@ def api_court_popularity():
         ).fetchall()
         conn.close()
     except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _exc_error(exc, 500)
 
     if not rows:
         return jsonify({"club_id": club_id, "fetched_at": None, "courts": []}), 200
@@ -1583,7 +1627,7 @@ def api_month():
             if date_str:
                 days[date_str] = _scrub_pii(json.loads(payload_str))
     except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _exc_error(exc, 500)
     finally:
         conn.close()
 
@@ -1787,6 +1831,29 @@ def api_membership_members():
         return _respond(payload)
 
 
+def _exc_error(exc, status: int):
+    """Generic JSON error for an unexpected exception (F16): the exception type goes to the
+    journal, never its message (it can carry URLs, paths or upstream text) and never to the client."""
+    print(f"[error] {type(exc).__name__} path={request.path}", flush=True)
+    msg = "upstream unavailable" if status == 502 else "internal error"
+    resp = jsonify({"error": msg})
+    resp.status_code = status
+    return resp
+
+
+def _club_info_stored(raw: str) -> str:
+    """Stored club_info_cache payload, scrubbed, minus the retired legacy 'extras' key."""
+    text = _scrub_json_text(raw)
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return text
+    if isinstance(data, dict) and "extras" in data:
+        data.pop("extras", None)
+        return json.dumps(data)
+    return text
+
+
 @app.route("/api/club-info", methods=["GET"])
 def api_club_info():
     """Concurrent fan-out for the Club Info tab: profile + memberships + credits in one call."""
@@ -1808,7 +1875,7 @@ def api_club_info():
             ).fetchone()
             conn.close()
             if row:
-                resp = Response(_scrub_json_text(row[0]), status=200, content_type="application/json")
+                resp = Response(_club_info_stored(row[0]), status=200, content_type="application/json")
                 if via_query:
                     _set_cookie(resp, via_query)
                 return resp
@@ -1833,18 +1900,17 @@ def api_club_info():
                 ).fetchone()
                 conn.close()
                 if row:
-                    return _respond(_scrub_json_text(row[0]))
+                    return _respond(_club_info_stored(row[0]))
             except sqlite3.Error:
                 pass
 
-        results: dict = {"profile": None, "memberships": None, "credits": None, "extras": None}
+        results: dict = {"profile": None, "memberships": None, "credits": None}
         good: dict = {}
         params = {"club_id": club_id}
         targets = [
             ("profile",     "/club/"),
             ("memberships", "/club/membership/"),
             ("credits",     "/club/creditpackage/"),
-            ("extras",      "/club/club_extras"),
         ]
 
         def _fetch(key: str, path: str) -> None:
@@ -1853,10 +1919,7 @@ def api_club_info():
                 r = UPSTREAM.get(path, params, timeout=15)
                 if r.status_code == 200:
                     d = r.json()
-                    if key == "extras" and isinstance(d, dict):
-                        results[key] = d.get("data", [])
-                    else:
-                        results[key] = d
+                    results[key] = d
                     good[key] = True
             except Exception:
                 results[key] = None
@@ -1887,55 +1950,25 @@ def api_club_info():
             row = conn.execute("SELECT payload FROM club_info_cache WHERE club_id=?", (club_id,)).fetchone()
             conn.close()
             if row:
-                return _respond(_scrub_json_text(row[0]), stale=True)
+                return _respond(_club_info_stored(row[0]), stale=True)
         except sqlite3.Error:
             pass
         return _respond(payload)
 
 
+UNAVAILABLE_ERROR = "unavailable"
+UNAVAILABLE_MESSAGE = "No longer available from Padelmates"
+
+
 @app.route("/api/booked-hours", methods=["GET"])
 def api_booked_hours():
-    """Proxy /home/activity/get_booked_hours."""
+    """Retired: Padelmates now requires auth for the booked-hours upstream and CourtView never
+    authenticates. Kept (not deleted) so callers get a clear 410, not the proxy's 403."""
     passed, via_query = _gate()
     if not passed:
         return _forbidden()
-    club_id = request.args.get("club_id", "")
-    start   = request.args.get("start", "")
-    end     = request.args.get("end", "")
-    if not club_id or not start or not end:
-        return jsonify({"error": "club_id, start and end required"}), 400
-    ck = _stats_key("booked-hours", club_id, start, end)
-    if ck:
-        cached = get_stats_cached(ck)
-        if cached:
-            resp = Response(cached, status=200, content_type="application/json")
-            if via_query: _set_cookie(resp, via_query)
-            return resp
-        # Stampede guard: only one thread fetches per key; others wait and re-check cache
-        with _single_flight_lock(ck):
-            cached = get_stats_cached(ck)  # re-check after acquiring
-            if cached:
-                resp = Response(cached, status=200, content_type="application/json")
-                if via_query: _set_cookie(resp, via_query)
-                return resp
-            try:
-                r = UPSTREAM.get("/home/activity/get_booked_hours",
-                                 {"club_id": club_id, "start_datetime": start, "end_datetime": end}, timeout=15)
-                payload = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
-                if r.status_code == 200:
-                    set_stats_cached(ck, payload)
-            except Exception as exc:
-                return jsonify({"error": str(exc)}), 502
-    else:
-        try:
-            r = UPSTREAM.get("/home/activity/get_booked_hours",
-                             {"club_id": club_id, "start_datetime": start, "end_datetime": end}, timeout=15)
-            payload = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
-        except Exception as exc:
-            return jsonify({"error": str(exc)}), 502
-    if r.status_code != 200:
-        return jsonify({"error": "upstream error"}), 502
-    resp = Response(payload, status=200, content_type="application/json")
+    resp = jsonify({"error": UNAVAILABLE_ERROR, "message": UNAVAILABLE_MESSAGE})
+    resp.status_code = 410
     if via_query:
         _set_cookie(resp, via_query)
     return resp
@@ -2112,7 +2145,7 @@ def api_day_activities():
                 break
             skip += PAGE_SIZE
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 502
+        return _exc_error(exc, 502)
 
     resp = Response(
         json.dumps({"club_id": club_id, "activities": [_activity_view(a) for a in all_activities]}),
@@ -2156,14 +2189,14 @@ def api_revenue_summary():
                 if r.status_code == 200:
                     set_stats_cached(ck, payload)
             except Exception as exc:
-                return jsonify({"error": str(exc)}), 502
+                return _exc_error(exc, 502)
     else:
         try:
             r = UPSTREAM.get("/club/statistics/financial/v2",
                              {"club_ids": club_id, "start_time": start, "end_time": end}, timeout=15)
             payload = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 502
+            return _exc_error(exc, 502)
 
     if r.status_code != 200:
         return jsonify({"error": "upstream error"}), 502
@@ -2248,7 +2281,7 @@ def api_payment_history():
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _exc_error(exc, 500)
     has_more = len(rows) > limit
     items = [{"id": _payment_public_id(r[4], r[5]), "createdAt": r[0], "description": r[1],
               "amount": r[2], "status": r[3]} for r in rows[:limit]]
@@ -2557,8 +2590,8 @@ def _payments_scheduled_run() -> None:
             errors += 1
             print(f"[payments] loop error club={club['id'][:8]}: {type(exc).__name__}: {exc}", flush=True)
     calls = _endpoint_calls("/club/statistics/online_payment_history") - calls0
-    _job_record("payments", started, errors == 0, calls, errors)
-    _write_job_status("payments", started, errors == 0, calls, errors)
+    last_ok = _job_record("payments", started, errors == 0, calls, errors)
+    _write_job_status("payments", started, errors == 0, calls, errors, last_ok)
 
 
 def _payments_sync_loop() -> None:
@@ -2621,7 +2654,7 @@ def api_payment_leaderboard():
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _exc_error(exc, 500)
     resp = Response(json.dumps({"leaders": _aggregate_leaders(rows), "complete": sync["complete"],
                                 "synced_through": sync["synced_through"], "queued": queued}),
                     status=200, content_type="application/json")
@@ -2664,7 +2697,7 @@ def api_archive_snapshots():
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _exc_error(exc, 500)
     snapshots = [
         {
             "captured_at": row[0],
@@ -2702,7 +2735,7 @@ def api_archive_heatmap():
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _exc_error(exc, 500)
     if not rows:
         return jsonify({"error": "no snapshot"}), 404
     buckets: dict = {}
@@ -2751,7 +2784,7 @@ def api_archive_club_info():
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _exc_error(exc, 500)
     if not row:
         return jsonify({"error": "no snapshot"}), 404
     resp = Response(_scrub_json_text(row[0]), status=200, content_type="application/json")
@@ -2814,7 +2847,7 @@ def api_archive_financial():
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _exc_error(exc, 500)
     if not row:
         return jsonify({"error": "no snapshot"}), 404
     body = _archive_payments_text(club_id, row[0]) if endpoint == "payment-history" else _scrub_json_text(row[0])
@@ -2910,14 +2943,14 @@ def api_coach_stats():
                 if r.status_code == 200:
                     set_stats_cached(ck, payload)
             except Exception as exc:
-                return jsonify({"error": str(exc)}), 502
+                return _exc_error(exc, 502)
     else:
         try:
             r = UPSTREAM.get("/club/statistics/coach",
                              {"club_ids": club_id, "start_time": start, "end_time": end}, timeout=15)
             payload = _coach_stats_payload(r.content.decode("utf-8", errors="replace"))
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 502
+            return _exc_error(exc, 502)
     if r.status_code != 200:
         return jsonify({"error": "upstream error"}), 502
     resp = Response(payload, status=200, content_type="application/json")
@@ -2927,16 +2960,17 @@ def api_coach_stats():
 
 
 def _job_states() -> dict:
-    """job_state rows as {job: {last_run, ok, calls, errors}} (empty when the table is missing)."""
+    """job_state rows as {job: {last_run, last_ok, ok, calls, errors}} (empty when the table is missing)."""
     try:
         conn = _db_connect()
         try:
-            rows = conn.execute("SELECT job, last_run, ok, calls, errors FROM job_state").fetchall()
+            rows = conn.execute("SELECT job, last_run, ok, calls, errors, last_ok FROM job_state").fetchall()
         finally:
             conn.close()
     except sqlite3.Error:
         return {}
-    return {r[0]: {"last_run": _iso_z(r[1]) if r[1] else None, "ok": bool(r[2]),
+    return {r[0]: {"last_run": _iso_z(r[1]) if r[1] else None,
+                   "last_ok": _iso_z(r[5]) if r[5] else None, "ok": bool(r[2]),
                    "calls": r[3], "errors": r[4]} for r in rows}
 
 
@@ -2992,6 +3026,11 @@ def proxy(p):
         time.sleep(random.uniform(0.05, 0.18))
         try:
             upstream = UPSTREAM.get(full_path, qs_pairs, timeout=15)
+            if upstream.status_code == 401:
+                # Never relay an upstream 401 (it would look like CourtView's own auth) or cache it.
+                resp401 = jsonify({"error": "upstream_auth_required"})
+                resp401.status_code = 502
+                return resp401
 
             ct = upstream.headers.get("content-type", "application/json")
             body = upstream.content
@@ -3005,9 +3044,7 @@ def proxy(p):
 
             return Response(body, status=upstream.status_code, content_type=ct)
         except Exception as exc:
-            resp = jsonify({"error": str(exc)})
-            resp.status_code = 502
-            return resp
+            return _exc_error(exc, 502)
 
     if lock is None:
         resp = _forward()
@@ -3118,7 +3155,7 @@ def access_data():
 
 
 # ---------------------------------------------------------------------------
-# Heatmap: server-side get_booked_hours aggregation
+# Heatmap: /club/statistics/operational (hottest_time_slots, DOW and court arrays)
 # ---------------------------------------------------------------------------
 
 _HEATMAP_ARRAYS = ("hottest_time_slots", "week_day_wise_activity_count_combined_graph",
@@ -3302,8 +3339,8 @@ def _availability_cycle() -> tuple:
     except sqlite3.Error as exc:
         print(f"[refresh] stats_cache cleanup error: {exc}")
 
-    _job_record("availability", int(t0), ok, attempted, errors)
-    _write_job_status("availability", int(t0), ok, attempted, errors)
+    last_ok = _job_record("availability", int(t0), ok, attempted, errors)
+    _write_job_status("availability", int(t0), ok, attempted, errors, last_ok)
     return ok, attempted, refreshed
 
 
@@ -3354,6 +3391,7 @@ def _startup() -> None:
     print(f"[startup] DB path     : {DB_PATH}")
 
     init_db()
+    _rewrite_status_files()
     _load_dashboard()
     _load_web_assets()
 

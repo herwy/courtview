@@ -102,8 +102,6 @@ class Upstream:
                          "owner": S_NAME, "coaches": [{"name": S_COACH}], "website": "club.example.test"})
         if path == "/club/creditpackage/":
             return Resp([{"name": "Pack", "contact_email": S_EMAIL}])
-        if path == "/club/club_extras":
-            return Resp({"data": [{"name": "Extra", "created_by": S_NAME, "user_id": S_PID}]})
         if path == "/home/activity/filtered_activities":
             return Resp({"activities": [{
                 "start_datetime": 1000, "end_datetime": 5000, "activity_type": "Book Court",
@@ -112,8 +110,6 @@ class Upstream:
                 "courts": [{"id": "c1", "court_id": "c1", "name": "Court 1", "owner": S_NAME}],
                 "players": [{"name": S_NAME, "email": S_EMAIL}], "coach_id": "cc1", "coach_name": S_COACH,
                 "booker_name": S_NAME}]})
-        if path == "/home/activity/get_booked_hours":
-            return Resp({"total_activities": 3, "total_booked_hours": 4.5, "note": S_EMAIL})
         if path == "/club/statistics/financial/v2":
             return Resp({"total_combined_payments": 100, "contact": S_EMAIL, "revenue_data": [{"x": "Mon", "y": "5"}]})
         if path == "/club/statistics/coach":
@@ -265,9 +261,10 @@ class IngestTests(Base):
         self.sync()
         for url in (f"/api/club-info?club_id={CLUB}", f"/api/membership-members?club_id={CLUB}",
                     f"/api/coach-stats?{self.window()}", f"/api/revenue-summary?{self.window()}",
-                    f"/api/booked-hours?{self.window()}", f"/api/activity-summary?{self.window()}",
+                    f"/api/activity-summary?{self.window()}",
                     f"/api/player/player_booking/all_courts_slot_prices_v3?club_id={CLUB}&start_datetime=1&end_datetime=2"):
             self.assertEqual(self.client.get(url).status_code, 200, url)
+        self.assertEqual(self.client.get(f"/api/booked-hours?{self.window()}").status_code, 410)
         cv._fetch_heatmap_for_club(CLUB, 7)
         c = self.db()
         try:

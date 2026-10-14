@@ -420,7 +420,7 @@ class SingleFlightTests(RouteBase):
         for t in threads:
             t.join()
         self.assertEqual(out, [200, 200])
-        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(len(self.calls), 3)
 
     def test_availability_concurrent_misses_share_one_fetch(self):
         def h(path, q):
@@ -630,23 +630,170 @@ class StatusFileTests(unittest.TestCase):
         old = os.umask(0o077)
         try:
             with mock.patch.object(cv, "STATUS_DIR", d):
-                cv._write_job_status("availability", 1_790_000_000, True, 56, 1)
-                cv._write_job_status("availability", 1_790_000_100, False, 2, 2)
+                cv._write_job_status("availability", 1_790_000_000, True, 56, 1, 1_790_000_000)
+                cv._write_job_status("availability", 1_790_000_100, False, 2, 2, 1_790_000_000)
         finally:
             os.umask(old)
         self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o755)
         path = os.path.join(d, "availability.json")
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o644)
         body = json.load(open(path))
-        self.assertEqual(set(body), {"job", "last_run", "ok", "calls", "errors"})
+        self.assertEqual(list(body), ["job", "last_run", "last_ok", "ok", "calls", "errors"])
         self.assertRegex(body["last_run"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
-        self.assertEqual(body, {"job": "availability", "last_run": cv._iso_z(1_790_000_100), "ok": False,
-                                "calls": 2, "errors": 2})
+        self.assertEqual(body, {"job": "availability", "last_run": cv._iso_z(1_790_000_100),
+                                "last_ok": cv._iso_z(1_790_000_000), "ok": False, "calls": 2, "errors": 2})
         self.assertEqual(os.listdir(d), ["availability.json"])
+
+    def test_never_ok_has_null_last_ok(self):
+        d = os.path.join(_TMP, "status-test-null")
+        with mock.patch.object(cv, "STATUS_DIR", d):
+            cv._write_job_status("payments", 1_790_000_000, False, 1, 1, None)
+        self.assertIsNone(json.load(open(os.path.join(d, "payments.json")))["last_ok"])
 
     def test_failure_does_not_raise(self):
         with mock.patch.object(cv, "STATUS_DIR", "/proc/definitely/not/writable"):
             cv._write_job_status("payments", 1, True, 0, 0)
+
+
+class LastOkTests(RouteBase):
+    T = 1_790_000_000
+
+    def test_ok_sets_failed_carries_restart_reads(self):
+        self.assertEqual(cv._job_record("payments", self.T, True, 1, 0), self.T)
+        self.assertEqual(cv._job_record("payments", self.T + 100, False, 1, 1), self.T)
+        self.assertEqual(cv._job_states()["payments"]["last_ok"], cv._iso_z(self.T))
+        self.assertEqual(cv._job_record("payments", self.T + 200, True, 1, 0), self.T + 200)
+
+    def test_never_ok_is_null(self):
+        self.assertIsNone(cv._job_record("availability", self.T, False, 1, 1))
+        self.assertIsNone(cv._job_states()["availability"]["last_ok"])
+
+    def test_migration_seeds_from_ok_rows_and_is_idempotent(self):
+        c = self.db()
+        c.execute("DROP TABLE job_state")
+        c.execute("CREATE TABLE job_state (job TEXT PRIMARY KEY, last_run INTEGER, ok INTEGER, "
+                  "calls INTEGER, errors INTEGER, updated_at INTEGER)")
+        c.execute("INSERT INTO job_state VALUES ('availability', ?, 1, 5, 0, 1)", (self.T,))
+        c.execute("INSERT INTO job_state VALUES ('heatmap', ?, 0, 5, 3, 1)", (self.T,))
+        c.commit()
+        c.close()
+        cv.init_db()
+        cv.init_db()
+        c = self.db()
+        try:
+            rows = dict(c.execute("SELECT job, last_ok FROM job_state").fetchall())
+        finally:
+            c.close()
+        self.assertEqual(rows, {"availability": self.T, "heatmap": None})
+
+    def test_rewrite_status_files_from_job_state(self):
+        d = os.path.join(_TMP, "status-rewrite")
+        cv._job_record("availability", self.T, True, 56, 0)
+        cv._job_record("payments", self.T, True, 4, 0)
+        cv._job_record("payments", self.T + 50, False, 4, 2)
+        with mock.patch.object(cv, "STATUS_DIR", d):
+            cv._rewrite_status_files()
+        self.assertEqual(sorted(os.listdir(d)), ["availability.json", "payments.json"])
+        pay = json.load(open(os.path.join(d, "payments.json")))
+        self.assertEqual((pay["ok"], pay["last_ok"], pay["last_run"]),
+                         (False, cv._iso_z(self.T), cv._iso_z(self.T + 50)))
+
+    def test_rewrite_skips_jobs_without_row(self):
+        d = os.path.join(_TMP, "status-rewrite-empty")
+        with mock.patch.object(cv, "STATUS_DIR", d):
+            cv._rewrite_status_files()
+        self.assertFalse(os.path.exists(d) and os.listdir(d))
+
+
+class RetiredEndpointTests(RouteBase):
+    def test_not_in_allowlist_or_code(self):
+        self.assertNotIn("/club/club_extras", cv.ALLOWED_PATHS)
+        code = [ln for ln in open(os.path.join(REPO, "courtview.py")) if not ln.strip().startswith("#")]
+        self.assertEqual([ln for ln in code if "club_extras" in ln or "get_booked_hours" in ln], [])
+
+    def test_booked_hours_410_no_upstream(self):
+        r = self.client.get(f"/api/booked-hours?club_id={CLUB}&start=1&end=2")
+        self.assertEqual(r.status_code, 410)
+        self.assertEqual(r.get_json(), {"error": "unavailable", "message": "No longer available from Padelmates"})
+        self.assertEqual(self.calls, [])
+
+    def test_booked_hours_denied_without_token(self):
+        with mock.patch.object(cv, "_gate", lambda: (False, "")):
+            self.assertEqual(self.client.get("/api/booked-hours?club_id=x").status_code, 403)
+
+    def test_club_info_three_calls_no_extras(self):
+        def handler(path, q):
+            return Resp(200, {"name": "Club"} if path == "/club/" else [])
+        self.handler = handler
+        r = self.client.get(f"/api/club-info?club_id={CLUB}")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(sorted(c[0] for c in self.calls), ["/club/", "/club/creditpackage/", "/club/membership/"])
+        self.assertNotIn("extras", r.get_json())
+        self.assertEqual(self.count("club_info_cache"), 1)
+
+    def test_legacy_stored_extras_never_served(self):
+        c = self.db()
+        c.execute("INSERT INTO club_info_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
+                  (CLUB, json.dumps({"profile": {"name": "C"}, "extras": [{"name": "x"}]}), int(time.time())))
+        c.commit()
+        c.close()
+        r = self.client.get(f"/api/club-info?club_id={CLUB}")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("extras", r.get_json())
+        self.assertEqual(self.calls, [])
+
+
+class UnauthorizedRuleTests(RouteBase):
+    def test_401_not_retried_not_cached_logged_once_counted(self):
+        import contextlib
+        import io
+        self.handler = lambda path, q: Resp(401, {"detail": "Not authenticated"})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            for _ in range(2):
+                r = self.client.get(f"/api/club/membership/?club_id={CLUB}")
+                self.assertEqual(r.status_code, 502)
+                self.assertEqual(r.get_json(), {"error": "upstream_auth_required"})
+            r = self.client.get(f"/api/club/creditpackage/?club_id={CLUB}")
+            self.assertEqual(r.status_code, 502)
+            r = self.client.get(f"/api/player/player_booking/all_courts_slot_prices_v3?club_id={CLUB}"
+                                f"&start_datetime=1&end_datetime=2")
+            self.assertEqual(r.status_code, 502)
+        self.assertEqual(len(self.calls), 4)  # no retries
+        out = buf.getvalue()
+        self.assertEqual(out.count("[upstream] auth required status=401 path=/club/membership/"), 1)
+        self.assertEqual(out.count("[upstream] auth required status=401 path=/club/creditpackage/"), 1)
+        self.assertNotIn("non-200 status=401", out)
+        self.assertEqual(self.count("availability"), 0)
+        self.assertEqual(self.count("stats_cache"), 0)
+        snap = cv.UPSTREAM.snapshot()
+        self.assertEqual(snap["totals"]["unauthorized"], 4)
+        self.assertEqual(snap["endpoints"]["/club/membership/"]["unauthorized"], 2)
+        self.assertEqual(snap["breaker"]["state"], "closed")
+        self.assertEqual(snap["breaker"]["consecutive_failures"], 0)
+        health = self.client.get("/api/health").get_json()
+        self.assertEqual(health["totals"]["unauthorized"], 4)
+
+    def test_client_level_401(self):
+        c, script = make_client([401, 200])
+        self.assertEqual(c.get("/p").status_code, 401)
+        self.assertEqual(len(script.calls), 1)
+        self.assertEqual(c.snapshot()["totals"]["unauthorized"], 1)
+
+
+class ErrorLeakTests(RouteBase):
+    def test_exception_text_never_in_error_json(self):
+        secret = "SECRET-HOST-DETAIL"
+
+        def boom(path, q):
+            raise RuntimeError(secret)
+        self.handler = boom
+        for url in (f"/api/club/?club_id={CLUB}",
+                    f"/api/coach-stats?club_id={CLUB}&start=1&end=2",
+                    f"/api/revenue-summary?club_id={CLUB}&start=1&end=2"):
+            r = self.client.get(url)
+            self.assertGreaterEqual(r.status_code, 500, url)
+            self.assertNotIn(secret, r.get_data(as_text=True), url)
 
 
 # ---------------------------------------------------------------------------
