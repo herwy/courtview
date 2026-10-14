@@ -39,6 +39,7 @@ last_updated: "2026-07-10T23:46:00Z"
 | 27 | URL-encode user-supplied params (club_id/start/end/query) across all remaining unescaped Padelmates fetch calls: api_membership_members, api_club_info, api_booked_hours, activity-summary, day-activities, revenue-summary, payment-history, coach-stats, coach-bios. Wider than the 4 originally flagged. Switched to urlencode() throughout, realigning the earlier quote()-based leaderboard fix to match the codebase's existing convention. | 2026-07-24 | 3162601 | inline |
 | 28 | Supervision hardening after the 2026-10-13 port-squat crash loop (peer session hand-ran gunicorn on :8766): unit restart backoff + StartLimitIntervalSec=0, one CRASH-LOOPING Telegram alert per hour instead of per crash, deploy.sh drops legacy pkill and checks MainPID owns :8766, accurate startup line. Also trimmed Racketeer archive to 2026-06-15..06-30 and purged a stray availability row. | 2026-10-14 | a2df05f | 261014-0yr-courtview-supervision-hardening |
 | 29 | Plain-English Telegram failure alerts: "CourtView keeps crashing" / "CourtView is down" with What's happening, Likely cause (from journal: port held / startup error), What happens next or To fix; dropped UTC time line | 2026-10-14 | 2775f0a | fast |
+| 30 | deploy.sh audit gate: pip-audit now audits the INSTALLED dependency closure (17 pkgs, --no-deps --disable-pip) instead of resolving latest in a temp venv (~24s, missed werkzeug 3.1.8 CVE-2026-102598, upgraded to 3.1.9 by hand); pip-audit installed only if missing; dropped obsolete crontab rewrite. Deploy 65s -> 8s. Also added minimal PROJECT.md/ROADMAP.md/config.json (GSD health: healthy) | 2026-10-14 | 0761a43 | 261014-1by-deploy-sh-pip-audit-installed-closure-ga |
 
 ## Session Continuity
 
@@ -46,4 +47,4 @@ last_updated: "2026-07-10T23:46:00Z"
 |------|-----------|-------------|
 | ul6 | Session 2026-05-22: tooltip portal fix, payment 1-day window, Rocket activity fallback, club switch UX, activity type renames | None |
 | wfp | Session 2026-05-23: All fixes complete. Compare race fixed. HEATMAP_CLUBS courts corrected. Checklist clean. | None |
-| 0yr | Session 2026-10-14: Racketeer archive trimmed to 06-30, supervision hardening (quick-28) deployed; live crash-loop alert verified; stale RPi backup + courtview.log removed. | None |
+| 0yr | Session 2026-10-14: Racketeer archive trimmed, supervision hardening + plain-English alerts (quick-28/29), deploy audit gate + werkzeug CVE fix (quick-30), GSD planning scaffold. Nothing open. | None |
