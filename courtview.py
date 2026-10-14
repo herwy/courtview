@@ -11,7 +11,7 @@ _sanitise_payment) before any DB write or response, and repeat customers are ide
 an HMAC customer_key (see "Privacy" below).
 
 Run: gunicorn via courtview.service (systemd); python3 courtview.py is a dev fallback
-Deployed to: /root/projects/courtview/courtview.py
+Deployed to: /opt/courtview/current/courtview.py (data in /var/lib/courtview)
 """
 
 import base64
@@ -363,7 +363,6 @@ AVAIL_REFRESH_SECS = 6 * 3600
 JOB_RETRY_SECS     = 1800                # a failed run is retried after 30 min
 WATCH_FRESH_SECS   = 300                 # /api/availability-fresh max cache age
 PAYMENTS_QUEUE_MAX = 16                  # queued on-demand payment windows
-STATUS_DIR = os.environ.get("COURTVIEW_STATUS_DIR", "/root/projects/courtview/status")
 
 # Racketeer migrated off Padelmates (2026-07-01). The club_id excludes it from background
 # polling and drives the 410 guard (_block_archived_club); only /api/archive/* serves it.
@@ -375,11 +374,28 @@ ARCHIVED_MESSAGE  = "Racketeer left Padelmates on 2026-07-01; only archived snap
 PAYMENT_CLUB_IDS = PAYMENT_SYNC_CLUB_IDS
 ARCHIVE_CLUB_IDS = frozenset({RACKETEER_CLUB_ID})
 
-# Runtime paths on RPi
-TOKEN_PATH      = "/root/.courtview_token"
-HMAC_KEY_PATH   = os.environ.get("COURTVIEW_HMAC_KEY_PATH", "/root/.courtview_hmac_key")
-DB_PATH         = os.environ.get("COURTVIEW_DB_PATH", "/root/projects/courtview/courtview_cache.db")
-ACCESS_LOG_PATH = "/root/projects/courtview/access.log"
+# Runtime paths on RPi. COURTVIEW_DATA_DIR drives the data files; a per-path env var wins.
+# Secrets arrive via systemd LoadCredential ($CREDENTIALS_DIRECTORY/<name>), with the legacy
+# /root source files as the last fallback.
+DATA_DIR = os.environ.get("COURTVIEW_DATA_DIR", "/var/lib/courtview")
+
+
+def _cred_path(env_name: str, cred_name: str, legacy: str) -> str:
+    """Explicit env > $CREDENTIALS_DIRECTORY/<cred_name> > legacy path."""
+    explicit = os.environ.get(env_name)
+    if explicit:
+        return explicit
+    cred_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+    if cred_dir:
+        return os.path.join(cred_dir, cred_name)
+    return legacy
+
+
+TOKEN_PATH      = _cred_path("COURTVIEW_TOKEN_PATH", "token", "/root/.courtview_token")
+HMAC_KEY_PATH   = _cred_path("COURTVIEW_HMAC_KEY_PATH", "hmac_key", "/root/.courtview_hmac_key")
+DB_PATH         = os.environ.get("COURTVIEW_DB_PATH", os.path.join(DATA_DIR, "courtview_cache.db"))
+ACCESS_LOG_PATH = os.environ.get("COURTVIEW_ACCESS_LOG_PATH", os.path.join(DATA_DIR, "access.log"))
+STATUS_DIR      = os.environ.get("COURTVIEW_STATUS_DIR", os.path.join(DATA_DIR, "status"))
 
 # ---------------------------------------------------------------------------
 # SQLite connection helper - unified WAL/timeout settings
@@ -590,8 +606,8 @@ def _sanitise_payment(rec):
     return out
 
 
-# Shared web assets served from the nightwatch dashboard directory
-WEB_ASSETS_DIR  = "/root/labs/web"
+# CourtView-owned access page assets (web/ next to this file)
+WEB_ASSETS_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 DASHBOARD_HTML = os.path.join(os.path.dirname(__file__), "courtview.html")
 
 # Cookie name and max-age (90 days)
@@ -715,7 +731,7 @@ _ACCESS_PATHS = {"/access", "/access/data"}
 ACCESS_LOG_MAX_BYTES = 1 * 1024 * 1024   # rotate access.log past this size
 ACCESS_LOG_KEEP      = 5                 # access.log.1 .. access.log.5
 
-# Web assets loaded from the nightwatch dashboard directory at startup
+# Access page assets loaded from WEB_ASSETS_DIR at startup
 _ACCESS_HTML_BYTES: bytes = b""
 _ACCESS_JS_BYTES:   bytes = b""
 _DASHBOARD_CSS_BYTES: bytes = b""
@@ -735,68 +751,6 @@ def _load_web_assets() -> None:
             print(f"[startup] loaded {path} ({len(globals()[attr])} bytes)")
         except OSError as exc:
             print(f"[startup] WARNING: could not load {path}: {exc}")
-    _strip_wireslammer()
-
-
-def _strip_wireslammer() -> None:
-    """Patch in-memory access page for CourtView: remove Wireslammer, retitle, strip logo."""
-    global _ACCESS_HTML_BYTES, _ACCESS_JS_BYTES
-
-    # Retitle: replace whatever the first <title> says (labs' page reads "Access Log - doxxnet Labs")
-    _ACCESS_HTML_BYTES, n_title = re.subn(
-        rb'<title>.*?</title>', b'<title>CourtView Access Log</title>',
-        _ACCESS_HTML_BYTES, count=1, flags=re.IGNORECASE | re.DOTALL)
-    if not n_title:
-        print("[startup] WARNING: access page title not found, not retitled")
-
-    # Remove logo div (<!-- Logo --> comment through its closing </div>)
-    _ACCESS_HTML_BYTES = re.sub(
-        rb'[ \t]*<!-- Logo -->.*?</div>\s*',
-        b'\n',
-        _ACCESS_HTML_BYTES,
-        flags=re.DOTALL,
-    )
-
-    # Remove the tab button
-    _ACCESS_HTML_BYTES = re.sub(
-        rb'\s*<button[^>]*id="tab-ws"[^>]*>Wireslammer</button>',
-        b'',
-        _ACCESS_HTML_BYTES,
-    )
-
-    # Remove panel-ws using a nesting counter to find the true matching </div>
-    start_marker = b'<div class="tab-panel hidden" id="panel-ws"'
-    start_pos = _ACCESS_HTML_BYTES.find(start_marker)
-    if start_pos >= 0:
-        depth = 0
-        i = start_pos
-        buf = _ACCESS_HTML_BYTES
-        while i < len(buf):
-            if buf[i:i+4] == b'<div':
-                depth += 1
-                i += 4
-            elif buf[i:i+6] == b'</div>':
-                depth -= 1
-                if depth == 0:
-                    end_pos = i + 6
-                    if end_pos < len(buf) and buf[end_pos:end_pos+1] == b'\n':
-                        end_pos += 1
-                    _ACCESS_HTML_BYTES = buf[:start_pos] + buf[end_pos:]
-                    break
-                i += 6
-            else:
-                i += 1
-
-    # Remove Wireslammer JS section from the section marker to end, keeping load() calls
-    ws_marker = b'// \xe2\x94\x80\xe2\x94\x80 Wireslammer tab'
-    pos = _ACCESS_JS_BYTES.find(ws_marker)
-    if pos < 0:
-        pos = _ACCESS_JS_BYTES.find(b'\nfunction loadWS()')
-    if pos > 0:
-        _ACCESS_JS_BYTES = (
-            _ACCESS_JS_BYTES[:pos]
-            + b'\nload();\nsetInterval(tick, 1000);\nsetInterval(load, 30000);\n'
-        )
 
 
 def _open_access_log():

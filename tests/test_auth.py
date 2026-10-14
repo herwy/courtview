@@ -13,6 +13,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TMP = tempfile.mkdtemp(prefix="cv-auth-test-")
 os.environ["COURTVIEW_SKIP_STARTUP"] = "1"
 os.environ["COURTVIEW_DB_PATH"] = os.path.join(_TMP, "t.db")
+os.environ["COURTVIEW_DATA_DIR"] = _TMP
 
 _spec = importlib.util.spec_from_file_location("courtview_auth_under_test", os.path.join(REPO, "courtview.py"))
 cv = importlib.util.module_from_spec(_spec)

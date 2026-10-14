@@ -18,6 +18,7 @@ with open(_KEY, "w") as _fh:
 os.chmod(_KEY, 0o600)
 os.environ["COURTVIEW_SKIP_STARTUP"] = "1"
 os.environ["COURTVIEW_DB_PATH"] = os.path.join(_TMP, "t.db")
+os.environ["COURTVIEW_DATA_DIR"] = _TMP
 os.environ["COURTVIEW_HMAC_KEY_PATH"] = _KEY
 sys.path.insert(0, REPO)
 

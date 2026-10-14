@@ -15,6 +15,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TMP = tempfile.mkdtemp(prefix="cv-pay-test-")
 os.environ["COURTVIEW_SKIP_STARTUP"] = "1"
 os.environ["COURTVIEW_DB_PATH"] = os.path.join(_TMP, "t.db")
+os.environ["COURTVIEW_DATA_DIR"] = _TMP
 _KEY = os.path.join(_TMP, "hmac_key")
 with open(_KEY, "w") as _fh:
     _fh.write("cd" * 32)

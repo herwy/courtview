@@ -20,6 +20,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TMP = tempfile.mkdtemp(prefix="cv-sec-test-")
 os.environ["COURTVIEW_SKIP_STARTUP"] = "1"
 os.environ["COURTVIEW_DB_PATH"] = os.path.join(_TMP, "t.db")
+os.environ["COURTVIEW_DATA_DIR"] = _TMP
 
 _spec = importlib.util.spec_from_file_location("courtview_sec_under_test", os.path.join(REPO, "courtview.py"))
 cv = importlib.util.module_from_spec(_spec)
@@ -337,28 +338,49 @@ class AccessLabelTests(SecBase):
         self.assertEqual([c.args[2] for c in log.call_args_list], ["BLOCKED"])
 
 
-class AccessPageTitleTests(unittest.TestCase):
-    def test_retitle_labs_page(self):
-        saved = cv._ACCESS_HTML_BYTES, cv._ACCESS_JS_BYTES
-        self.addCleanup(lambda: setattr(cv, "_ACCESS_HTML_BYTES", saved[0]) or setattr(cv, "_ACCESS_JS_BYTES", saved[1]))
-        cv._ACCESS_HTML_BYTES = (b"<html><head><title>Access Log - doxxnet Labs</title></head>"
-                                 b"<body><!-- Logo --><div>x</div></body></html>")
-        cv._ACCESS_JS_BYTES = b"load();"
-        cv._strip_wireslammer()
-        self.assertIn(b"<title>CourtView Access Log</title>", cv._ACCESS_HTML_BYTES)
-        self.assertNotIn(b"doxxnet", cv._ACCESS_HTML_BYTES)
+class AccessAssetsTests(SecBase):
+    """The access page, its script and the stylesheet are CourtView-owned files in web/."""
 
-    def test_missing_title_warns(self):
-        import contextlib
-        import io
-        saved = cv._ACCESS_HTML_BYTES, cv._ACCESS_JS_BYTES
-        self.addCleanup(lambda: setattr(cv, "_ACCESS_HTML_BYTES", saved[0]) or setattr(cv, "_ACCESS_JS_BYTES", saved[1]))
-        cv._ACCESS_HTML_BYTES = b"<html><body>no title</body></html>"
-        cv._ACCESS_JS_BYTES = b""
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            cv._strip_wireslammer()
-        self.assertIn("[startup] WARNING", buf.getvalue())
+    @classmethod
+    def setUpClass(cls):
+        cls._saved = cv._ACCESS_HTML_BYTES, cv._ACCESS_JS_BYTES, cv._DASHBOARD_CSS_BYTES
+        cv._load_web_assets()
+
+    @classmethod
+    def tearDownClass(cls):
+        cv._ACCESS_HTML_BYTES, cv._ACCESS_JS_BYTES, cv._DASHBOARD_CSS_BYTES = cls._saved
+
+    def test_assets_dir_is_repo_web(self):
+        self.assertEqual(cv.WEB_ASSETS_DIR, os.path.join(REPO, "web"))
+        for name in ("access.html", "access.js", "dashboard.css"):
+            self.assertTrue(os.path.isfile(os.path.join(REPO, "web", name)), name)
+
+    def test_title_and_no_wireslammer(self):
+        html = cv._ACCESS_HTML_BYTES
+        self.assertIn(b"<title>CourtView Access Log</title>", html)
+        self.assertNotIn(b"Wireslammer", html)
+        title = re.search(rb"<title>(.*?)</title>", html).group(1)
+        self.assertNotIn(b"doxxnet", title.lower())
+        self.assertNotIn(b"loadWS", cv._ACCESS_JS_BYTES)
+        self.assertNotIn(b"Wireslammer", cv._ACCESS_JS_BYTES)
+
+    def test_routes_serve_assets_with_csp(self):
+        c = self.client
+        page = c.get("/access")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.headers["Content-Security-Policy"], cv.CSP_ACCESS)
+        for url in ("/access.js", "/dashboard.css"):
+            r = c.get(url)
+            self.assertEqual(r.status_code, 200, url)
+            self.assertTrue(r.data, url)
+            self.assertEqual(r.headers["Content-Security-Policy"], cv.CSP_API)
+
+    def test_strip_function_gone_and_no_labs_reads(self):
+        self.assertFalse(hasattr(cv, "_strip_wireslammer"))
+        for name in os.listdir(REPO):
+            if name.endswith(".py") and not name.startswith("."):
+                with open(os.path.join(REPO, name), encoding="utf-8") as fh:
+                    self.assertNotIn("/root/labs", fh.read(), name)
 
 
 class AccessRotationTests(unittest.TestCase):

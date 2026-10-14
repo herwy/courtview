@@ -1,4 +1,4 @@
-"""Stub tests for cv_notify_fail.py (no systemctl, journalctl, Telegram or /root/labs needed)."""
+"""Stub tests for cv_notify_fail.py (no systemctl, journalctl or Telegram needed)."""
 import importlib.util
 import json
 import os
@@ -12,6 +12,7 @@ from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SENT = []
+SYSTEMCTL = []
 
 
 def _stub_send(msg, *args, silent=False, **kw):
@@ -19,14 +20,16 @@ def _stub_send(msg, *args, silent=False, **kw):
     return True
 
 
-def _stub_atomic(path, obj, mode=0o600):
-    with open(path, 'w') as fh:
-        json.dump(obj, fh)
-    os.chmod(path, mode)
 
 
-sys.modules['notify'] = types.SimpleNamespace(send_telegram=_stub_send)
-sys.modules['atomic_io'] = types.SimpleNamespace(atomic_write_json=_stub_atomic)
+def _stub_run(cmd, *a, **kw):
+    if cmd[:1] == ['systemctl'] and cmd[1] in ('start', 'stop'):
+        SYSTEMCTL.append(tuple(cmd[1:]))
+    return types.SimpleNamespace(returncode=0, stdout='')
+
+
+sys.path.insert(0, REPO)
+import cv_telegram  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location('cv_notify_fail', os.path.join(REPO, 'cv_notify_fail.py'))
 cv = importlib.util.module_from_spec(_spec)
@@ -116,8 +119,15 @@ class MainTests(unittest.TestCase):
         fd, self.path = tempfile.mkstemp()
         os.close(fd)
         os.remove(self.path)
+        SYSTEMCTL.clear()
+        self.outbox = [0]
         self.patches = [
             mock.patch.object(cv, 'STATE_FILE', self.path),
+            mock.patch.object(cv, 'STATE_DIR', os.path.dirname(self.path)),
+            mock.patch.object(cv_telegram, 'send_telegram', _stub_send),
+            mock.patch.object(cv_telegram, 'flush_outbox', lambda: 0),
+            mock.patch.object(cv_telegram, 'outbox_count', lambda: self.outbox[0]),
+            mock.patch.object(cv.subprocess, 'run', _stub_run),
             mock.patch.object(cv.time, 'sleep', lambda s: None),
             mock.patch.object(cv.time, 'time', lambda: self.clock[0]),
             mock.patch.object(cv, 'journal_tail', lambda u: ['boom error']),
@@ -199,7 +209,7 @@ class MainTests(unittest.TestCase):
 
     def test_concurrent_recovery_sends_once(self):
         import threading
-        real_send = sys.modules['notify'].send_telegram
+        real_send = _stub_send
 
         def slow_send(msg, *a, **kw):
             import time as _t
@@ -214,6 +224,39 @@ class MainTests(unittest.TestCase):
         for th in threads:
             th.join()
         self.assertEqual(len(SENT), 1)
+
+    def test_incident_arms_recovery_timer(self):
+        self.failed = True
+        cv.main(['courtview'])
+        self.assertEqual(SYSTEMCTL, [('start', 'courtview-recovery@courtview.timer')])
+
+    def test_loop_alert_arms_recovery_timer(self):
+        for _ in range(3):
+            cv.main(['courtview'])
+            self.clock[0] += 60
+        self.assertEqual(SYSTEMCTL, [('start', 'courtview-recovery@courtview.timer')])
+
+    def test_failed_send_still_opens_incident_and_arms(self):
+        self.failed = True
+        with mock.patch.object(cv_telegram, 'send_telegram', lambda *a, **k: False):
+            self.assertEqual(cv.main(['courtview']), 1)
+        self.assertEqual(self.state()['courtview']['incident_since'], T_BST)
+        self.assertEqual(SYSTEMCTL, [('start', 'courtview-recovery@courtview.timer')])
+
+    def test_check_recovery_disarms_when_idle(self):
+        self.assertEqual(cv.main(['--check-recovery', 'courtview']), 0)
+        self.assertEqual(SENT, [])
+        self.assertEqual(SYSTEMCTL, [('stop', 'courtview-recovery@courtview.timer')])
+
+    def test_check_recovery_keeps_timer_while_outbox_has_alerts(self):
+        self.outbox[0] = 1
+        cv.main(['--check-recovery', 'courtview'])
+        self.assertEqual(SYSTEMCTL, [])
+
+    def test_state_file_under_state_dir_constant(self):
+        src = os.path.join(REPO, 'cv_notify_fail.py')
+        with open(src) as fh:
+            self.assertIn("STATE_FILE = os.path.join(STATE_DIR", fh.read())
 
     def test_bad_unit(self):
         self.assertEqual(cv.main(['--check-recovery', '../x']), 2)

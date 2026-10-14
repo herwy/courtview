@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cv_backup.py - nightly encrypted backup of the CourtView cache DB (stdlib only; runs as root).
+"""cv_backup.py - nightly encrypted backup of the CourtView cache DB (stdlib only; runs as the courtview user).
 
 sqlite backup API -> integrity_check -> gpg public-key encryption -> rotate (keep 7).
 Only the public key lives on the RPi, so a stolen backup is unreadable without the Mac keyring.
@@ -16,10 +16,11 @@ import tempfile
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-BASE = os.environ.get("COURTVIEW_DIR", "/root/projects/courtview")
-DB_PATH = os.environ.get("COURTVIEW_DB_PATH", os.path.join(BASE, "courtview_cache.db"))
-BACKUP_DIR = os.environ.get("COURTVIEW_BACKUP_DIR", os.path.join(BASE, "backups"))
-PUBKEY = os.environ.get("COURTVIEW_BACKUP_PUBKEY", os.path.join(BASE, "courtview-backup.pub.asc"))
+DATA_DIR = os.environ.get("COURTVIEW_DATA_DIR", "/var/lib/courtview")
+DB_PATH = os.environ.get("COURTVIEW_DB_PATH", os.path.join(DATA_DIR, "courtview_cache.db"))
+BACKUP_DIR = os.environ.get("COURTVIEW_BACKUP_DIR", os.path.join(DATA_DIR, "backups"))
+PUBKEY = os.environ.get("COURTVIEW_BACKUP_PUBKEY",
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)), "courtview-backup.pub.asc"))
 KEEP = 7
 
 

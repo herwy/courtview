@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="/favicon.ico">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CourtView Access Log</title>
+<link rel="stylesheet" href="/dashboard.css?v=11">
+</head>
+<body>
+<a href="#main-content" class="skip-link">Skip to main content</a>
+<div class="page-wrap">
+
+<header class="access-header">
+    <div class="header-row">
+      <a class="h-back" href="/">Dashboard</a>
+      <h1 class="h-title">Access Log</h1>
+      <div class="h-live">
+        <span class="live-dot"></span>
+        <span>live</span>
+        <span id="last-updated"></span>
+      </div>
+    </div>
+    <div class="tab-bar" role="tablist" aria-label="Log views">
+      <button class="tab-btn active" id="tab-dash" data-tab="dash" role="tab" aria-selected="true" aria-controls="panel-dash">Dashboard</button>
+    </div>
+  </header>
+
+  <div class="tab-panel" id="panel-dash" role="tabpanel" aria-labelledby="tab-dash">
+    <div class="stats-strip access-strip" id="main-content">
+      <div class="stat-item sa-blue">
+        <span class="stat-label">Requests</span>
+        <span class="stat-value v-blue" id="s-total">-</span>
+      </div>
+      <div class="stat-item sa-cyan">
+        <span class="stat-label">Unique IPs</span>
+        <span class="stat-value v-cyan" id="s-ips">-</span>
+      </div>
+      <div class="stat-item sa-red">
+        <span class="stat-label">Blocked</span>
+        <span class="stat-value v-red" id="s-blocked">-</span>
+      </div>
+      <div class="stat-item sa-green">
+        <span class="stat-label">Authed</span>
+        <span class="stat-value v-green" id="s-authed">-</span>
+      </div>
+      <div class="stat-item sa-yellow">
+        <span class="stat-label">Token Visits</span>
+        <span class="stat-value v-yellow" id="s-token">-</span>
+      </div>
+    </div>
+    <div class="filter-bar">
+      <button class="f-btn active" data-auth="all">All</button>
+      <button class="f-btn f-blocked" data-auth="BLOCKED">Blocked</button>
+      <button class="f-btn f-token" data-auth="TOKEN">Token</button>
+      <button class="f-btn f-ok" data-auth="OK">OK</button>
+      <div class="f-sep"></div>
+      <button class="f-btn" data-origin="external">External</button>
+      <button class="f-btn" data-origin="doxxnet">doxxnet</button>
+      <button class="f-btn" data-origin="lan">LAN</button>
+      <input class="f-input" id="f-ip" type="text" placeholder="Filter IP, host or org..." maxlength="60">
+      <span class="f-count" id="f-count"></span>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <colgroup>
+          <col class="c-time"><col class="c-status"><col class="c-ip"><col class="c-rdns">
+          <col class="c-loc"><col class="c-path">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Time</th><th>Status</th><th>IP</th><th>Host / Org</th>
+            <th>Location</th><th>Path / UA</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"><tr class="empty-row"><td colspan="6">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  
+</div>
+
+<script src="/access.js?v=8"></script>
+</body>
+</html>
