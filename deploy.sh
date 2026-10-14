@@ -100,9 +100,13 @@ scp -q \
     "$SCRIPT_DIR/notify-telegram@.service" \
     "$SCRIPT_DIR/cv_notify_fail.py" \
     "$SCRIPT_DIR/cv_purge_pii.py" \
+    "$SCRIPT_DIR/cv_backup.py" \
+    "$SCRIPT_DIR/courtview-backup.service" \
+    "$SCRIPT_DIR/courtview-backup.timer" \
+    "$SCRIPT_DIR/courtview-backup.pub.asc" \
     "$SCRIPT_DIR/requirements.txt" \
     "${RPI_HOST}:/root/projects/courtview/" \
-    && ok "  courtview.py courtview.html courtview.service notify-telegram@.service cv_notify_fail.py cv_purge_pii.py requirements.txt" \
+    && ok "  courtview.py courtview.html courtview.service notify-telegram@.service cv_notify_fail.py cv_purge_pii.py cv_backup.py courtview-backup.{service,timer,pub.asc} requirements.txt" \
     || { err "  FAILED: scp"; exit 1; }
 
 # 3. All remote operations in one SSH call
@@ -121,8 +125,13 @@ fi
 # Install service files and enable
 cp /root/projects/courtview/courtview.service /etc/systemd/system/courtview.service
 cp /root/projects/courtview/notify-telegram@.service /etc/systemd/system/notify-telegram@.service
+cp /root/projects/courtview/courtview-backup.service /etc/systemd/system/courtview-backup.service
+cp /root/projects/courtview/courtview-backup.timer /etc/systemd/system/courtview-backup.timer
+mkdir -p -m 700 /root/projects/courtview/backups
 systemctl daemon-reload
 systemctl enable courtview
+systemctl enable --now courtview-backup.timer
+echo "BACKUPTIMER:$(systemctl is-enabled courtview-backup.timer)"
 
 # HMAC secret for pseudonymous customer keys: created once, never echoed, never backed up.
 HMAC_KEY=/root/.courtview_hmac_key
@@ -184,10 +193,13 @@ echo "ENABLED:$(systemctl is-enabled courtview)"
 REMOTE
 )
 
-echo "$remote_out" | grep -E "^(HMACKEY|PURGE|PURGEFAIL|MODES):" | sed 's/^/  /'
+echo "$remote_out" | grep -E "^(HMACKEY|PURGE|PURGEFAIL|MODES|BACKUPTIMER):" | sed 's/^/  /'
 if echo "$remote_out" | grep -q "^PURGEFAIL:"; then err "PII purge failed - see output above"; exit 1; fi
 bad_modes=$(echo "$remote_out" | grep "^MODES:" | grep -vE "^MODES:600 " || true)
 [[ -z "$bad_modes" ]] && ok "data file modes all 600" || { err "data files not 0600: $bad_modes"; exit 1; }
+
+[[ "$(echo "$remote_out" | grep "^BACKUPTIMER:" | sed 's/^BACKUPTIMER://')" == "enabled" ]] \
+    && ok "courtview-backup.timer enabled" || { err "courtview-backup.timer not enabled"; exit 1; }
 
 cv_active=$(echo "$remote_out" | grep "^ACTIVE:" | sed 's/^ACTIVE://')
 cv_enabled=$(echo "$remote_out" | grep "^ENABLED:" | sed 's/^ENABLED://')

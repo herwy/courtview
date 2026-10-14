@@ -6,6 +6,10 @@ Serves the CourtView dashboard HTML at / and proxies allowed Padelmates API
 paths at /api/* using Android OkHttp headers. Includes token auth,
 per-IP rate limiting, SQLite availability cache, and a 6-hour refresh thread.
 
+No personal data is stored or returned: upstream JSON is stripped in memory (_scrub_pii,
+_sanitise_payment) before any DB write or response, and repeat customers are identified only by
+an HMAC customer_key (see "Privacy" below).
+
 Run: gunicorn via courtview.service (systemd); python3 courtview.py is a dev fallback
 Deployed to: /root/projects/courtview/courtview.py
 """

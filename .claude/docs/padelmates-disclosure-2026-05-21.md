@@ -1,5 +1,7 @@
 # Padelmates API - Responsible Disclosure Findings
 
+Status: not sent as of 2026-10-14.
+
 Discovered: 2026-05-21 during CourtView development (Android APK reverse engineering via jadx + API exploration).
 
 ---
@@ -104,7 +106,7 @@ Related unauthenticated endpoint: `/club/member/crud?club_id=X&player_id=Y` - re
 
 Same severity pattern as Finding 4, but confirmed to return data (Finding 4 was 504 on full load and never fully verified). This finding documents the working PII path.
 
-**CourtView mitigation (already in place):** `/club/membership/member` is NOT in `ALLOWED_PATHS`. The new `/api/membership-members` server-side route in courtview.py fans out per-plan and returns only counts to the browser, never PII. The endpoint remains exposed at the Padelmates API itself.
+**CourtView mitigation (already in place):** `/club/membership/member` is NOT in `ALLOWED_PATHS`. The `/api/membership-members` route in courtview.py returns only per-plan counts (from the plan listing's `total_members`); since 2026-10-14 it never calls `/club/membership/member` at all. The endpoint remains exposed at the Padelmates API itself.
 
 **Fix:** Require club manager/admin auth token on `/club/membership/member`.
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=CourtView nightly encrypted DB backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
