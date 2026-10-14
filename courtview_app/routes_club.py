@@ -542,7 +542,7 @@ def _coach_stats_payload(text: str) -> str:
 
 
 def api_coach_stats():
-    """Proxy /club/statistics/coach with 1h SQLite cache."""
+    """Proxy /club/statistics/coach with the 6h stats cache."""
     passed, via_query = security._gate()
     if not passed:
         return security._forbidden()
