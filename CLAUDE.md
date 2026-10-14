@@ -31,8 +31,8 @@ System Python only, no venv: `python3 -m pip install --break-system-packages`.
 
 ## Clubs
 
-The `CLUBS` and `COMPARE_CLUBS` arrays in courtview.html are Racketeer, Padium Canary Wharf and Rocket Padel Ilford. The selected club is stored in localStorage `cv-club-id`.
-- **Racketeer** left Padelmates on 2026-07-01 (booking revenue fell to £0). Background polling is off. On-demand proxying still works, and the archive views cover 2026-06-15 to 06-30.
+The `CLUBS` array in courtview.html is Racketeer, Padium Canary Wharf and Rocket Padel Ilford; `COMPARE_CLUBS` is Padium and Rocket only. The selected club is stored in localStorage `cv-club-id`.
+- **Racketeer** left Padelmates on 2026-07-01 (booking revenue fell to £0). Background polling is off. Every live `/api/*` route returns 410 for it; only `/api/archive/*` serves it (archive views cover 2026-06-15 to 06-30).
 - **Stratford (TPC Matchpoint)** was removed on 2026-07-24: a second platform with no revenue data, not worth maintaining.
 
 ## Upstream

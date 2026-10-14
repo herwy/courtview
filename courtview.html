@@ -858,6 +858,7 @@ nav {
 
 <script>
 /* CONFIG */
+const RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80";
 const CLUBS = [
   { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer',           sub: 'North Acton, London',  courts: 11 },
   { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium Canary Wharf', sub: 'Canary Wharf, London', courts: 7  },
@@ -865,14 +866,16 @@ const CLUBS = [
 ];
 let CLUB = (localStorage.getItem('cv-club-id') && CLUBS.find(c => c.id === localStorage.getItem('cv-club-id')))
   ? localStorage.getItem('cv-club-id')
-  : CLUBS[0].id;
+  : (CLUBS.find(c => c.id !== RACKETEER_CLUB_ID) || CLUBS[0]).id;
 let clubInfo = CLUBS.find(c => c.id === CLUB) || CLUBS[0];
 // All API calls route via same-origin /api/* (courtview proxy on port 8766)
 const API = '/api';
 async function apiFetch(url, opts) {
   return fetch(url, opts);
 }
-const RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80";
+const RACKETEER_ARCHIVED_MSG = 'Racketeer stopped taking bookings on Padelmates on 1 July 2026. Archived data (15 to 30 June) is on the Club Info, Stats and Revenue tabs.';
+const NOT_ARCHIVED_HTML = '<div class="empty">Not archived for Racketeer</div>';
+const isArchivedClub = id => id === RACKETEER_CLUB_ID;
 const TZ      = 'Europe/London';
 const H_START = 6;
 const H_END   = 24;
@@ -884,7 +887,6 @@ const NOTIFY_KEY = 'racketeer-watches-v1';
 const WEEK_DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 
 const COMPARE_CLUBS = [
-  { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer · North Acton' },
   { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium · Canary Wharf' },
   { id: '788fa2c66535421aabc60fd27f941c42', name: 'Rocket Padel · Ilford' }
 ];
@@ -942,6 +944,7 @@ function fmtGBP(n) {
 
 /* API */
 async function fetchDay(date, clubId = CLUB) {
+  if (isArchivedClub(clubId)) throw new Error('archived club');
   const url = `${API}/player/player_booking/all_courts_slot_prices_v3?club_id=${clubId}&start_datetime=${dayStart(date)}&end_datetime=${dayEnd(date)}`;
   const r = await apiFetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -955,6 +958,7 @@ async function fetchDay(date, clubId = CLUB) {
 
 /* Fetch all bookings for a day and build a map: "courtId:cellIdx" -> activity object */
 async function fetchDayActivities(date, clubId = CLUB) {
+  if (isArchivedClub(clubId)) throw new Error('archived club');
   const start = dayStart(date);
   const end   = dayEnd(date);
   const r = await apiFetch(`/api/day-activities?club_id=${clubId}&start=${start}&end=${end}`);
@@ -1372,6 +1376,7 @@ function renderDowChart(dowSignal) {
 
 async function loadRealHeatmap() {
   const clubId = CLUB;
+  if (isArchivedClub(clubId)) return;
   const hmOut  = document.getElementById('hmOut');
   try {
     const r = await fetch(`/api/heatmap?club_id=${clubId}`);
@@ -1382,16 +1387,22 @@ async function loadRealHeatmap() {
       activeHmBuckets  = d.buckets      || null;
       activeHourSignal = d.hour_signal  || null;
       activeDowSignal  = d.dow_signal   || null;
+      recsHmDone = true;
       updateRecs();
       const dowOut = document.getElementById('statsDowOut');
       if (dowOut) dowOut.innerHTML = renderDowChart(d.dow_signal) || '<div class="empty">No occupancy data yet.</div>';
     }
   } catch(e) {
-    if (CLUB === clubId)
+    if (CLUB === clubId) {
       hmOut.innerHTML = `<div class="empty">Occupancy data building in background.</div>`;
+      recsHmDone = true;
+      updateRecs();
+    }
   }
 }
 
+let recsMonthDone = false; // Best Times: month availability finished loading
+let recsHmDone    = false; // Best Times: heatmap finished loading
 let activeHmBuckets  = null; // product matrix
 let activeHourSignal = null; // {hr: norm 0-1} how busy each hour vs peak
 let activeDowSignal  = null; // {dow: norm 0-1} how busy each DOW vs peak
@@ -1465,7 +1476,11 @@ function buildRecs() {
 }
 
 function renderRecs(recs) {
-  if (!recs || !recs.length) return '<div class="empty">Loading recommendations...</div>';
+  if (!recs || !recs.length) {
+    return (recsMonthDone && recsHmDone)
+      ? '<div class="empty">No availability data</div>'
+      : '<div class="empty">Loading recommendations...</div>';
+  }
   const ranks = ['Best pick','2nd','3rd','4th'];
 
   function sigCol(pct) {
@@ -1560,7 +1575,26 @@ function fillStats(courts) {
 }
 
 /* LOAD DAY · availability + bookings in parallel */
+function setAvailabilityArchived(on) {
+  const hide = (id, h) => { const el = document.getElementById(id); if (el) el.style.display = h ? 'none' : ''; };
+  hide('dateTabs', on);
+  hide('notifyToggle', on);
+  const panel = document.getElementById('notifyPanel');
+  if (panel && on) panel.classList.remove('open');
+  hide('notifyPanel', on);
+  const booked = document.getElementById('sBooked');
+  if (booked && on) booked.parentElement.style.display = 'none';
+  if (!on) return;
+  ['sCourts', 'sSlots', 'sBest', 'sPeak'].forEach(id => { document.getElementById(id).textContent = '-'; });
+  document.getElementById('gridOut').innerHTML = `<div class="empty">${esc(RACKETEER_ARCHIVED_MSG)}</div>`;
+  document.getElementById('b2bOut').innerHTML = '';
+  document.getElementById('hmOut').innerHTML = '<div class="empty">Not available for Racketeer.</div>';
+  document.getElementById('recOut').innerHTML = '<div class="empty">No availability data</div>';
+}
+
 async function loadDay(date) {
+  if (isArchivedClub(CLUB)) { setAvailabilityArchived(true); return; }
+  setAvailabilityArchived(false);
   document.getElementById('gridOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
   document.getElementById('b2bOut').innerHTML  = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Calculating...</div>';
   try {
@@ -1589,6 +1623,7 @@ const jitter = (min, max) => min + Math.floor(Math.random() * (max - min));
 /* LOAD 28 DAYS · batch endpoint first, fall back to serial fetchDay */
 async function loadMonth() {
   const clubId = CLUB;
+  if (isArchivedClub(clubId)) return;
   let batchOk = false;
   try {
     const r = await fetch(`/api/month?club_id=${encodeURIComponent(clubId)}`);
@@ -1615,7 +1650,7 @@ async function loadMonth() {
         } catch { monthCache[k] = []; }
         await sleep(jitter(180, 420));
       }
-      if (CLUB === clubId && missing.length) updateRecs();
+      if (CLUB === clubId) { recsMonthDone = true; updateRecs(); }
     }
   } catch (_) {}
 
@@ -1629,7 +1664,7 @@ async function loadMonth() {
         if (i < 27) await sleep(jitter(180, 420));
       }
     }
-    updateRecs();
+    if (CLUB === clubId) { recsMonthDone = true; updateRecs(); }
   }
 }
 
@@ -1732,7 +1767,7 @@ function renderWatchChips() {
 
 /* NOTIFY · polling */
 async function pollWatches() {
-  if (!watches.length) return;
+  if (!watches.length || isArchivedClub(CLUB)) return;
   try {
     const today = new Date();
     const key = cacheKey(CLUB, isoDate(today));
@@ -1766,28 +1801,29 @@ function fireNotification(w, court, slot, price) {
 /* ARCHIVE SELECTOR HELPERS */
 
 async function populateArchiveSelect(selectEl, table) {
+  let snaps = [];
   try {
     const r = await fetch(`/api/archive/snapshots?club_id=${RACKETEER_CLUB_ID}&table=${table}`);
-    const snaps = r.ok ? await r.json() : [];
-    selectEl.innerHTML = '<option value="">Live</option>';
-    if (snaps.length === 0) {
-      const hint = document.createElement('option');
-      hint.disabled = true;
-      hint.textContent = 'No snapshots yet - check back after the next refresh';
-      selectEl.appendChild(hint);
-    }
-    for (const snap of snaps) {
-      const opt = document.createElement('option');
-      opt.value = snap.captured_at;
-      opt.textContent = snap.label;
-      selectEl.appendChild(opt);
-    }
-  } catch (_) {
-    selectEl.innerHTML = '<option value="">Live</option>';
+    snaps = r.ok ? await r.json() : [];
+  } catch (_) { snaps = []; }
+  selectEl.innerHTML = '';
+  if (snaps.length === 0) {
+    const hint = document.createElement('option');
+    hint.disabled = true;
+    hint.textContent = 'No archived snapshots';
+    selectEl.appendChild(hint);
+    return snaps;
   }
+  for (const snap of snaps) {
+    const opt = document.createElement('option');
+    opt.value = snap.captured_at;
+    opt.textContent = snap.label;
+    selectEl.appendChild(opt);
+  }
+  return snaps;
 }
 
-function buildArchiveSelector(tabName, table, onSnapshotLoad, onLive) {
+function buildArchiveSelector(tabName) {
   const div = document.createElement('div');
   div.className = 'archive-selector';
   div.id = `archive-selector-${tabName}`;
@@ -1796,34 +1832,32 @@ function buildArchiveSelector(tabName, table, onSnapshotLoad, onLive) {
   label.textContent = 'Archive: ';
   const sel = document.createElement('select');
   sel.id = `archive-select-${tabName}`;
-  sel.innerHTML = '<option value="">Live</option>';
-  populateArchiveSelect(sel, table);
   sel.addEventListener('change', () => {
-    if (sel.value === '') {
-      onLive();
-    } else {
-      onSnapshotLoad(sel.value);
-    }
+    if (sel.value && div._onSnapshotLoad) div._onSnapshotLoad(sel.value);
   });
   div.appendChild(label);
   div.appendChild(sel);
   return div;
 }
 
-function showArchiveSelector(tabName, table, onSnapshotLoad, onLive) {
+async function showArchiveSelector(tabName, table, onSnapshotLoad) {
   const containerId = `archive-selector-${tabName}`;
-  let div = document.getElementById(containerId);
   const tabEl = document.getElementById(`tab-${tabName}`);
   if (!tabEl) return;
+  let div = document.getElementById(containerId);
   if (!div) {
-    div = buildArchiveSelector(tabName, table, onSnapshotLoad, onLive);
+    div = buildArchiveSelector(tabName);
     tabEl.insertAdjacentElement('afterbegin', div);
-  } else {
-    // Re-populate on each tab focus
-    const sel = document.getElementById(`archive-select-${tabName}`);
-    if (sel) populateArchiveSelect(sel, table);
   }
+  div._onSnapshotLoad = onSnapshotLoad;
   div.style.display = 'flex';
+  const sel = document.getElementById(`archive-select-${tabName}`);
+  const previous = sel.value;
+  const snaps = await populateArchiveSelect(sel, table);
+  if (CLUB !== RACKETEER_CLUB_ID || !snaps.length) return;
+  const keep = snaps.some(x => String(x.captured_at) === previous);
+  sel.value = keep ? previous : String(snaps[0].captured_at);
+  onSnapshotLoad(sel.value);
 }
 
 /* CLUB INFO TAB */
@@ -1842,7 +1876,7 @@ function renderClubInfoData(data, clubId) {
   const activities = Array.isArray(data.activities) ? data.activities : [];
   membershipCache[clubId] = memberships;
   out.innerHTML = renderClubInfo(profile, memberships, credits, extras, activities);
-  loadMemberCounts(clubId);
+  if (!isArchivedClub(clubId)) loadMemberCounts(clubId);
 }
 
 async function loadClubInfo() {
@@ -1860,16 +1894,14 @@ async function loadClubInfo() {
           const r = await fetch(`/api/archive/club-info?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}`);
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           const data = await r.json();
+          if (CLUB !== RACKETEER_CLUB_ID) return;
           renderClubInfoData(data, RACKETEER_CLUB_ID);
         } catch (e) {
-          out.innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
+          if (CLUB === RACKETEER_CLUB_ID) out.innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
         }
-      },
-      () => {
-        clubLoaded = false;
-        loadClubInfo();
       }
     );
+    return;
   }
 
   try {
@@ -1886,6 +1918,7 @@ async function loadClubInfo() {
 let membersByPlan = {};
 
 async function loadMemberCounts(clubId) {
+  if (isArchivedClub(clubId)) return;
   let d;
   try {
     const r = await fetch(`/api/membership-members?club_id=${encodeURIComponent(clubId)}`);
@@ -2233,6 +2266,9 @@ async function loadStats() {
   statsLoaded = true;
 
   if (CLUB === RACKETEER_CLUB_ID) {
+    document.getElementById('statsMonthLbl').textContent = 'Archive';
+    ['statsKpiOut', 'statsMixOut', 'statsCoachOut'].forEach(id => { document.getElementById(id).innerHTML = NOT_ARCHIVED_HTML; });
+    ['statsMixMeta', 'statsCoachMeta'].forEach(id => { document.getElementById(id).textContent = ''; });
     showArchiveSelector(
       'stats',
       'heatmap',
@@ -2243,16 +2279,14 @@ async function loadStats() {
           const r = await fetch(`/api/archive/heatmap?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}`);
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           const d = await r.json();
+          if (CLUB !== RACKETEER_CLUB_ID) return;
           if (dowOut) dowOut.innerHTML = renderDowChart(d.dow_signal) || '<div class="empty">No occupancy data in snapshot.</div>';
         } catch (e) {
-          if (dowOut) dowOut.innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
+          if (CLUB === RACKETEER_CLUB_ID && dowOut) dowOut.innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
         }
-      },
-      () => {
-        statsLoaded = false;
-        loadStats();
       }
     );
+    return;
   }
 
   try {
@@ -2446,6 +2480,7 @@ async function loadCourtPopularity() {
   const clubId = CLUB;
   const out = document.getElementById('cpOut');
   if (!out) return;
+  if (isArchivedClub(clubId)) { out.innerHTML = NOT_ARCHIVED_HTML; return; }
   try {
     const r = await fetch(`/api/court-popularity?club_id=${clubId}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2625,45 +2660,55 @@ async function loadRevenue(resetPay = true) {
   const mySeq = ++revReqSeq;
   const { start, end } = revMonthBounds(revMonth);
 
-  document.getElementById('revMonthLbl').textContent =
-    revMonth.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
-  document.getElementById('revNext').disabled = revMonth.getMonth() === new Date().getMonth()
-    && revMonth.getFullYear() === new Date().getFullYear();
-
   if (isRacketeer) {
+    document.getElementById('revPrev').disabled = true;
+    document.getElementById('revNext').disabled = true;
+    document.getElementById('revLeadersOut').innerHTML = NOT_ARCHIVED_HTML;
+    document.getElementById('revLeadersMeta').textContent = '';
+    document.getElementById('revPayMeta').textContent = '';
+    document.getElementById('revLoadMoreWrap').hidden = true;
+    revPaySeq++;
     showArchiveSelector(
       'revenue',
       'financial',
       async (ts) => {
+        const isCurrent = () => CLUB === RACKETEER_CLUB_ID && mySeq === revReqSeq;
+        document.getElementById('revMonthLbl').textContent =
+          new Date(Number(ts) * 1000).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: TZ }) + ' (archive)';
         document.getElementById('revSummaryOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
         document.getElementById('revDowOut').innerHTML = '';
         document.getElementById('revSubOut').innerHTML = '';
         document.getElementById('revPayOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading archive...</div>';
-        document.getElementById('revLoadMoreWrap').hidden = true;
         const [sumR, payR] = await Promise.allSettled([
           fetch(`/api/archive/financial?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}&endpoint=revenue-summary`),
           fetch(`/api/archive/financial?club_id=${RACKETEER_CLUB_ID}&captured_at=${ts}&endpoint=payment-history`),
         ]);
         try {
           if (!sumR.value?.ok) throw new Error(`HTTP ${sumR.value?.status}`);
-          await renderRevenueSummary(await sumR.value.json());
+          const sumJson = await sumR.value.json();
+          if (!isCurrent()) return;
+          await renderRevenueSummary(sumJson);
         } catch (e) {
-          document.getElementById('revSummaryOut').innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
+          if (isCurrent()) document.getElementById('revSummaryOut').innerHTML = `<div class="empty">Could not load archive snapshot: ${esc(e.message)}</div>`;
         }
         try {
           const payData = payR.value?.ok ? await payR.value.json() : null;
+          if (!isCurrent()) return;
           if (!payData) throw new Error('no payment data');
           renderPayTable(payData.payments || [], { archived: true });
         } catch (e) {
-          document.getElementById('revPayOut').innerHTML = `<div class="empty">Payment history unavailable for this snapshot.</div>`;
+          if (isCurrent()) document.getElementById('revPayOut').innerHTML = `<div class="empty">Payment history unavailable for this snapshot.</div>`;
         }
-      },
-      () => {
-        revLoaded = false;
-        loadRevenue();
       }
     );
+    return;
   }
+
+  document.getElementById('revMonthLbl').textContent =
+    revMonth.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  document.getElementById('revPrev').disabled = false;
+  document.getElementById('revNext').disabled = revMonth.getMonth() === new Date().getMonth()
+    && revMonth.getFullYear() === new Date().getFullYear();
 
   if (resetPay) {
     document.getElementById('revPayOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
@@ -2915,6 +2960,8 @@ async function switchClub(id) {
   activeDowSignal  = null;
   activitiesCache  = {};
   compareCache     = {};
+  recsMonthDone    = false;
+  recsHmDone       = false;
   localStorage.setItem('cv-club-id', id);
   setClubLabel();
   renderClubDrop();
