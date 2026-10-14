@@ -23,6 +23,7 @@ Quirks:
 - `filtered_activities` and `online_payment_history` reject `limit` > 100 with a 422.
 - `online_payment_history` returns oldest first, about 100 per day per club, and rejects ranges over about 31 days. See Payment history paging below.
 - `activity_type` must be `Book Court`, `Match`, `Tournament` or `Training`. `Match` returns `Book Court|OPEN_MATCH` records.
+- `financial/v2`: `total_combined_subscription_payments` is always 0 and `total_combined_payments` excludes subscriptions. The real subscription figure is `total_current_subscription_amount` (= sum of `membership_subscription`). The dashboard's `revTotalInclSubs()` adds it to the total for the Revenue and Compare tabs.
 - Rocket Padel Ilford times out on full-month activity ranges. The backend retries with the last 14 days.
 
 ## Racketeer guard

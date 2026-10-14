@@ -2182,7 +2182,7 @@ async function runCompare() {
         try {
           const r = await apiFetch(`/api/revenue-summary?club_id=${club.id}&start=${moStart}&end=${moEnd}`);
           const d = r.ok ? await r.json() : null;
-          compareCache[rk] = d?.total_combined_payments ?? null;
+          compareCache[rk] = revTotalInclSubs(d).val;
         } catch (_) { compareCache[rk] = null; }
       })(),
       (async () => {
@@ -2595,23 +2595,42 @@ function fmtRevPct(raw) {
   return n;
 }
 
+/* Padelmates' total_combined_payments excludes subscriptions, and
+   total_combined_subscription_payments is always 0; the real subscription
+   figure is total_current_subscription_amount. Returns {val, pct}. */
+function revTotalInclSubs(d) {
+  if (!d || d.total_combined_payments == null) return { val: null, pct: null };
+  const subs = Number(d.total_current_subscription_amount) || 0;
+  const prevSubs = Number(d.total_previous_period_subscription_amount) || 0;
+  const val = d.total_combined_payments + subs;
+  const totalPct = fmtRevPct(d.total_combined_payments_diff_percentage);
+  if (totalPct == null || totalPct <= -100) return { val, pct: null };
+  const prev = d.total_combined_payments / (1 + totalPct / 100) + prevSubs;
+  return { val, pct: prev > 0 ? (val / prev - 1) * 100 : null };
+}
+
 async function renderRevenueSummary(sumData) {
   if (!sumData) {
     document.getElementById('revSummaryOut').innerHTML = '<div class="empty">Revenue data unavailable.</div>';
     return;
   }
+  const total = revTotalInclSubs(sumData);
+  const field = (key, label) => ({ label, val: sumData[`total_combined_${key}_payments`],
+    pct: fmtRevPct(sumData[`total_combined_${key}_payments_diff_percentage`]) });
   const cats = [
-    { key: 'total_combined_payments',              pct: 'total_combined_payments_diff_percentage',              label: 'Total revenue' },
-    { key: 'total_combined_booking_payments',      pct: 'total_combined_booking_payments_diff_percentage',      label: 'Court bookings' },
-    { key: 'total_combined_training_payments',     pct: 'total_combined_training_payments_diff_percentage',     label: 'Training' },
-    { key: 'total_combined_tournament_payments',   pct: 'total_combined_tournament_payments_diff_percentage',   label: 'Tournaments' },
-    { key: 'total_combined_subscription_payments', pct: 'total_combined_subscription_payments_diff_percentage', label: 'Subscriptions' },
-    { key: 'total_combined_match_payments',        pct: 'total_combined_match_payments_diff_percentage',        label: 'Open matches' },
+    { label: 'Total incl. subscriptions', val: total.val, pct: total.pct },
+    field('booking', 'Court bookings'),
+    field('training', 'Training'),
+    field('tournament', 'Tournaments'),
+    { label: 'Subscriptions', val: sumData.total_current_subscription_amount,
+      pct: fmtRevPct(sumData.total_subscription_diff_percentage) },
+    field('credit', 'Credits'),
+    field('match', 'Open matches'),
   ];
   let h = '<div class="rev-cards">';
   for (const cat of cats) {
-    const val = sumData[cat.key];
-    const pct = fmtRevPct(sumData[cat.pct]);
+    const val = cat.val;
+    const pct = cat.pct;
     const pctHtml = pct != null
       ? `<div class="rev-card-t ${pct >= 0 ? 'up' : 'down'}">${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% vs prior</div>`
       : '';
