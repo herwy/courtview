@@ -11,6 +11,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
@@ -155,7 +156,10 @@ class Base(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.up = Upstream()
-        p = mock.patch.object(cv.cffi_requests, "get", self.up)
+        cv.UPSTREAM.reset()
+        self.addCleanup(cv.UPSTREAM.reset)
+        p = mock.patch.object(cv.UPSTREAM, "_new_session",
+                              lambda: types.SimpleNamespace(get=self.up, close=lambda: None))
         p.start()
         self.addCleanup(p.stop)
         self.client = cv.app.test_client()
@@ -192,18 +196,41 @@ class SchemaTests(Base):
 
 class AstTests(unittest.TestCase):
     def test_cffi_calls_compliant(self):
+        """All upstream traffic goes through UpstreamClient: cffi_requests and TARGET appear nowhere
+        else, and inside the class every Session and session.get carries APP_HEADERS and chrome110."""
         tree = ast.parse(open(os.path.join(REPO, "courtview.py")).read())
-        total = bad = 0
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "UpstreamClient")
+        inside = {id(n) for n in ast.walk(cls)}
+        outside = []
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "cffi_requests":
-                total += 1
-                kws = {k.arg: k.value for k in node.keywords}
-                ok = isinstance(kws.get("headers"), ast.Name) and kws["headers"].id == "APP_HEADERS" \
-                    and isinstance(kws.get("impersonate"), ast.Constant) and kws["impersonate"].value == "chrome110"
-                bad += 0 if ok else 1
-        print(f"\nAST: {total} cffi calls, {bad} non-compliant")
-        self.assertGreater(total, 0)
+            if isinstance(node, ast.Name) and node.id == "cffi_requests" and id(node) not in inside:
+                if not isinstance(node.ctx, ast.Store):
+                    outside.append(("cffi_requests", node.lineno))
+            if isinstance(node, ast.Name) and node.id == "TARGET" and isinstance(node.ctx, ast.Load) \
+                    and id(node) not in inside:
+                outside.append(("TARGET", node.lineno))
+            if isinstance(node, ast.Attribute) and node.attr == "TARGET" and id(node) not in inside:
+                outside.append(("TARGET", node.lineno))
+        sess = gets = bad = 0
+        for node in ast.walk(cls):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            recv = node.func.value
+            is_ctor = isinstance(recv, ast.Name) and recv.id == "cffi_requests" and node.func.attr == "Session"
+            is_get = isinstance(recv, ast.Name) and recv.id == "session" and node.func.attr == "get"
+            if not (is_ctor or is_get):
+                continue
+            sess += is_ctor
+            gets += is_get
+            kws = {k.arg: k.value for k in node.keywords}
+            ok = isinstance(kws.get("headers"), ast.Name) and kws["headers"].id == "APP_HEADERS" \
+                and isinstance(kws.get("impersonate"), ast.Constant) and kws["impersonate"].value == "chrome110"
+            bad += 0 if ok else 1
+        print(f"\nAST: {sess} Session ctor, {gets} session.get calls, {bad} non-compliant, "
+              f"{len(outside)} cffi_requests/TARGET uses outside UpstreamClient")
+        self.assertEqual(outside, [])
+        self.assertGreaterEqual(sess, 1)
+        self.assertGreaterEqual(gets, 1)
         self.assertEqual(bad, 0)
 
 

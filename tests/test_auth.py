@@ -5,6 +5,7 @@ import io
 import os
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -42,12 +43,13 @@ class AuthBase(unittest.TestCase):
         cv._dashboard_bytes = b"<html>dash</html>"
         self.client = cv.app.test_client()
         self.urls = []
-        self.get_patch = mock.patch.object(cv.cffi_requests, "get", side_effect=self._fake_get)
-        self.post_patch = mock.patch.object(cv.cffi_requests, "post")
+        cv.UPSTREAM.reset()
+        self.addCleanup(cv.UPSTREAM.reset)
+        self.get_patch = mock.patch.object(
+            cv.UPSTREAM, "_new_session",
+            lambda: types.SimpleNamespace(get=self._fake_get, close=lambda: None))
         self.get_patch.start()
-        self.post = self.post_patch.start()
         self.addCleanup(self.get_patch.stop)
-        self.addCleanup(self.post_patch.stop)
         self.addCleanup(lambda: os.path.exists(self.path) and os.remove(self.path))
 
     def _fake_get(self, url, **kw):
@@ -151,7 +153,6 @@ class TestSurface(AuthBase):
         for method in ("post", "put", "delete", "patch"):
             r = getattr(self.client, method)("/api/club/?club_id=" + PADIUM)
             self.assertIn(r.status_code, (403, 405), method)
-        self.post.assert_not_called()
         self.assertEqual(self.urls, [])
 
     def test_options_has_no_cors(self):

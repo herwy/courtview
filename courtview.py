@@ -24,6 +24,7 @@ import re
 import sqlite3
 import concurrent.futures
 import threading
+import tempfile
 import time
 import urllib.request
 from collections import deque
@@ -69,6 +70,255 @@ ALLOWED_PATHS = {
 
 # Path that uses the SQLite availability cache
 CACHED_PATH = "/player/player_booking/all_courts_slot_prices_v3"
+
+
+# ---------------------------------------------------------------------------
+# Upstream client: the only code that talks to Padelmates
+# ---------------------------------------------------------------------------
+
+class UpstreamError(Exception):
+    """Network failure talking to Padelmates (after retries)."""
+
+
+class UpstreamUnavailable(UpstreamError):
+    """Breaker open, or no concurrency slot obtained in time. Nothing was sent."""
+
+
+def _iso_z(epoch_s: float) -> str:
+    return datetime.fromtimestamp(epoch_s, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class UpstreamClient:
+    """Pooled curl_cffi sessions with a concurrency cap, bounded retries (429/5xx, jittered
+    backoff), a circuit breaker and per-endpoint counters. Logs path and status only, never
+    the query string (it carries club ids and time windows) or an exception message."""
+
+    BACKOFF = (0.5, 2.0)
+
+    def __init__(self, base=None, max_concurrency=4, max_retries=2, breaker_threshold=5,
+                 breaker_cooldown=300.0, retry_after_max=10.0, acquire_timeout=20.0):
+        self._base = base or TARGET
+        self._max_concurrency = max_concurrency
+        self._max_retries = max_retries
+        self._breaker_threshold = breaker_threshold
+        self._breaker_cooldown = breaker_cooldown
+        self._retry_after_max = retry_after_max
+        self._acquire_timeout = acquire_timeout
+        self._sleep = time.sleep
+        self._clock = time.monotonic
+        self._rand = random.uniform
+        self._lock = threading.Lock()
+        self._pool_lock = threading.Lock()
+        self.reset()
+
+    def reset(self) -> None:
+        """Clear sessions, counters and breaker (tests, and the constructor)."""
+        with self._pool_lock:
+            old = list(getattr(self, "_pool", []))
+            self._pool = []
+        for session in old:
+            try:
+                session.close()
+            except Exception:
+                pass
+        self._sem = threading.BoundedSemaphore(self._max_concurrency)
+        with self._lock:
+            self._started_at = time.time()
+            self._eps = {}
+            self._totals = {"calls": 0, "ok": 0, "non_200": 0, "errors": 0, "retries": 0, "rejected": 0}
+            self._failures = 0
+            self._opened_at = None
+            self._probing = False
+
+    def _new_session(self):
+        return cffi_requests.Session(impersonate="chrome110", headers=APP_HEADERS)
+
+    # -- pool ---------------------------------------------------------------
+    def _checkout(self):
+        with self._pool_lock:
+            if self._pool:
+                return self._pool.pop()
+        return self._new_session()
+
+    def _checkin(self, session) -> None:
+        with self._pool_lock:
+            if len(self._pool) < self._max_concurrency:
+                self._pool.append(session)
+                return
+        try:
+            session.close()
+        except Exception:
+            pass
+
+    # -- breaker ------------------------------------------------------------
+    def _admit(self) -> bool:
+        """Raise UpstreamUnavailable when open. Returns True when this call is the half-open probe."""
+        with self._lock:
+            if self._opened_at is None:
+                return False
+            if self._clock() - self._opened_at < self._breaker_cooldown or self._probing:
+                self._totals["rejected"] += 1
+                raise UpstreamUnavailable("circuit open")
+            self._probing = True
+        print("[upstream] breaker half-open, probing", flush=True)
+        return True
+
+    def _breaker_result(self, failure: bool) -> None:
+        msg = None
+        with self._lock:
+            if self._probing:
+                self._probing = False
+                if failure:
+                    self._opened_at = self._clock()
+                    msg = "[upstream] breaker re-opened after failed probe"
+                else:
+                    self._opened_at = None
+                    self._failures = 0
+                    msg = "[upstream] breaker closed"
+            elif failure:
+                self._failures += 1
+                if self._opened_at is None and self._failures >= self._breaker_threshold:
+                    self._opened_at = self._clock()
+                    msg = f"[upstream] breaker opened after {self._failures} failures"
+            else:
+                self._failures = 0
+        if msg:
+            print(msg, flush=True)
+
+    def _probe_abort(self, probe: bool) -> None:
+        if probe:
+            with self._lock:
+                self._probing = False
+
+    # -- one attempt --------------------------------------------------------
+    def _attempt(self, url: str, key: str, timeout: float):
+        """Returns (response, exception). Holds a slot only while the request is in flight."""
+        if not self._sem.acquire(timeout=self._acquire_timeout):
+            with self._lock:
+                self._totals["rejected"] += 1
+            raise UpstreamUnavailable("no upstream slot")
+        session = None
+        try:
+            session = self._checkout()
+            with self._lock:
+                ep = self._eps.setdefault(key, {"calls": 0, "ok": 0, "non_200": 0, "errors": 0,
+                                                "last_status": None, "last_at": None})
+                ep["calls"] += 1
+                self._totals["calls"] += 1
+            try:
+                resp = session.get(url, headers=APP_HEADERS, impersonate="chrome110", timeout=timeout)
+            except Exception as exc:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                session = None
+                with self._lock:
+                    ep["errors"] += 1
+                    ep["last_at"] = _iso_z(time.time())
+                    self._totals["errors"] += 1
+                print(f"[upstream] error {type(exc).__name__} path={key}", flush=True)
+                return None, exc
+            status = resp.status_code
+            with self._lock:
+                ep["last_status"] = status
+                ep["last_at"] = _iso_z(time.time())
+                if status == 200:
+                    ep["ok"] += 1
+                    self._totals["ok"] += 1
+                else:
+                    ep["non_200"] += 1
+                    self._totals["non_200"] += 1
+            if status != 200:
+                print(f"[upstream] non-200 status={status} path={key}", flush=True)
+            return resp, None
+        finally:
+            if session is not None:
+                self._checkin(session)
+            self._sem.release()
+
+    @staticmethod
+    def _retry_after(resp):
+        hdrs = getattr(resp, "headers", None)
+        if not hdrs:
+            return None
+        raw = None
+        for name in ("Retry-After", "retry-after"):
+            try:
+                raw = hdrs[name]
+                break
+            except (KeyError, TypeError, LookupError):
+                continue
+        try:
+            return max(0, int(str(raw).strip()))
+        except (TypeError, ValueError):
+            return None
+
+    def get(self, path: str, params=None, *, timeout: float = 15):
+        """GET base+path(+params). Returns the response (any status); raises UpstreamError
+        on network failure after retries and UpstreamUnavailable when nothing was sent."""
+        url = self._base + path
+        if params:
+            url += "?" + urlencode(params)
+        probe = self._admit()
+        retries = 0
+        while True:
+            try:
+                resp, exc = self._attempt(url, path, timeout)
+            except UpstreamUnavailable:
+                self._probe_abort(probe)
+                raise
+            delay = None
+            if exc is not None:
+                retryable = True
+            else:
+                status = resp.status_code
+                if status == 429:
+                    ra = self._retry_after(resp)
+                    if ra is None:
+                        retryable = True
+                    elif ra <= self._retry_after_max:
+                        retryable, delay = True, float(ra)
+                    else:
+                        retryable = False
+                else:
+                    retryable = status in (502, 503, 504)
+            if retryable and retries < self._max_retries:
+                if delay is None:
+                    delay = self.BACKOFF[min(retries, len(self.BACKOFF) - 1)] * self._rand(0.5, 1.5)
+                retries += 1
+                with self._lock:
+                    self._totals["retries"] += 1
+                self._sleep(delay)
+                continue
+            failure = exc is not None or resp.status_code >= 500 or resp.status_code == 429
+            self._breaker_result(failure)
+            if exc is not None:
+                raise UpstreamError(type(exc).__name__)
+            return resp
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            if self._probing:
+                state = "half_open"
+            elif self._opened_at is not None:
+                state = "open"
+            else:
+                state = "closed"
+            opened_until = None
+            if self._opened_at is not None:
+                remaining = max(0.0, self._breaker_cooldown - (self._clock() - self._opened_at))
+                opened_until = _iso_z(time.time() + remaining)
+            return {
+                "started_at": _iso_z(self._started_at),
+                "breaker": {"state": state, "consecutive_failures": self._failures,
+                            "opened_until": opened_until},
+                "totals": dict(self._totals),
+                "endpoints": {k: dict(v) for k, v in self._eps.items()},
+            }
+
+
+UPSTREAM = UpstreamClient()
 
 # Clubs and court counts for server-side heatmap fetching
 # Racketeer excluded: migrated off Padelmates to a different booking app (2026-07-01)
@@ -881,10 +1131,12 @@ def store_cached(club_id: str, start: str, end: str, payload: str) -> None:
     # Don't cache empty-list v1 responses - they pre-date the v2 switch and are useless
     try:
         parsed = json.loads(payload)
-        if isinstance(parsed, list) and len(parsed) == 0:
-            return
     except (ValueError, TypeError):
-        pass
+        return
+    # Only real availability is cached: a dict with "allSlots" or a non-empty list.
+    # An error dict such as {"detail": ...} or an empty list is never stored.
+    if not ((isinstance(parsed, dict) and "allSlots" in parsed) or (isinstance(parsed, list) and parsed)):
+        return
     conn = _db_connect()
     try:
         conn.execute(
@@ -1218,46 +1470,75 @@ def api_membership_members():
         except sqlite3.Error:
             pass
 
-    counts: dict = {}
-    try:
-        plans_r = cffi_requests.get(
-            f"{TARGET}/club/membership/?" + urlencode({"club_id": club_id}),
-            headers=APP_HEADERS,
-            timeout=15,
-            impersonate="chrome110",
-        )
-        if plans_r.status_code == 200:
-            plans_raw = plans_r.json()
-            # Upstream returns either a list directly or {"memberships": [...]}
-            if isinstance(plans_raw, dict):
-                plans_raw = plans_raw.get("memberships") or []
-            for plan in plans_raw if isinstance(plans_raw, list) else []:
-                if not isinstance(plan, dict):
-                    continue
-                pid = plan.get("_id") or plan.get("id")
-                total = plan.get("total_members")
-                if pid:
-                    counts[str(pid)] = total if isinstance(total, int) and not isinstance(total, bool) else 0
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 502
+    def _respond(body: str, stale: bool = False):
+        resp = Response(body, status=200, content_type="application/json")
+        if stale:
+            resp.headers["X-CourtView-Stale"] = "1"
+        if via_query:
+            _set_cookie(resp, via_query)
+        return resp
 
-    payload = json.dumps({"club_id": club_id, "counts": counts})
-    if counts:
+    with _single_flight_lock("members:" + club_id):
+        if not force_refresh:
+            try:
+                conn = _db_connect()
+                row = conn.execute(
+                    "SELECT payload FROM membership_members_cache WHERE club_id=? AND fetched_at>?",
+                    (club_id, int(_now()) - 6 * 3600),
+                ).fetchone()
+                conn.close()
+                if row:
+                    return _respond(_counts_payload(club_id, row[0]))
+            except sqlite3.Error:
+                pass
+
+        counts: dict = {}
+        ok = False
         try:
-            conn = _db_connect()
-            conn.execute(
-                "INSERT OR REPLACE INTO membership_members_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
-                (club_id, payload, int(_now())),
-            )
-            conn.commit()
-            conn.close()
-        except sqlite3.Error:
-            pass
+            plans_r = UPSTREAM.get("/club/membership/", {"club_id": club_id}, timeout=15)
+            if plans_r.status_code == 200:
+                plans_raw = plans_r.json()
+                # Upstream returns either a list directly or {"memberships": [...]}
+                if isinstance(plans_raw, dict):
+                    plans_raw = plans_raw.get("memberships") or []
+                if isinstance(plans_raw, list):
+                    ok = True
+                    for plan in plans_raw:
+                        if not isinstance(plan, dict):
+                            continue
+                        pid = plan.get("_id") or plan.get("id")
+                        total = plan.get("total_members")
+                        if pid and isinstance(total, int) and not isinstance(total, bool):
+                            counts[str(pid)] = total
+        except Exception:
+            ok = False
 
-    resp = Response(payload, status=200, content_type="application/json")
-    if via_query:
-        _set_cookie(resp, via_query)
-    return resp
+        if not ok:
+            # Failure is never cached: serve the last stored counts of any age, else 502.
+            try:
+                conn = _db_connect()
+                row = conn.execute(
+                    "SELECT payload FROM membership_members_cache WHERE club_id=?", (club_id,)).fetchone()
+                conn.close()
+                if row:
+                    return _respond(_counts_payload(club_id, row[0]), stale=True)
+            except sqlite3.Error:
+                pass
+            return jsonify({"error": "upstream error"}), 502
+
+        payload = json.dumps({"club_id": club_id, "counts": counts})
+        if counts:
+            try:
+                conn = _db_connect()
+                conn.execute(
+                    "INSERT OR REPLACE INTO membership_members_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
+                    (club_id, payload, int(_now())),
+                )
+                conn.commit()
+                conn.close()
+            except sqlite3.Error:
+                pass
+        return _respond(payload)
 
 
 @app.route("/api/club-info", methods=["GET"])
@@ -1288,49 +1569,82 @@ def api_club_info():
         except sqlite3.Error:
             pass
 
-    results: dict = {"profile": None, "memberships": None, "credits": None, "extras": None}
-    club_id_qs = urlencode({"club_id": club_id})
-    targets = [
-        ("profile",     f"/club/?{club_id_qs}"),
-        ("memberships", f"/club/membership/?{club_id_qs}"),
-        ("credits",     f"/club/creditpackage/?{club_id_qs}"),
-        ("extras",      f"/club/club_extras?{club_id_qs}"),
-    ]
+    def _respond(body: str, stale: bool = False):
+        resp = Response(body, status=200, content_type="application/json")
+        if stale:
+            resp.headers["X-CourtView-Stale"] = "1"
+        if via_query:
+            _set_cookie(resp, via_query)
+        return resp
 
-    def _fetch(key: str, path: str) -> None:
+    with _single_flight_lock("clubinfo:" + club_id):
+        if not force_refresh:
+            try:
+                conn = _db_connect()
+                row = conn.execute(
+                    "SELECT payload FROM club_info_cache WHERE club_id=? AND fetched_at>?",
+                    (club_id, int(_now()) - 600),
+                ).fetchone()
+                conn.close()
+                if row:
+                    return _respond(_scrub_json_text(row[0]))
+            except sqlite3.Error:
+                pass
+
+        results: dict = {"profile": None, "memberships": None, "credits": None, "extras": None}
+        good: dict = {}
+        params = {"club_id": club_id}
+        targets = [
+            ("profile",     "/club/"),
+            ("memberships", "/club/membership/"),
+            ("credits",     "/club/creditpackage/"),
+            ("extras",      "/club/club_extras"),
+        ]
+
+        def _fetch(key: str, path: str) -> None:
+            good[key] = False
+            try:
+                r = UPSTREAM.get(path, params, timeout=15)
+                if r.status_code == 200:
+                    d = r.json()
+                    if key == "extras" and isinstance(d, dict):
+                        results[key] = d.get("data", [])
+                    else:
+                        results[key] = d
+                    good[key] = True
+            except Exception:
+                results[key] = None
+
+        threads = [threading.Thread(target=_fetch, args=(k, p), daemon=True) for k, p in targets]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+
+        payload = json.dumps(_scrub_pii(results))
+        if all(good.get(k) for k, _ in targets):
+            try:
+                conn = _db_connect()
+                conn.execute(
+                    "INSERT OR REPLACE INTO club_info_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
+                    (club_id, payload, int(_now())),
+                )
+                conn.commit()
+                conn.close()
+            except sqlite3.Error:
+                pass
+            return _respond(payload)
+
+        # A sub-fetch failed: never cache the partial result. Prefer the last complete row.
         try:
-            r = cffi_requests.get(TARGET + path, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-            if r.status_code == 200:
-                d = r.json()
-                if key == "extras" and isinstance(d, dict):
-                    results[key] = d.get("data", [])
-                else:
-                    results[key] = d
-        except Exception:
-            results[key] = None
-
-    threads = [threading.Thread(target=_fetch, args=(k, p), daemon=True) for k, p in targets]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=20)
-
-    payload = json.dumps(_scrub_pii(results))
-    try:
-        conn = _db_connect()
-        conn.execute(
-            "INSERT OR REPLACE INTO club_info_cache (club_id, payload, fetched_at) VALUES (?,?,?)",
-            (club_id, payload, int(_now())),
-        )
-        conn.commit()
-        conn.close()
-    except sqlite3.Error:
-        pass
-
-    resp = Response(payload, status=200, content_type="application/json")
-    if via_query:
-        _set_cookie(resp, via_query)
-    return resp
+            conn = _db_connect()
+            row = conn.execute("SELECT payload FROM club_info_cache WHERE club_id=?", (club_id,)).fetchone()
+            conn.close()
+            if row:
+                return _respond(_scrub_json_text(row[0]), stale=True)
+        except sqlite3.Error:
+            pass
+        return _respond(payload)
 
 
 @app.route("/api/booked-hours", methods=["GET"])
@@ -1352,17 +1666,15 @@ def api_booked_hours():
             if via_query: _set_cookie(resp, via_query)
             return resp
         # Stampede guard: only one thread fetches per key; others wait and re-check cache
-        with _STATS_FETCH_MUTEX:
-            lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
-        with lock:
+        with _single_flight_lock(ck):
             cached = get_stats_cached(ck)  # re-check after acquiring
             if cached:
                 resp = Response(cached, status=200, content_type="application/json")
                 if via_query: _set_cookie(resp, via_query)
                 return resp
             try:
-                url = f"{TARGET}/home/activity/get_booked_hours?" + urlencode({"club_id": club_id, "start_datetime": start, "end_datetime": end})
-                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+                r = UPSTREAM.get("/home/activity/get_booked_hours",
+                                 {"club_id": club_id, "start_datetime": start, "end_datetime": end}, timeout=15)
                 payload = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
                 if r.status_code == 200:
                     set_stats_cached(ck, payload)
@@ -1370,8 +1682,8 @@ def api_booked_hours():
                 return jsonify({"error": str(exc)}), 502
     else:
         try:
-            url = f"{TARGET}/home/activity/get_booked_hours?" + urlencode({"club_id": club_id, "start_datetime": start, "end_datetime": end})
-            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+            r = UPSTREAM.get("/home/activity/get_booked_hours",
+                             {"club_id": club_id, "start_datetime": start, "end_datetime": end}, timeout=15)
             payload = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
         except Exception as exc:
             return jsonify({"error": str(exc)}), 502
@@ -1402,9 +1714,7 @@ def api_activity_summary():
             if via_query: _set_cookie(resp, via_query)
             return resp
         # Stampede guard: only one thread fetches per key
-        with _STATS_FETCH_MUTEX:
-            lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
-        with lock:
+        with _single_flight_lock(ck):
             cached = get_stats_cached(ck)
             if cached:
                 resp = Response(cached, status=200, content_type="application/json")
@@ -1437,14 +1747,13 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
         coach_rates: dict = {}
 
         def _fetch_mix():
-            url = f"{TARGET}/home/activity/filtered_activities?" + urlencode(
-                {"club_id": club_id, "start": s, "end": e, "limit": PAGE_SIZE})
-            return cffi_requests.get(url, headers=APP_HEADERS, timeout=12, impersonate="chrome110")
+            return UPSTREAM.get("/home/activity/filtered_activities",
+                                {"club_id": club_id, "start": s, "end": e, "limit": PAGE_SIZE}, timeout=12)
 
         def _fetch_training():
-            url = f"{TARGET}/home/activity/filtered_activities?" + urlencode(
-                {"club_id": club_id, "start": s, "end": e, "activity_type": "Training", "limit": 100})
-            return cffi_requests.get(url, headers=APP_HEADERS, timeout=12, impersonate="chrome110")
+            return UPSTREAM.get("/home/activity/filtered_activities",
+                                {"club_id": club_id, "start": s, "end": e, "activity_type": "Training",
+                                 "limit": 100}, timeout=12)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             f_mix = ex.submit(_fetch_mix)
@@ -1452,6 +1761,9 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
             r  = f_mix.result()
             rt = f_train.result()
 
+        if r.status_code != 200:
+            # A failed mix call must not become "zero bookings": raise so the 14-day fallback runs.
+            raise UpstreamError(f"filtered_activities status {r.status_code}")
         if r.status_code == 200:
             for act in r.json().get("activities", []):
                 atype = act.get("activity_type") or "Other"
@@ -1478,19 +1790,19 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
                     except (TypeError, ValueError):
                         pass
 
-        return counts, total, coach_rates
+        return counts, total, coach_rates, rt.status_code == 200
 
     used_start = start
     try:
-        counts, total, coach_rates = _attempt(start, end)
+        counts, total, coach_rates, train_ok = _attempt(start, end)
     except Exception:
-        # Full range timed out - retry with last 14 days
+        # Full range failed or timed out - retry with last 14 days
         fallback_start = str(int(end) - FALLBACK_MS)
         try:
-            counts, total, coach_rates = _attempt(fallback_start, end)
+            counts, total, coach_rates, train_ok = _attempt(fallback_start, end)
             used_start = fallback_start
-        except Exception as exc:
-            return (jsonify({"error": str(exc)}), 502)
+        except Exception:
+            return (jsonify({"error": "upstream error"}), 502)
 
     coach_rate_summary = {
         _pseudonym("coach", cid): {
@@ -1502,7 +1814,7 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
 
     range_days = round((int(end) - int(used_start)) / (24 * 60 * 60 * 1000))
     payload = json.dumps({"total": total, "counts": counts, "coach_rates": coach_rate_summary, "range_days": range_days})
-    if ck:
+    if ck and train_ok:
         set_stats_cached(ck, payload)
     return payload
 
@@ -1542,11 +1854,11 @@ def api_day_activities():
     skip = 0
     try:
         for page_num in range(MAX_PAGES):
-            url = f"{TARGET}/home/activity/filtered_activities?" + urlencode(
-                {"club_id": club_id, "start": start, "end": end, "limit": PAGE_SIZE, "skip": skip})
-            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+            r = UPSTREAM.get("/home/activity/filtered_activities",
+                             {"club_id": club_id, "start": start, "end": end, "limit": PAGE_SIZE, "skip": skip},
+                             timeout=15)
             if r.status_code != 200:
-                break
+                return jsonify({"error": "upstream error"}), 502
             data = r.json()
             page = data.get("activities", [])
             all_activities.extend(page)
@@ -1585,18 +1897,15 @@ def api_revenue_summary():
             resp = Response(cached, status=200, content_type="application/json")
             if via_query: _set_cookie(resp, via_query)
             return resp
-        with _STATS_FETCH_MUTEX:
-            lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
-        with lock:
+        with _single_flight_lock(ck):
             cached = get_stats_cached(ck)
             if cached:
                 resp = Response(cached, status=200, content_type="application/json")
                 if via_query: _set_cookie(resp, via_query)
                 return resp
             try:
-                url = f"{TARGET}/club/statistics/financial/v2?" + urlencode(
-                    {"club_ids": club_id, "start_time": start, "end_time": end})
-                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+                r = UPSTREAM.get("/club/statistics/financial/v2",
+                                 {"club_ids": club_id, "start_time": start, "end_time": end}, timeout=15)
                 payload = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
                 if r.status_code == 200:
                     set_stats_cached(ck, payload)
@@ -1604,9 +1913,8 @@ def api_revenue_summary():
                 return jsonify({"error": str(exc)}), 502
     else:
         try:
-            url = f"{TARGET}/club/statistics/financial/v2?" + urlencode(
-                {"club_ids": club_id, "start_time": start, "end_time": end})
-            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+            r = UPSTREAM.get("/club/statistics/financial/v2",
+                             {"club_ids": club_id, "start_time": start, "end_time": end}, timeout=15)
             payload = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
         except Exception as exc:
             return jsonify({"error": str(exc)}), 502
@@ -1624,9 +1932,9 @@ def _fetch_payment_page(club_id: str, start_ms, end_ms, skip: int, limit: int = 
     Every record is reduced by _sanitise_payment before returning, so no caller ever holds a name,
     email, phone or receipt URL. List length equals the upstream page length (paging relies on it).
     Exceptions (network, JSON) propagate to the caller."""
-    url = f"{TARGET}/club/statistics/online_payment_history?" + urlencode(
-        {"club_id": club_id, "start_datetime": start_ms, "end_datetime": end_ms, "limit": limit, "skip": skip})
-    r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+    r = UPSTREAM.get("/club/statistics/online_payment_history",
+                     {"club_id": club_id, "start_datetime": start_ms, "end_datetime": end_ms,
+                      "limit": limit, "skip": skip}, timeout=15)
     if r.status_code != 200:
         return None
     page = r.json()
@@ -1819,9 +2127,7 @@ def _sync_payment_day(club_id: str, day: str) -> tuple:
         return (0, 0, 0)
     day_start, day_next = _london_day_bounds(day)
     key = f"paysync:{club_id}:{day}"
-    with _STATS_FETCH_MUTEX:
-        lock = _STATS_FETCH_LOCKS.setdefault(key, threading.Lock())
-    with lock:
+    with _single_flight_lock(key):
         conn = _db_connect()
         try:
             row = conn.execute(
@@ -2241,18 +2547,15 @@ def api_coach_stats():
             resp = Response(cached, status=200, content_type="application/json")
             if via_query: _set_cookie(resp, via_query)
             return resp
-        with _STATS_FETCH_MUTEX:
-            lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
-        with lock:
+        with _single_flight_lock(ck):
             cached = get_stats_cached(ck)
             if cached:
                 resp = Response(cached, status=200, content_type="application/json")
                 if via_query: _set_cookie(resp, via_query)
                 return resp
             try:
-                url = f"{TARGET}/club/statistics/coach?" + urlencode(
-                    {"club_ids": club_id, "start_time": start, "end_time": end})
-                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+                r = UPSTREAM.get("/club/statistics/coach",
+                                 {"club_ids": club_id, "start_time": start, "end_time": end}, timeout=15)
                 payload = _coach_stats_payload(r.content.decode("utf-8", errors="replace"))
                 if r.status_code == 200:
                     set_stats_cached(ck, payload)
@@ -2260,15 +2563,42 @@ def api_coach_stats():
                 return jsonify({"error": str(exc)}), 502
     else:
         try:
-            url = f"{TARGET}/club/statistics/coach?" + urlencode(
-                {"club_ids": club_id, "start_time": start, "end_time": end})
-            r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+            r = UPSTREAM.get("/club/statistics/coach",
+                             {"club_ids": club_id, "start_time": start, "end_time": end}, timeout=15)
             payload = _coach_stats_payload(r.content.decode("utf-8", errors="replace"))
         except Exception as exc:
             return jsonify({"error": str(exc)}), 502
     if r.status_code != 200:
         return jsonify({"error": "upstream error"}), 502
     resp = Response(payload, status=200, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+def _job_states() -> dict:
+    """job_state rows as {job: {last_run, ok, calls, errors}} (empty when the table is missing)."""
+    try:
+        conn = _db_connect()
+        try:
+            rows = conn.execute("SELECT job, last_run, ok, calls, errors FROM job_state").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {}
+    return {r[0]: {"last_run": _iso_z(r[1]) if r[1] else None, "ok": bool(r[2]),
+                   "calls": r[3], "errors": r[4]} for r in rows}
+
+
+@app.route("/api/health", methods=["GET"])
+def api_health():
+    """Upstream client counters, breaker state and background job state. No personal data."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    body = UPSTREAM.snapshot()
+    body["jobs"] = _job_states()
+    resp = Response(json.dumps(body), status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
@@ -2297,41 +2627,48 @@ def proxy(p):
             if via_query:
                 _set_cookie(resp, via_query)
             return resp
+        # Single-flight: concurrent misses for one window share one upstream fetch
+        lock = _single_flight_lock(f"avail:{club_id}:{start}:{end}")
+    else:
+        lock = None
 
-    # Random jitter before forwarding - breaks timing correlation
-    time.sleep(random.uniform(0.05, 0.18))
-
-    # Build upstream URL
-    url = TARGET + full_path
+    qs_pairs = []
     if request.query_string:
         # Strip our own token param before forwarding
         qs_pairs = [(k, v) for k, v in parse_qsl(request.query_string.decode()) if k != "token"]
-        if qs_pairs:
-            url += "?" + urlencode(qs_pairs)
 
-    try:
-        upstream = cffi_requests.get(
-            url,
-            headers=APP_HEADERS,
-            timeout=15,
-            impersonate="chrome110",
-        )
+    def _forward():
+        # Random jitter before forwarding - breaks timing correlation
+        time.sleep(random.uniform(0.05, 0.18))
+        try:
+            upstream = UPSTREAM.get(full_path, qs_pairs, timeout=15)
 
-        ct = upstream.headers.get("content-type", "application/json")
-        body = upstream.content
-        if "json" in ct.lower():
-            body = _scrub_json_text(upstream.content.decode("utf-8", errors="replace")).encode("utf-8")
+            ct = upstream.headers.get("content-type", "application/json")
+            body = upstream.content
+            if "json" in ct.lower():
+                body = _scrub_json_text(upstream.content.decode("utf-8", errors="replace")).encode("utf-8")
 
-        # Store the scrubbed payload if this is the availability path
-        if full_path == CACHED_PATH and upstream.status_code == 200:
+            # Store the scrubbed payload only when it is real availability (never an error dict)
+            if full_path == CACHED_PATH and upstream.status_code == 200:
+                club_id, start, end = _cache_key(request.args.to_dict())
+                store_cached(club_id, start, end, body.decode("utf-8", errors="replace"))
+
+            return Response(body, status=upstream.status_code, content_type=ct)
+        except Exception as exc:
+            resp = jsonify({"error": str(exc)})
+            resp.status_code = 502
+            return resp
+
+    if lock is None:
+        resp = _forward()
+    else:
+        with lock:
             club_id, start, end = _cache_key(request.args.to_dict())
-            store_cached(club_id, start, end, body.decode("utf-8", errors="replace"))
-
-        resp = Response(body, status=upstream.status_code, content_type=ct)
-
-    except Exception as exc:
-        resp = jsonify({"error": str(exc)})
-        resp.status_code = 502
+            cached = get_cached(club_id, start, end)
+            if cached is not None:
+                resp = Response(_scrub_json_text(cached), status=200, content_type="application/json")
+            else:
+                resp = _forward()
 
     if via_query:
         _set_cookie(resp, via_query)
@@ -2455,15 +2792,10 @@ def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
     print(f"[heatmap] fetching operational stats for club {club_id}")
     now_ms   = int(_now() * 1000)
     start_ms = now_ms - 30 * 24 * 3600 * 1000  # 30 days
-    url = (
-        f"{TARGET}/club/statistics/operational"
-        f"?club_ids={club_id}"
-        f"&selected_duration=month"
-        f"&start_time={start_ms}&end_time={now_ms}"
-        f"&user_timezone=Europe/London"
-    )
     try:
-        r    = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+        r    = UPSTREAM.get("/club/statistics/operational",
+                            {"club_ids": club_id, "selected_duration": "month", "start_time": start_ms,
+                             "end_time": now_ms, "user_timezone": "Europe/London"}, timeout=15)
         data = r.json()
     except Exception as exc:
         print(f"[heatmap] fetch error for club {club_id}: {exc}")
@@ -2603,13 +2935,7 @@ def _refresh_loop() -> None:
                     params.append(("start_datetime", start))
                 if end:
                     params.append(("end_datetime", end))
-                url = TARGET + CACHED_PATH + "?" + urlencode(params)
-                r = cffi_requests.get(
-                    url,
-                    headers=APP_HEADERS,
-                    timeout=15,
-                    impersonate="chrome110",
-                )
+                r = UPSTREAM.get(CACHED_PATH, params, timeout=15)
                 if r.status_code == 200:
                     store_cached(club_id, start, end,
                                  _scrub_json_text(r.content.decode("utf-8", errors="replace")))
@@ -2642,9 +2968,15 @@ def _refresh_loop() -> None:
 _STARTUP_LOCK = threading.Lock()
 _STARTUP_DONE = False
 
-# Per-key stampede guard for stats cache (same pattern as membership)
+# Per-key single-flight locks (stats cache, club-info, membership, availability, payment days)
 _STATS_FETCH_LOCKS: dict = {}
 _STATS_FETCH_MUTEX = threading.Lock()
+
+
+def _single_flight_lock(key: str) -> threading.Lock:
+    """One lock per key: concurrent misses queue up and re-check the cache under the lock."""
+    with _STATS_FETCH_MUTEX:
+        return _STATS_FETCH_LOCKS.setdefault(key, threading.Lock())
 
 
 def _startup() -> None:

@@ -5,6 +5,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -43,7 +44,7 @@ def rec(tid, created, name="Ana Smith", email=None, amount="10.00 GBP", status="
 
 
 class FakeUpstream:
-    """Replaces cv.cffi_requests.get; serves in-memory records oldest first."""
+    """Stands in for the session's get (via cv.UPSTREAM._new_session); serves in-memory records oldest first."""
 
     def __init__(self, records):
         self.records = records
@@ -90,7 +91,10 @@ class Base(unittest.TestCase):
 
     def up(self, records):
         fake = FakeUpstream(records)
-        p = mock.patch.object(cv.cffi_requests, "get", fake)
+        cv.UPSTREAM.reset()
+        self.addCleanup(cv.UPSTREAM.reset)
+        p = mock.patch.object(cv.UPSTREAM, "_new_session",
+                              lambda: types.SimpleNamespace(get=fake, close=lambda: None))
         p.start()
         self.addCleanup(p.stop)
         return fake
