@@ -598,8 +598,8 @@ nav {
   <div class="n-sep" role="separator"></div>
   <div class="club-wrap">
     <button class="club-btn" id="clubBtn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Switch club">
-      <span class="club-btn-name" id="clubBtnName">Racketeer</span>
-      <span class="club-btn-sub"  id="clubBtnSub">North Acton, London</span>
+      <span class="club-btn-name" id="clubBtnName">Loading clubs...</span>
+      <span class="club-btn-sub"  id="clubBtnSub"></span>
       <svg class="chev" viewBox="0 0 12 12" fill="none" aria-hidden="true">
         <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
@@ -849,16 +849,12 @@ nav {
 
 <script>
 /* CONFIG */
-const RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80";
-const CLUBS = [
-  { id: '5111764d9bb14be3adbdb8e133e8bd80', name: 'Racketeer',           sub: 'North Acton, London',  courts: 11 },
-  { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium Canary Wharf', sub: 'Canary Wharf, London', courts: 7  },
-  { id: '788fa2c66535421aabc60fd27f941c42',  name: 'Rocket Padel Ilford', sub: 'Ilford, London',       courts: 12 }
-];
-let CLUB = (localStorage.getItem('cv-club-id') && CLUBS.find(c => c.id === localStorage.getItem('cv-club-id')))
-  ? localStorage.getItem('cv-club-id')
-  : (CLUBS.find(c => c.id !== RACKETEER_CLUB_ID) || CLUBS[0]).id;
-let clubInfo = CLUBS.find(c => c.id === CLUB) || CLUBS[0];
+// Club list comes from /api/clubs (courtview_app/clubs.py); boot() fills these before anything club-dependent runs
+let RACKETEER_CLUB_ID = null;
+let CLUBS = [];
+let COMPARE_CLUBS = [];
+let CLUB = null;
+let clubInfo = null;
 // All API calls route via same-origin /api/* (courtview proxy on port 8766)
 const API = '/api';
 async function apiFetch(url, opts) {
@@ -866,7 +862,7 @@ async function apiFetch(url, opts) {
 }
 const RACKETEER_ARCHIVED_MSG = 'Racketeer stopped taking bookings on Padelmates on 1 July 2026. Archived data (15 to 30 June) is on the Club Info, Stats and Revenue tabs.';
 const NOT_ARCHIVED_HTML = '<div class="empty">Not archived for Racketeer</div>';
-const isArchivedClub = id => id === RACKETEER_CLUB_ID;
+const isArchivedClub = id => CLUBS.some(c => c.id === id && c.archived);
 const TZ      = 'Europe/London';
 const H_START = 6;
 const H_END   = 24;
@@ -876,11 +872,6 @@ const HM_HRS  = Array.from({length:16}, (_,i) => i + 7);
 const NOTIFY_POLL_MS = 10 * 60 * 1000;
 const NOTIFY_KEY = 'racketeer-watches-v1';
 const WEEK_DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-
-const COMPARE_CLUBS = [
-  { id: '47d2eb0db7194a9dbd29783c3a2a82ad', name: 'Padium · Canary Wharf' },
-  { id: '788fa2c66535421aabc60fd27f941c42', name: 'Rocket Padel · Ilford' }
-];
 
 /* STATE */
 let dayData     = null;
@@ -2864,7 +2855,7 @@ function setupTabs() {
 function renderClubDrop() {
   const drop = document.getElementById('clubDrop');
   drop.innerHTML = CLUBS.map(c => `
-    <div class="club-opt${c.id === CLUB ? ' active' : ''}" role="option" data-club-id="${c.id}" aria-selected="${c.id === CLUB}">
+    <div class="club-opt${c.id === CLUB ? ' active' : ''}" role="option" data-club-id="${esc(c.id)}" aria-selected="${c.id === CLUB}">
       <span class="club-opt-text">
         <span class="club-opt-name">${esc(c.name)}</span>
         <span class="club-opt-sub">${esc(c.sub)}</span>
@@ -2994,21 +2985,50 @@ function warmOtherClubs() {
 }
 
 /* INIT */
-document.querySelectorAll('.dbtn[data-dur]').forEach(b => b.addEventListener('click', () => pickDur(b)));
-setupTabs();
-setupRevenue();
-buildDateTabs();
-setupNotifyPanel();
-setupClubSelector();
-Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]).then(() => {
-  loadStats(); loadCourtPopularity();
-  setTimeout(() => { if (!clubLoaded) loadClubInfo(); }, 200);
-  setTimeout(() => { if (!compareLoaded) loadCompare(); }, 500);
-  setTimeout(() => { if (!revLoaded) loadRevenue(); }, 3000);
-  // Warm server-side cache for all other clubs so switching is instant
-  setTimeout(() => warmOtherClubs(), 6000);
-});
-setInterval(pollWatches, NOTIFY_POLL_MS);
+function showClubsError() {
+  document.getElementById('clubBtnName').textContent = 'Club list unavailable';
+  document.getElementById('clubBtnSub').textContent  = 'Reload to try again';
+  document.getElementById('gridOut').innerHTML = '<div class="empty">Could not load the club list. Reload the page to try again.</div>';
+}
+
+async function boot() {
+  let list;
+  try {
+    const r = await fetch('/api/clubs');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    list = (d && Array.isArray(d.clubs) ? d.clubs : []).filter(c => c && typeof c.id === 'string' && typeof c.name === 'string');
+    if (!list.length) throw new Error('empty club list');
+  } catch (_) {
+    showClubsError();
+    return;
+  }
+  CLUBS = list.map(c => ({ id: c.id, name: c.name, sub: String(c.sub || ''), courts: c.courts, archived: !!c.archived }));
+  COMPARE_CLUBS = list.filter(c => c.compare).map(c => ({ id: c.id, name: c.short || c.name }));
+  RACKETEER_CLUB_ID = (CLUBS.find(c => c.archived) || {}).id || null;
+  const stored = localStorage.getItem('cv-club-id');
+  CLUB = (stored && CLUBS.find(c => c.id === stored))
+    ? stored
+    : (CLUBS.find(c => !c.archived) || CLUBS[0]).id;
+  clubInfo = CLUBS.find(c => c.id === CLUB) || CLUBS[0];
+
+  document.querySelectorAll('.dbtn[data-dur]').forEach(b => b.addEventListener('click', () => pickDur(b)));
+  setupTabs();
+  setupRevenue();
+  buildDateTabs();
+  setupNotifyPanel();
+  setupClubSelector();
+  Promise.all([loadDay(new Date()), loadMonth(), loadRealHeatmap()]).then(() => {
+    loadStats(); loadCourtPopularity();
+    setTimeout(() => { if (!clubLoaded) loadClubInfo(); }, 200);
+    setTimeout(() => { if (!compareLoaded) loadCompare(); }, 500);
+    setTimeout(() => { if (!revLoaded) loadRevenue(); }, 3000);
+    // Warm server-side cache for all other clubs so switching is instant
+    setTimeout(() => warmOtherClubs(), 6000);
+  });
+  setInterval(pollWatches, NOTIFY_POLL_MS);
+}
+boot();
 
 (function() {
   const _tip = document.createElement('div');

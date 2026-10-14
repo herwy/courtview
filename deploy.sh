@@ -38,7 +38,7 @@ ok()  { echo "[$(ts)] OK  $*"; }
 err() { echo "[$(ts)] ERR $*" >&2; }
 
 RELEASE_TS="$(date -u '+%Y%m%dT%H%M%SZ')"
-FILES=(courtview.py courtview.html web cv_*.py(N)
+FILES=(courtview.py courtview.html courtview_app web cv_*.py(N)
        courtview.service notify-telegram@.service courtview-recovery@.service courtview-recovery@.timer
        courtview-backup.service courtview-backup.timer courtview-backup.pub.asc
        requirements.in requirements.txt)
@@ -67,7 +67,7 @@ fi
 
 # 1. Stage the release (one ssh): upload, normalise ownership and modes, precompile, then rename into place
 log "--- staging release ---"
-( cd "$SCRIPT_DIR" && COPYFILE_DISABLE=1 tar --no-xattrs -cf - "${FILES[@]}" ) 2>/dev/null \
+( cd "$SCRIPT_DIR" && COPYFILE_DISABLE=1 tar --no-xattrs --exclude '__pycache__' --exclude '*.pyc' -cf - "${FILES[@]}" ) 2>/dev/null \
   | ssh "$RPI_HOST" "set -e; umask 022; mkdir -p /opt/courtview/releases; chmod 755 /opt/courtview /opt/courtview/releases; \
       P=/opt/courtview/releases/$RELEASE_TS.partial; rm -rf \$P; mkdir \$P; tar xf - -C \$P --no-same-owner 2>/dev/null; \
       chown -R root:root \$P; find \$P -type d -exec chmod 755 {} +; find \$P -type f -exec chmod 644 {} +; \

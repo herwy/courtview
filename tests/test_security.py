@@ -39,7 +39,7 @@ EXPECTED_ENDPOINTS = frozenset({
     "api_membership_members", "api_club_info", "api_booked_hours", "api_activity_summary",
     "api_day_activities", "api_revenue_summary", "api_payment_history", "api_payment_leaderboard",
     "api_archive_snapshots", "api_archive_heatmap", "api_archive_club_info", "api_archive_financial",
-    "api_coach_stats", "api_health",
+    "api_coach_stats", "api_health", "api_clubs",
 })
 SEC_HEADERS = {"X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
 

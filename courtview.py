@@ -38,6 +38,8 @@ from flask import Flask, Response, g, jsonify, make_response, request
 from werkzeug.security import safe_join
 from curl_cffi import requests as cffi_requests
 
+from courtview_app import clubs
+
 # ---------------------------------------------------------------------------
 # Constants - carried over verbatim from padelmates-proxy.py
 # ---------------------------------------------------------------------------
@@ -337,15 +339,9 @@ class UpstreamClient:
 
 UPSTREAM = UpstreamClient()
 
-# Clubs and court counts for server-side heatmap fetching
-# Racketeer excluded: migrated off Padelmates to a different booking app (2026-07-01)
-HEATMAP_CLUBS = [
-    {"id": "47d2eb0db7194a9dbd29783c3a2a82ad", "courts": 7},   # Padium Canary Wharf
-    {"id": "788fa2c66535421aabc60fd27f941c42",  "courts": 12},  # Rocket Padel Ilford
-]
-
-# Clubs whose payments are synced into the local `payments` table (never Racketeer)
-PAYMENT_SYNC_CLUB_IDS     = frozenset(c["id"] for c in HEATMAP_CLUBS)
+# Club config lives in courtview_app/clubs.py (single source, also served at /api/clubs)
+HEATMAP_CLUBS = clubs.HEATMAP_CLUBS
+PAYMENT_SYNC_CLUB_IDS     = clubs.PAYMENT_SYNC_CLUB_IDS
 PAYMENTS_PAGE_SIZE        = 100
 PAYMENTS_MAX_PAGES_PER_DAY = 200            # 20,000 payments/day safety cap
 PAYMENTS_SYNC_WORKERS     = 3
@@ -366,13 +362,13 @@ PAYMENTS_QUEUE_MAX = 16                  # queued on-demand payment windows
 
 # Racketeer migrated off Padelmates (2026-07-01). The club_id excludes it from background
 # polling and drives the 410 guard (_block_archived_club); only /api/archive/* serves it.
-RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80"
+RACKETEER_CLUB_ID = clubs.RACKETEER_CLUB_ID
 ARCHIVED_ERROR    = "archived"
 ARCHIVED_MESSAGE  = "Racketeer left Padelmates on 2026-07-01; only archived snapshots are available."
 
 # Payment and membership routes serve these clubs only; the archive financial route serves Racketeer only.
-PAYMENT_CLUB_IDS = PAYMENT_SYNC_CLUB_IDS
-ARCHIVE_CLUB_IDS = frozenset({RACKETEER_CLUB_ID})
+PAYMENT_CLUB_IDS = clubs.PAYMENT_CLUB_IDS
+ARCHIVE_CLUB_IDS = clubs.ARCHIVE_CLUB_IDS
 
 # Runtime paths on RPi. COURTVIEW_DATA_DIR drives the data files; a per-path env var wins.
 # Secrets arrive via systemd LoadCredential ($CREDENTIALS_DIRECTORY/<name>), with the legacy
@@ -3022,6 +3018,18 @@ def api_health():
     body = UPSTREAM.snapshot()
     body["jobs"] = _job_states()
     resp = Response(json.dumps(body), status=200, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/clubs", methods=["GET"])
+def api_clubs():
+    """Club list for the dashboard (courtview_app/clubs.py). Static config, no personal data."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    resp = Response(json.dumps({"clubs": clubs.public_clubs()}), status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
