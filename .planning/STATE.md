@@ -44,6 +44,7 @@ last_updated: "2026-10-14T00:00:00Z"
 | 32 | Racketeer archive-only: before_request 410 guard on every live /api route (archive exempt), UI opens latest snapshot (no Live), Availability message, dropped from Compare, Padium default for new visitors, Best Times empty state. Payment history: walks back by UK-local day within selected month, pages skip+=100 per day, 25-row chunks, local timestamps. node pager tests 11/11, Playwright e2e ALL PASS, 0 Racketeer requests outside /api/archive/ | 2026-10-14 | 57a9654 | 261014-2ge-racketeer-no-live-polling-and-payment-hi |
 | 33 | Subscription revenue panel: empty-state message instead of a blank box (Padium has no paid subscriptions) | 2026-10-14 | f6ac5ca | fast |
 | 34 | Revenue cards: Subscriptions from total_current_subscription_amount (Padelmates' combined field is always 0), new Credits card, Total incl. subscriptions (also on Compare) via revTotalInclSubs() | 2026-10-14 | 1085c20 | fast |
+| 35 | Payment search + table-backed Top spenders: payments/payments_sync tables (per London day, final days never re-fetched, 10-min freshness, 30-min background loop, Padium+Rocket only), shared _fetch_payment_page (all 18 upstream calls Android headers + chrome110), /api/payment-search + /api/archive/payment-search (Racketeer), leaderboard uncapped (was 2,000; Padium Sep has 5,776 successful). Backfill 405 pages. 20 unit + 11 pager tests, Playwright ALL PASS | 2026-10-14 | a0e2549 | 261014-2xq-payment-search-with-local-payments-table |
 
 ## Session Continuity
 
