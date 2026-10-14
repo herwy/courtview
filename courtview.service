@@ -10,6 +10,8 @@ Type=simple
 User=root
 WorkingDirectory=/root/projects/courtview
 ExecStart=/usr/local/bin/gunicorn --workers 1 --worker-class gthread --threads 4 --bind 127.0.0.1:8766 --timeout 60 courtview:app
+# Schedules the silent "back" check 90s after each start (no-op unless an incident is open)
+ExecStartPost=-/usr/bin/systemd-run --quiet --collect --on-active=90 /usr/bin/python3 /root/projects/courtview/cv_notify_fail.py --check-recovery courtview
 Restart=always
 RestartSec=5
 RestartSteps=5

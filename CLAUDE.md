@@ -18,8 +18,8 @@ rpi 'systemctl is-active courtview'                                          # m
 | `courtview.py`, `courtview.html` | App and dashboard. gunicorn serves plain HTTP on 127.0.0.1:8766, with TLS terminated in front. For on-RPi curl use `http://127.0.0.1:8766/...?token=$(cat /root/.courtview_token)`; `https://localhost` hangs |
 | `courtview_cache.db` | SQLite cache and Racketeer archive (tables: see internals doc) |
 | `access.log` | JSONL access log |
-| `cv_notify_fail.py` | OnFailure notifier: "down" if still failed after 15s, one "keeps crashing" alert for 3+ crashes in 10 min (1h cooldown). State file `unit_failure_state.json` (0600) |
-| `/etc/systemd/system/courtview.service` | `Restart=always` with backoff (`RestartSteps=5`, max 5 min), `StartLimitIntervalSec=0`, `OnFailure=notify-telegram@%p`. Logs go to the journal |
+| `cv_notify_fail.py` | OnFailure notifier: 🔴 "down" (still failed after 15s) or 🔴 "crash-looping" (3+ crashes in 10 min, 1h cooldown), plus a silent 🟢 "back" via `--check-recovery` (ExecStartPost, 90s after start, needs 60s up, once per incident). Style: `~/dev/doxxnet-labs/.claude/docs/telegram-style.md`. State `unit_failure_state.json` (0600) |
+| `/etc/systemd/system/courtview.service` | `Restart=always` with backoff (`RestartSteps=5`, max 5 min), `StartLimitIntervalSec=0`, `OnFailure=notify-telegram@%p`, `ExecStartPost` recovery check. Logs go to the journal |
 | `/root/.courtview_token` | Auth token (`?token=...` sets the `courtview_token` cookie) |
 | `/root/labs/web/` | `access.html`, `access.js`, `dashboard.css`, owned by doxxnet-labs and loaded at startup |
 
