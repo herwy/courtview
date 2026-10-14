@@ -2456,15 +2456,96 @@ async function loadCourtPopularity() {
   }
 }
 
+/* PAY-PAGER:BEGIN (pure, DOM-free; tested by tests/test_pay_pager.mjs) */
+const PAY_PAGE_SIZE = 100;
+const PAY_CHUNK_MIN_ROWS = 25;
+const PAY_CHUNK_MAX_REQUESTS = 7;
+const PAY_TZ = 'Europe/London';
+const PAY_DTF = new Intl.DateTimeFormat('en-GB', {
+  timeZone: PAY_TZ, hourCycle: 'h23',
+  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+});
+
+function payParts(ms) {
+  const o = {};
+  PAY_DTF.formatToParts(new Date(ms)).forEach(p => { o[p.type] = Number(p.value); });
+  return o;
+}
+
+function londonYMD(ms) {
+  const p = payParts(ms);
+  return { y: p.year, m: p.month - 1, d: p.day };
+}
+
+function londonDayStartMs(y, m, d) {
+  const utcMid = Date.UTC(y, m, d);
+  const p = payParts(utcMid);
+  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  return utcMid - (asUtc - utcMid);
+}
+
+function payPagerStart(year, monthIdx, nowMs) {
+  const today = londonYMD(nowMs);
+  const d = (today.y === year && today.m === monthIdx)
+    ? today.d
+    : new Date(Date.UTC(year, monthIdx + 1, 0)).getUTCDate();
+  return { y: year, m: monthIdx, d, skip: 0, done: false };
+}
+
+function payPagerWindow(cursor, nowMs) {
+  const start = londonDayStartMs(cursor.y, cursor.m, cursor.d);
+  const end = Math.min(londonDayStartMs(cursor.y, cursor.m, cursor.d + 1) - 1, nowMs);
+  return { start, end };
+}
+
+function payPagerAdvance(cursor, page) {
+  if (page && page.has_more) return { ...cursor, skip: cursor.skip + PAY_PAGE_SIZE };
+  if (cursor.d > 1) return { ...cursor, d: cursor.d - 1, skip: 0 };
+  return { ...cursor, skip: 0, done: true };
+}
+
+async function payPagerRun(cursor, fetchPage, nowMs, isStale) {
+  let cur = cursor;
+  const rows = [];
+  let requests = 0;
+  let oldest = { y: cur.y, m: cur.m, d: cur.d };
+  while (!cur.done && rows.length < PAY_CHUNK_MIN_ROWS && requests < PAY_CHUNK_MAX_REQUESTS) {
+    const win = payPagerWindow(cur, nowMs);
+    const page = await fetchPage(win, cur.skip);
+    requests++;
+    if (isStale()) return { aborted: true };
+    oldest = { y: cur.y, m: cur.m, d: cur.d };
+    if (!page) return { cursor: cur, rows, requests, oldest, error: true, aborted: false };
+    rows.push(...(page.payments || []));
+    cur = payPagerAdvance(cur, page);
+  }
+  return { cursor: cur, rows, requests, oldest, error: false, aborted: false };
+}
+
+function fmtPayLocal(createdAt) {
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(createdAt || '');
+  if (!m) return createdAt;
+  const p = payParts(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
+  const z = n => String(n).padStart(2, '0');
+  return `${p.year}-${z(p.month)}-${z(p.day)} ${z(p.hour)}:${z(p.minute)}`;
+}
+
+function fmtBackTo(c) {
+  return `${c.d} ${new Date(Date.UTC(c.y, c.m, c.d)).toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' })}`;
+}
+/* PAY-PAGER:END */
+
 /* REVENUE TAB */
 let revMonth = new Date();
 revMonth.setDate(1);
 let revLoaded = false;
 let revReqSeq = 0;
-let revPayWindowEnd = new Date();
-let revPayWindowStart = new Date(revPayWindowEnd);
-revPayWindowStart.setHours(0, 0, 0, 0);
-let revPayHasMore = false;
+let revPayCursor = null;
+let revPayRows = [];
+let revPayOldest = null;
+let revPaySeq = 0;
+let revPayBusy = false;
+const PAY_LOAD_MORE_LABEL = 'Load more';
 
 function revMonthBounds(d) {
   const start = new Date(d.getFullYear(), d.getMonth(), 1);
@@ -2571,7 +2652,8 @@ async function loadRevenue(resetPay = true) {
         }
         try {
           const payData = payR.value?.ok ? await payR.value.json() : null;
-          renderPayments(payData, true);
+          if (!payData) throw new Error('no payment data');
+          renderPayTable(payData.payments || [], { archived: true });
         } catch (e) {
           document.getElementById('revPayOut').innerHTML = `<div class="empty">Payment history unavailable for this snapshot.</div>`;
         }
@@ -2584,10 +2666,8 @@ async function loadRevenue(resetPay = true) {
   }
 
   if (resetPay) {
-    revPayWindowEnd = new Date();
-    revPayWindowStart = new Date(revPayWindowEnd);
-    revPayWindowStart.setHours(0, 0, 0, 0);
     document.getElementById('revPayOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
+    document.getElementById('revPayMeta').textContent = '';
     document.getElementById('revLoadMoreWrap').hidden = true;
     document.getElementById('revSummaryOut').innerHTML = '<div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div>';
     document.getElementById('revDowOut').innerHTML = '';
@@ -2596,10 +2676,14 @@ async function loadRevenue(resetPay = true) {
     document.getElementById('revLeadersMeta').textContent = '';
   }
 
-  const [sumData, payData, leadersData] = await Promise.all([
+  revPaySeq++;
+  revPayBusy = false;
+  revPayRows = [];
+  revPayCursor = payPagerStart(revMonth.getFullYear(), revMonth.getMonth(), Date.now());
+  loadPayChunk();
+
+  const [sumData, leadersData] = await Promise.all([
     fetch(`/api/revenue-summary?club_id=${clubId}&start=${start}&end=${end}`)
-      .then(r => r.ok ? r.json() : null).catch(() => null),
-    fetch(`/api/payment-history?club_id=${clubId}&start=${revPayWindowStart.getTime()}&end=${revPayWindowEnd.getTime()}&limit=100&skip=0`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
     fetch(`/api/payment-leaderboard?club_id=${clubId}&start=${start}&end=${end}`)
       .then(r => r.ok ? r.json() : null).catch(() => null),
@@ -2612,9 +2696,59 @@ async function loadRevenue(resetPay = true) {
 
   // Top spenders
   renderLeaders(leadersData);
+}
 
-  // Payment history
-  renderPayments(payData, resetPay);
+function payKey(p) {
+  return p.transaction_id || `${p.createdAt}|${p.player_email}|${p.amount}`;
+}
+
+async function loadPayChunk() {
+  if (revPayBusy || !revPayCursor || revPayCursor.done) return;
+  const clubId = CLUB;
+  const seq = revPaySeq;
+  const btn = document.getElementById('revLoadMore');
+  const metaEl = document.getElementById('revPayMeta');
+  const outEl = document.getElementById('revPayOut');
+  const stale = () => clubId !== CLUB || seq !== revPaySeq;
+  revPayBusy = true;
+  btn.disabled = true;
+  btn.textContent = 'Loading...';
+  try {
+    const fetchPage = (win, skip) =>
+      fetch(`/api/payment-history?club_id=${clubId}&start=${win.start}&end=${win.end}&limit=${PAY_PAGE_SIZE}&skip=${skip}`)
+        .then(r => r.ok ? r.json() : null).catch(() => null);
+    const res = await payPagerRun(revPayCursor, fetchPage, Date.now(), stale);
+    if (res.aborted || stale()) return;
+    revPayCursor = res.cursor;
+    const seen = new Set(revPayRows.map(payKey));
+    res.rows.forEach(p => { if (!seen.has(payKey(p))) { seen.add(payKey(p)); revPayRows.push(p); } });
+    revPayRows.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    revPayOldest = res.oldest;
+    const wrap = document.getElementById('revLoadMoreWrap');
+    if (res.error && !revPayRows.length) {
+      outEl.innerHTML = '<div class="empty">Payment history unavailable.</div>';
+      metaEl.textContent = '';
+      wrap.hidden = false;
+      return;
+    }
+    if (revPayRows.length) {
+      renderPayTable(revPayRows, { archived: false });
+      metaEl.textContent = `${revPayRows.length} loaded · back to ${fmtBackTo(res.oldest)}`;
+    } else if (revPayCursor.done) {
+      outEl.innerHTML = '<div class="empty">No payments this month.</div>';
+      metaEl.textContent = '';
+    } else {
+      outEl.innerHTML = `<div class="empty">No payments back to ${esc(fmtBackTo(res.oldest))}</div>`;
+      metaEl.textContent = '';
+    }
+    wrap.hidden = revPayCursor.done && !res.error;
+  } finally {
+    if (seq === revPaySeq) {
+      revPayBusy = false;
+      btn.disabled = false;
+      btn.textContent = PAY_LOAD_MORE_LABEL;
+    }
+  }
 }
 
 function renderLeaders(data) {
@@ -2641,44 +2775,24 @@ function renderLeaders(data) {
   out.innerHTML = h;
 }
 
-function renderPayments(data, reset) {
-  if (!data) {
-    document.getElementById('revPayOut').innerHTML = '<div class="empty">Payment history unavailable.</div>';
-    return;
-  }
-  const payments = (data.payments || []).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-  revPayHasMore = data.has_more;
-  const metaEl = document.getElementById('revPayMeta');
-
-  if (reset) {
-    if (metaEl) metaEl.textContent = '';
-    if (!payments.length) {
-      document.getElementById('revPayOut').innerHTML = '<div class="empty">No payments this period.</div>';
-      document.getElementById('revLoadMoreWrap').hidden = true;
-      return;
-    }
-    let h = `<table class="pay-table"><thead><tr>
-      <th>Date</th><th>Player</th><th>Email</th><th>Phone</th>
-      <th>Description</th><th>Amount</th><th>Status</th><th>Receipt</th>
-    </tr></thead><tbody id="revPayBody">`;
-    h += payments.map(payRow).join('');
-    h += '</tbody></table>';
-    document.getElementById('revPayOut').innerHTML = h;
-  } else {
-    const tbody = document.getElementById('revPayBody');
-    if (tbody) tbody.insertAdjacentHTML('beforeend', payments.map(payRow).join(''));
-  }
-
-  document.getElementById('revLoadMoreWrap').hidden = !revPayHasMore;
-  if (metaEl) {
-    const rowCount = document.getElementById('revPayBody')?.querySelectorAll('tr').length ?? payments.length;
-    metaEl.textContent = `${rowCount} loaded`;
+function renderPayTable(payments, { archived }) {
+  const rows = [...payments].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  let h = `<table class="pay-table"><thead><tr>
+    <th>Date</th><th>Player</th><th>Email</th><th>Phone</th>
+    <th>Description</th><th>Amount</th><th>Status</th><th>Receipt</th>
+  </tr></thead><tbody id="revPayBody">`;
+  h += rows.map(payRow).join('');
+  h += '</tbody></table>';
+  document.getElementById('revPayOut').innerHTML = h;
+  if (archived) {
+    document.getElementById('revLoadMoreWrap').hidden = true;
+    document.getElementById('revPayMeta').textContent = `${rows.length} archived`;
   }
 }
 
 function payRow(p) {
   const ok = p.status === 'PAYMENT_SUCCESS';
-  const date = p.createdAt ? p.createdAt.split(' ')[0] : '';
+  const date = p.createdAt ? fmtPayLocal(p.createdAt) : '';
   const receipt = p.receiptUrl
     ? `<a class="pay-receipt" href="${esc(p.receiptUrl)}" target="_blank" rel="noopener">PDF</a>`
     : '';
@@ -2707,15 +2821,8 @@ function setupRevenue() {
     revLoaded = false;
     loadRevenue();
   });
-  document.getElementById('revLoadMore').addEventListener('click', async () => {
-    const clubId = CLUB;
-    const prevStart = revPayWindowStart;
-    revPayWindowEnd = new Date(prevStart.getTime() - 1);
-    revPayWindowStart = new Date(revPayWindowEnd);
-    revPayWindowStart.setHours(0, 0, 0, 0);
-    const data = await fetch(`/api/payment-history?club_id=${clubId}&start=${revPayWindowStart.getTime()}&end=${revPayWindowEnd.getTime()}&limit=100&skip=0`)
-      .then(r => r.ok ? r.json() : null).catch(() => null);
-    if (clubId === CLUB) renderPayments(data, false);
+  document.getElementById('revLoadMore').addEventListener('click', () => {
+    if (!revPayBusy) loadPayChunk();
   });
 }
 
