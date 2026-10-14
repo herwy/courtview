@@ -21,7 +21,7 @@ import threading
 import time
 import urllib.request
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from time import time as _now
 from urllib.parse import urlencode, parse_qsl
@@ -71,6 +71,17 @@ HEATMAP_CLUBS = [
     {"id": "788fa2c66535421aabc60fd27f941c42",  "courts": 12},  # Rocket Padel Ilford
 ]
 
+# Clubs whose payments are synced into the local `payments` table (never Racketeer)
+PAYMENT_SYNC_CLUB_IDS     = frozenset(c["id"] for c in HEATMAP_CLUBS)
+PAYMENTS_PAGE_SIZE        = 100
+PAYMENTS_MAX_PAGES_PER_DAY = 200            # 20,000 payments/day safety cap
+PAYMENTS_SYNC_WORKERS     = 3
+PAYMENTS_PAGE_DELAY       = (0.1, 0.25)     # jitter between pages of one day
+PAYMENTS_FRESH_SECS       = 600
+PAYMENTS_LOOP_SECS        = 1800
+PAYMENTS_MAX_WINDOW_MS    = 32 * 86400 * 1000
+PAYMENTS_SEARCH_LIMIT     = 200
+
 HEATMAP_HOURS      = list(range(7, 23))   # 07:00-22:00
 HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h (1 API call per club)
 
@@ -82,7 +93,7 @@ ARCHIVED_MESSAGE  = "Racketeer left Padelmates on 2026-07-01; only archived snap
 
 # Runtime paths on RPi
 TOKEN_PATH      = "/root/.courtview_token"
-DB_PATH         = "/root/projects/courtview/courtview_cache.db"
+DB_PATH         = os.environ.get("COURTVIEW_DB_PATH", "/root/projects/courtview/courtview_cache.db")
 ACCESS_LOG_PATH = "/root/projects/courtview/access.log"
 
 # ---------------------------------------------------------------------------
@@ -522,6 +533,38 @@ def init_db() -> None:
                    payload     TEXT,
                    endpoint    TEXT,
                    captured_at INTEGER
+               )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS payments (
+                   club_id        TEXT NOT NULL,
+                   transaction_id TEXT NOT NULL,
+                   created_utc    INTEGER NOT NULL,
+                   local_day      TEXT NOT NULL,
+                   created_at     TEXT,
+                   player_name    TEXT,
+                   player_email   TEXT,
+                   player_phone   TEXT,
+                   source_type    TEXT,
+                   description    TEXT,
+                   amount         TEXT,
+                   amount_gbp     REAL,
+                   status         TEXT,
+                   receipt_url    TEXT,
+                   synced_at      INTEGER,
+                   PRIMARY KEY (club_id, transaction_id)
+               )"""
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_club_created ON payments (club_id, created_utc)")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS payments_sync (
+                   club_id   TEXT NOT NULL,
+                   local_day TEXT NOT NULL,
+                   synced_at INTEGER,
+                   complete  INTEGER,
+                   pages     INTEGER,
+                   rows      INTEGER,
+                   PRIMARY KEY (club_id, local_day)
                )"""
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_heatmap_club   ON archive_heatmap   (club_id, captured_at)")
@@ -1383,6 +1426,18 @@ def api_revenue_summary():
     return resp
 
 
+def _fetch_payment_page(club_id: str, start_ms, end_ms, skip: int, limit: int = PAYMENTS_PAGE_SIZE):
+    """The only caller of online_payment_history. Returns the record list on 200, None otherwise.
+    Exceptions (network, JSON) propagate to the caller."""
+    url = f"{TARGET}/club/statistics/online_payment_history?" + urlencode(
+        {"club_id": club_id, "start_datetime": start_ms, "end_datetime": end_ms, "limit": limit, "skip": skip})
+    r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
+    if r.status_code != 200:
+        return None
+    page = r.json()
+    return page if isinstance(page, list) else None
+
+
 @app.route("/api/payment-history", methods=["GET"])
 def api_payment_history():
     """Paginate /club/statistics/online_payment_history server-side."""
@@ -1402,10 +1457,7 @@ def api_payment_history():
         return jsonify({"error": "club_id, start and end required"}), 400
 
     try:
-        url = f"{TARGET}/club/statistics/online_payment_history?" + urlencode(
-            {"club_id": club_id, "start_datetime": start, "end_datetime": end, "limit": limit, "skip": skip})
-        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-        items = r.json() if r.status_code == 200 else []
+        items = _fetch_payment_page(club_id, start, end, skip, limit) or []
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
@@ -1447,6 +1499,192 @@ def _aggregate_leaders(records: list) -> list:
         e["total"] = round(e["total"], 2)
         e["pct"] = round(e["total"] / max_total * 100, 1) if max_total else 0
     return leaders
+
+
+# ---------------------------------------------------------------------------
+# Local payments table: per-London-day sync
+# ---------------------------------------------------------------------------
+
+def _london_day(ms: int) -> str:
+    """Epoch ms -> 'YYYY-MM-DD' in Europe/London."""
+    return datetime.fromtimestamp(ms / 1000, tz=_LONDON_TZ).strftime("%Y-%m-%d")
+
+
+def _london_day_bounds(day: str) -> tuple:
+    """'YYYY-MM-DD' -> (start_ms, next_day_start_ms) in Europe/London (DST-safe)."""
+    d = datetime.strptime(day, "%Y-%m-%d")
+    start = datetime(d.year, d.month, d.day, tzinfo=_LONDON_TZ)
+    nxt_d = d + timedelta(days=1)
+    nxt = datetime(nxt_d.year, nxt_d.month, nxt_d.day, tzinfo=_LONDON_TZ)
+    return int(start.timestamp() * 1000), int(nxt.timestamp() * 1000)
+
+
+def _parse_created_utc(raw) -> int | None:
+    """Upstream createdAt 'YYYY-MM-DD HH:MM:SS' (UTC) -> epoch ms, None if unparseable."""
+    try:
+        dt = datetime.strptime(str(raw)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+    return int(dt.timestamp() * 1000)
+
+
+def _payment_txn_id(rec: dict) -> str:
+    tid = rec.get("transaction_id")
+    if tid:
+        return str(tid)
+    return "synthetic:" + "|".join(str(rec.get(k)) for k in ("createdAt", "player_email", "amount", "status"))
+
+
+def _upsert_payments(conn, club_id: str, records: list, synced_at: int) -> int:
+    """Upsert upstream payment records. Returns the number of rows written."""
+    n = 0
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        created = _parse_created_utc(rec.get("createdAt"))
+        if created is None:
+            continue
+        conn.execute(
+            """INSERT INTO payments (club_id, transaction_id, created_utc, local_day, created_at, player_name,
+                   player_email, player_phone, source_type, description, amount, amount_gbp, status,
+                   receipt_url, synced_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(club_id, transaction_id) DO UPDATE SET
+                   created_utc=excluded.created_utc, local_day=excluded.local_day,
+                   created_at=excluded.created_at, player_name=excluded.player_name,
+                   player_email=excluded.player_email, player_phone=excluded.player_phone,
+                   source_type=excluded.source_type, description=excluded.description,
+                   amount=excluded.amount, amount_gbp=excluded.amount_gbp, status=excluded.status,
+                   receipt_url=excluded.receipt_url, synced_at=excluded.synced_at""",
+            (club_id, _payment_txn_id(rec), created, _london_day(created), rec.get("createdAt"),
+             rec.get("player_name"), rec.get("player_email"), rec.get("player_phone"),
+             rec.get("source_type"), rec.get("description"), rec.get("amount"),
+             _parse_gbp_amount(rec.get("amount")), rec.get("status"), rec.get("receiptUrl"), synced_at),
+        )
+        n += 1
+    return n
+
+
+def _day_needs_sync(row, day_close_ms: int, now_s: float) -> bool:
+    """row = (synced_at, complete) or None. Implements the freshness/finality rule."""
+    if row is None:
+        return True
+    synced_at, complete = row
+    synced_at = synced_at or 0
+    if now_s - synced_at < PAYMENTS_FRESH_SECS:
+        return False
+    final = bool(complete) and synced_at * 1000 >= day_close_ms + PAYMENTS_FRESH_SECS * 1000
+    return not final
+
+
+def _sync_payment_day(club_id: str, day: str) -> tuple:
+    """Sync one London day. Returns (pages, rows, complete)."""
+    day_start, day_next = _london_day_bounds(day)
+    key = f"paysync:{club_id}:{day}"
+    with _STATS_FETCH_MUTEX:
+        lock = _STATS_FETCH_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        conn = _db_connect()
+        try:
+            row = conn.execute(
+                "SELECT synced_at, complete FROM payments_sync WHERE club_id=? AND local_day=?", (club_id, day)
+            ).fetchone()
+            if not _day_needs_sync(row, day_next, _now()):
+                return (0, 0, int(row[1]) if row else 0)
+            pages = rows = 0
+            complete = 0
+            skip = 0
+            while True:
+                if pages >= PAYMENTS_MAX_PAGES_PER_DAY:
+                    print(f"[payments] WARNING club={club_id[:8]} day={day} hit page cap", flush=True)
+                    break
+                try:
+                    page = _fetch_payment_page(club_id, day_start, day_next - 1, skip, PAYMENTS_PAGE_SIZE)
+                except Exception as exc:
+                    print(f"[payments] club={club_id[:8]} day={day} fetch error: {type(exc).__name__}", flush=True)
+                    page = None
+                if page is None:
+                    break
+                pages += 1
+                rows += _upsert_payments(conn, club_id, page, int(_now()))
+                conn.commit()
+                if len(page) < PAYMENTS_PAGE_SIZE:
+                    complete = 1
+                    break
+                skip += PAYMENTS_PAGE_SIZE
+                time.sleep(random.uniform(*PAYMENTS_PAGE_DELAY))
+            conn.execute(
+                "INSERT OR REPLACE INTO payments_sync (club_id, local_day, synced_at, complete, pages, rows) "
+                "VALUES (?,?,?,?,?,?)", (club_id, day, int(_now()), complete, pages, rows))
+            conn.commit()
+            print(f"[payments] club={club_id[:8]} day={day} pages={pages} rows={rows} complete={complete}", flush=True)
+            return (pages, rows, complete)
+        finally:
+            conn.close()
+
+
+def _sync_payments(club_id: str, start_ms: int, end_ms: int) -> dict:
+    """Make sure every London day in [start_ms, end_ms] is synced (per the freshness rule)."""
+    result = {"complete": False, "days": 0, "pages": 0, "rows": 0}
+    if club_id == RACKETEER_CLUB_ID or club_id not in PAYMENT_SYNC_CLUB_IDS:
+        return result
+    now_s = _now()
+    end_ms = min(int(end_ms), int(now_s * 1000))
+    if end_ms < start_ms:
+        return result
+    days = []
+    d = _london_day(int(start_ms))
+    last = _london_day(end_ms)
+    while d <= last:
+        days.append(d)
+        d = (datetime.strptime(d, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    conn = _db_connect()
+    try:
+        rows = {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT local_day, synced_at, complete FROM payments_sync WHERE club_id=? AND local_day BETWEEN ? AND ?",
+            (club_id, days[0], days[-1]))}
+    finally:
+        conn.close()
+    todo = [x for x in days if _day_needs_sync(rows.get(x), _london_day_bounds(x)[1], now_s)]
+    t0 = _now()
+    if todo:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=PAYMENTS_SYNC_WORKERS) as pool:
+            for pages, nrows, _c in pool.map(lambda x: _sync_payment_day(club_id, x), todo):
+                result["pages"] += pages
+                result["rows"] += nrows
+        result["days"] = len(todo)
+        print(f"[payments] sync club={club_id[:8]} days={len(todo)} pages={result['pages']} "
+              f"rows={result['rows']} in {round(_now() - t0, 1)}s", flush=True)
+    conn = _db_connect()
+    try:
+        done = conn.execute(
+            "SELECT COUNT(*) FROM payments_sync WHERE club_id=? AND local_day BETWEEN ? AND ? AND complete=1",
+            (club_id, days[0], days[-1])).fetchone()[0]
+    finally:
+        conn.close()
+    result["complete"] = done == len(days)
+    return result
+
+
+def _payments_sync_loop() -> None:
+    """Backfill previous+current London month on startup, then keep today/yesterday fresh."""
+    time.sleep(20)  # let the heatmap startup go first
+    first = True
+    while True:
+        now_ms = int(_now() * 1000)
+        today = _london_day(now_ms)
+        prev = datetime.strptime(today[:7] + "-01", "%Y-%m-%d") - timedelta(days=1)
+        start_ms = _london_day_bounds(prev.strftime("%Y-%m-") + "01")[0]
+        for club in HEATMAP_CLUBS:
+            try:
+                res = _sync_payments(club["id"], start_ms, now_ms)
+                if first:
+                    print(f"[payments] backfill done club={club['id'][:8]} days={res['days']} "
+                          f"pages={res['pages']} rows={res['rows']} complete={int(res['complete'])}", flush=True)
+            except Exception as exc:
+                print(f"[payments] loop error club={club['id'][:8]}: {type(exc).__name__}: {exc}", flush=True)
+        first = False
+        time.sleep(PAYMENTS_LOOP_SECS)
 
 
 def _fetch_payment_leaderboard(club_id: str, start: str, end: str) -> list:
@@ -2232,12 +2470,16 @@ def _startup() -> None:
 
     heatmap_thread = threading.Thread(target=_heatmap_refresh_loop, daemon=True)
     heatmap_thread.start()
+    payments_thread = threading.Thread(target=_payments_sync_loop, daemon=True)
+    payments_thread.start()
+    print("[startup] payments sync thread started")
     print(f"[startup] heatmap refresh thread started ({len(HEATMAP_CLUBS)} clubs, 24h cycle)")
 
     print("[startup] archive refresh thread disabled (Racketeer migrated off Padelmates)")
 
 
-_startup()
+if os.environ.get("COURTVIEW_SKIP_STARTUP") != "1":
+    _startup()
 
 
 # ---------------------------------------------------------------------------
