@@ -49,6 +49,14 @@ def open_tab(page, tab):
     page.wait_for_timeout(500)
 
 
+def search_token(page):
+    """Last whitespace token (len >= 3) of the first row's Player cell, or None."""
+    name = page.eval_on_selector(
+        "#revPayOut tbody tr td:nth-child(2)", "e => e.textContent.trim()")
+    toks = [t for t in name.split() if len(t) >= 3]
+    return toks[-1] if toks else None
+
+
 def scenario_racketeer(browser, base, token):
     print("--- Scenario R (Racketeer)")
     ctx, page, reqs, statuses = new_page(browser, base, RACKETEER, token)
@@ -58,6 +66,20 @@ def scenario_racketeer(browser, base, token):
     for tab in TABS:
         open_tab(page, tab)
     page.wait_for_timeout(1500)
+
+    page.wait_for_selector("#revPayOut table", timeout=30000)
+    tok = search_token(page)
+    if tok:
+        page.fill("#revPaySearch", tok)
+        page.wait_for_function(
+            "() => document.getElementById('revPayMeta').textContent.includes('match')", timeout=30000)
+        check("Racketeer archive search shows matches", "match" in page.inner_text("#revPayMeta"))
+        page.fill("#revPaySearch", "")
+        page.wait_for_function(
+            "() => document.getElementById('revPayMeta').textContent.includes('archived')", timeout=30000)
+        check("clearing Racketeer search restores archived meta", "archived" in page.inner_text("#revPayMeta"))
+    else:
+        print("SKIP: no searchable player token in Racketeer archive")
 
     live = [u for u in reqs if RACKETEER in u and not urlparse(u).path.startswith("/api/archive/")]
     check(f"no non-archive Racketeer requests (count={len(live)})", not live, "; ".join(live[:3]))
@@ -111,6 +133,33 @@ def scenario_padium(browser, base, token):
               f"{before_rows}->{after_rows} '{before_meta}' -> '{after_meta}'")
     else:
         print("SKIP: Load More not visible (month fully loaded)")
+
+    page.wait_for_function(
+        "() => !document.getElementById('revLoadMore').disabled", timeout=60000)
+    tok = search_token(page)
+    if tok:
+        page.fill("#revPaySearch", tok)
+        page.wait_for_function(
+            "() => /\\d+ match(es)? in /.test(document.getElementById('revPayMeta').textContent)", timeout=90000)
+        rows = page.eval_on_selector_all(
+            "#revPayOut tbody tr",
+            "els => els.map(e => [e.children[0].textContent.trim(), e.children[1].textContent, e.children[2].textContent])")
+        low = tok.lower()
+        check(f"search returned rows (count={len(rows)})", len(rows) > 0)
+        check("every result matches the token", all(low in (r[1] + r[2]).lower() for r in rows))
+        check("search results newest first", [r[0] for r in rows] == sorted([r[0] for r in rows], reverse=True))
+        check("Load More hidden during search", page.eval_on_selector("#revLoadMoreWrap", "e => e.hidden"))
+        page.fill("#revPaySearch", tok[0])
+        page.wait_for_timeout(1000)
+        one = page.inner_text("#revPayMeta")
+        check("single character does not leave 'Searching...'", "Searching" not in one, one)
+        page.fill("#revPaySearch", "")
+        page.wait_for_function(
+            "() => document.getElementById('revPayMeta').textContent.includes('loaded · back to')", timeout=30000)
+        check("clearing search restores paged view",
+              page.locator("#revPayOut tbody tr").count() > 0, page.inner_text("#revPayMeta"))
+    else:
+        print("SKIP: no searchable player token in Padium rows")
 
     page.wait_for_timeout(RECS_WAIT_MS)
     open_tab(page, "book")

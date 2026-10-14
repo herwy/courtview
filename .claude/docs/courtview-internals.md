@@ -12,7 +12,7 @@ Base `https://fastapi-production-fargate.padelmates.io`, no auth. Every call is 
 | `/home/activity/filtered_activities` | Day bookings, activity mix, training rates |
 | `/home/activity/get_booked_hours` | Monthly booked-hours KPIs |
 | `/club/statistics/financial/v2` | Revenue cards, DOW bars, subscriptions |
-| `/club/statistics/online_payment_history` | Payment history, top spenders |
+| `/club/statistics/online_payment_history` | Payment history (live paging), plus the `payments` sync behind search and top spenders |
 | `/club/statistics/coach` | Coaching stats |
 | `/club/statistics/operational` | Heatmap and court popularity |
 | `/club/global_search` | Coach bios |
@@ -28,11 +28,25 @@ Quirks:
 
 ## Racketeer guard
 
-`@app.before_request _block_archived_club` returns 410 `{error: "archived"}` for any `/api/` path except `/api/archive/` when `club_id`, `club_ids` or a POST JSON `club_id` is Racketeer. Cache-only routes (`/api/month`, `/api/heatmap`, `/api/court-popularity`) are included. The token is checked first without recording failures, so unauthenticated callers still get 403. Each 410 logs `[archived] 410 METHOD path` to the journal; a clean UI load produces none.
+`@app.before_request _block_archived_club` returns 410 `{error: "archived"}` for any `/api/` path except `/api/archive/` when `club_id`, `club_ids` or a POST JSON `club_id` is Racketeer. Cache-only routes (`/api/month`, `/api/heatmap`, `/api/court-popularity`) are included. Racketeer payment search goes through `/api/archive/payment-search`, which reads `archive_financial` only and never contacts upstream. The token is checked first without recording failures, so unauthenticated callers still get 403. Each 410 logs `[archived] 410 METHOD path` to the journal; a clean UI load produces none.
 
 ## Payment history paging
 
 Revenue walks back by Europe/London day within the selected month, newest day first. Within a day it pages `skip += 100` while `has_more`. One chunk fetches until 25 rows, 7 requests or the month start; the same rule applies to the initial load and every Load More click. Rows are deduplicated, sorted newest first and shown in UK local time. The logic is the DOM-free block between `PAY-PAGER:BEGIN` and `PAY-PAGER:END` in courtview.html, tested by `node --test tests/test_pay_pager.mjs`. `tests/e2e_dashboard.py` (Playwright, needs `CV_TOKEN`) checks the Racketeer and Padium UI.
+
+## Payments table and sync
+
+- `payments`: PK `(club_id, transaction_id)` (checked 2026-10-14: a full Padium day had 275 records, 275 distinct ids; a missing id falls back to a `synthetic:` key). Columns keep the raw `createdAt`/`amount` strings plus `created_utc` (epoch ms), `local_day` (Europe/London) and `amount_gbp`. Index `(club_id, created_utc)`.
+- `payments_sync`: one row per `(club_id, local_day)` with `synced_at`, `complete`, `pages`, `rows`.
+- `_fetch_payment_page` is the only caller of `online_payment_history` (APP_HEADERS, chrome110, timeout 15, limit <= 100).
+- Sync unit is one London day, paged `skip += 100` with 0.1-0.25 s jitter; up to 3 days in parallel; 200 pages/day cap marks the day incomplete.
+- Freshness: skip a day synced < 10 min ago. Otherwise sync unless final (`complete=1` and synced after day close + 10 min). Today/yesterday refresh at most every 10 min; failed days retry at most every 10 min.
+- Background loop (`_payments_sync_loop`): 20 s after startup, backfills previous + current London month per `HEATMAP_CLUBS` club, then repeats every 30 min (touching only non-final days).
+- Only `HEATMAP_CLUBS` clubs are synced (`PAYMENT_SYNC_CLUB_IDS`); others get 400 `club not synced`. Racketeer is never synced.
+- `/api/payment-search`: `q` 2-100 chars, window <= 32 days, case-insensitive `LIKE ... ESCAPE '\'` on name or email (`\`, `%`, `_` escaped), newest first, max 200 rows, with `total`, `truncated`, `complete`.
+- `/api/payment-leaderboard` syncs the window then sums `PAYMENT_SUCCESS` rows from `payments` (no row cap, no stats_cache).
+- The table stores name, email and phone at rest on the RPi, behind the token gate. Logs carry club prefix, day and counts only.
+- Unit tests (`tests/test_payments.py`) need Flask and curl_cffi on Python 3.10+, so run them on the RPi.
 
 ## Heatmap
 
@@ -46,6 +60,7 @@ One `operational` call per club every 24h (background thread; Padium and Rocket 
 | `heatmap_cache`, `heatmap_hour_signal`, `heatmap_dow_signal`, `court_popularity` | 24h |
 | `membership_members_cache`, `stats_cache` | 6h |
 | `club_info_cache` | 10 min |
+| `payments`, `payments_sync` | none (persistent; holds payment PII) |
 
 - `_stats_key()` rounds `end` to a 6h bucket. Without it, every millisecond-precision request misses the cache.
 - `get_cached` treats an empty `[]` payload as a miss.

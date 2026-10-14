@@ -16,7 +16,7 @@ rpi 'systemctl is-active courtview'                                          # m
 | Path | Purpose |
 |------|---------|
 | `courtview.py`, `courtview.html` | App and dashboard. gunicorn serves plain HTTP on 127.0.0.1:8766, with TLS terminated in front. For on-RPi curl use `http://127.0.0.1:8766/...?token=$(cat /root/.courtview_token)`; `https://localhost` hangs |
-| `courtview_cache.db` | SQLite cache and Racketeer archive (tables: see internals doc) |
+| `courtview_cache.db` | SQLite cache and Racketeer archive, plus `payments` + `payments_sync` (persistent, holds payment PII). Tables: see internals doc |
 | `access.log` | JSONL access log |
 | `cv_notify_fail.py` | OnFailure notifier: 🔴 "down" (still failed after 15s) or 🔴 "crash-looping" (3+ crashes in 10 min, 1h cooldown), plus a silent 🟢 "back" via `--check-recovery` (ExecStartPost, 90s after start, needs 60s up, once per incident). Style: `~/dev/doxxnet-labs/.claude/docs/telegram-style.md`. State `unit_failure_state.json` (0600) |
 | `/etc/systemd/system/courtview.service` | `Restart=always` with backoff (`RestartSteps=5`, max 5 min), `StartLimitIntervalSec=0`, `OnFailure=notify-telegram@%p`, `ExecStartPost` recovery check. Logs go to the journal |

@@ -339,6 +339,13 @@ nav {
   transition: all 140ms ease;
 }
 .dbtn:hover { background: rgba(255,255,255,0.04); color: var(--text-2); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+.pay-search { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pay-search input {
+  background: rgba(255,255,255,0.02); border: 1px solid var(--border-s); border-radius: 6px;
+  padding: 6px 12px; font-family: inherit; font-size: 12px; color: var(--text-2); width: 220px;
+}
+.pay-search input:focus-visible { outline: 2px solid var(--accent-v); outline-offset: 2px; }
 .dbtn.on { background: rgba(113,112,255,0.12); border-color: rgba(113,112,255,0.3); color: var(--accent-v); }
 .dbtn:focus-visible { outline: 2px solid var(--accent-v); outline-offset: 2px; }
 
@@ -843,7 +850,11 @@ nav {
     <section aria-labelledby="rev-pay-title" class="sec">
       <div class="sec-hd">
         <h2 class="sec-title" id="rev-pay-title">Payment history</h2>
-        <span class="sec-meta" id="revPayMeta"></span>
+        <div class="pay-search">
+          <label for="revPaySearch" class="sr-only">Search payments by name or email</label>
+          <input type="search" id="revPaySearch" placeholder="Search name or email" autocomplete="off" maxlength="100">
+          <span class="sec-meta" id="revPayMeta"></span>
+        </div>
       </div>
       <div class="stats-table-wrap">
         <div id="revPayOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div></div>
@@ -2580,6 +2591,13 @@ let revPayRows = [];
 let revPayOldest = null;
 let revPaySeq = 0;
 let revPayBusy = false;
+let revPayRes = { oldest: null, error: false };
+let revSearchSeq = 0;
+let revSearchTimer = null;
+let revSearchMonth = null;
+let revArchivePayRows = [];
+const PAY_SEARCH_DEBOUNCE_MS = 300;
+const PAY_SEARCH_MIN_CHARS = 2;
 const PAY_LOAD_MORE_LABEL = 'Load more';
 
 function revMonthBounds(d) {
@@ -2674,8 +2692,92 @@ async function renderRevenueSummary(sumData) {
   }
 }
 
+function paySearchQuery() {
+  return document.getElementById('revPaySearch').value.trim();
+}
+
+function paySearchActive() {
+  return paySearchQuery().length >= PAY_SEARCH_MIN_CHARS;
+}
+
+async function runPaySearch() {
+  const clubId = CLUB;
+  const q = paySearchQuery();
+  const mySeq = ++revSearchSeq;
+  const month = revSearchMonth || revMonth;
+  const { start, end } = revMonthBounds(month);
+  const label = month.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  const metaEl = document.getElementById('revPayMeta');
+  const outEl = document.getElementById('revPayOut');
+  document.getElementById('revLoadMoreWrap').hidden = true;
+  metaEl.textContent = 'Searching...';
+  const route = clubId === RACKETEER_CLUB_ID ? '/api/archive/payment-search' : '/api/payment-search';
+  let data = null;
+  try {
+    const r = await fetch(`${route}?club_id=${clubId}&start=${start}&end=${end}&q=${encodeURIComponent(q)}`);
+    data = r.ok ? await r.json() : null;
+  } catch (e) {
+    data = null;
+  }
+  if (mySeq !== revSearchSeq || clubId !== CLUB || paySearchQuery() !== q) return;
+  if (!data) {
+    outEl.innerHTML = '<div class="empty">Search unavailable.</div>';
+    metaEl.textContent = '';
+    return;
+  }
+  const payments = data.payments || [];
+  if (!payments.length) {
+    outEl.innerHTML = `<div class="empty">No payments matching "${esc(q)}" in ${esc(label)}.</div>`;
+    metaEl.textContent = data.complete ? '' : 'sync incomplete';
+    return;
+  }
+  renderPayTable(payments, { archived: false });
+  const total = Number(data.total) || payments.length;
+  metaEl.textContent = `${total} match${total === 1 ? '' : 'es'} in ${label}`
+    + (data.truncated ? ' · showing first 200' : '')
+    + (data.complete ? '' : ' · sync incomplete');
+}
+
+function renderPayPaged(res) {
+  const metaEl = document.getElementById('revPayMeta');
+  const outEl = document.getElementById('revPayOut');
+  const wrap = document.getElementById('revLoadMoreWrap');
+  if (res.error && !revPayRows.length) {
+    outEl.innerHTML = '<div class="empty">Payment history unavailable.</div>';
+    metaEl.textContent = '';
+    wrap.hidden = false;
+    return;
+  }
+  if (revPayRows.length) {
+    renderPayTable(revPayRows, { archived: false });
+    metaEl.textContent = `${revPayRows.length} loaded · back to ${fmtBackTo(res.oldest)}`;
+  } else if (revPayCursor.done) {
+    outEl.innerHTML = '<div class="empty">No payments this month.</div>';
+    metaEl.textContent = '';
+  } else {
+    outEl.innerHTML = `<div class="empty">No payments back to ${esc(fmtBackTo(res.oldest))}</div>`;
+    metaEl.textContent = '';
+  }
+  wrap.hidden = revPayCursor.done && !res.error;
+}
+
+function restorePayView() {
+  if (CLUB === RACKETEER_CLUB_ID) {
+    if (revArchivePayRows.length) renderPayTable(revArchivePayRows, { archived: true });
+    return;
+  }
+  if (!revPayCursor) return;
+  renderPayPaged(revPayRes);
+}
+
+function onPaySearchChange() {
+  if (paySearchActive()) runPaySearch();
+  else { ++revSearchSeq; restorePayView(); }
+}
+
 async function loadRevenue(resetPay = true) {
   revLoaded = true;
+  ++revSearchSeq;
   const clubId = CLUB;
   const isRacketeer = clubId === RACKETEER_CLUB_ID;
   const mySeq = ++revReqSeq;
@@ -2716,7 +2818,11 @@ async function loadRevenue(resetPay = true) {
           const payData = payR.value?.ok ? await payR.value.json() : null;
           if (!isCurrent()) return;
           if (!payData) throw new Error('no payment data');
-          renderPayTable(payData.payments || [], { archived: true });
+          revArchivePayRows = payData.payments || [];
+          const snapDate = new Date(Number(ts) * 1000);
+          revSearchMonth = new Date(snapDate.getFullYear(), snapDate.getMonth(), 1);
+          renderPayTable(revArchivePayRows, { archived: true });
+          if (paySearchActive()) runPaySearch();
         } catch (e) {
           if (isCurrent()) document.getElementById('revPayOut').innerHTML = `<div class="empty">Payment history unavailable for this snapshot.</div>`;
         }
@@ -2746,7 +2852,10 @@ async function loadRevenue(resetPay = true) {
   revPayBusy = false;
   revPayRows = [];
   revPayCursor = payPagerStart(revMonth.getFullYear(), revMonth.getMonth(), Date.now());
+  revPayRes = { oldest: null, error: false };
+  revSearchMonth = revMonth;
   loadPayChunk();
+  if (paySearchActive()) runPaySearch();
 
   const [sumData, leadersData] = await Promise.all([
     fetch(`/api/revenue-summary?club_id=${clubId}&start=${start}&end=${end}`)
@@ -2773,8 +2882,6 @@ async function loadPayChunk() {
   const clubId = CLUB;
   const seq = revPaySeq;
   const btn = document.getElementById('revLoadMore');
-  const metaEl = document.getElementById('revPayMeta');
-  const outEl = document.getElementById('revPayOut');
   const stale = () => clubId !== CLUB || seq !== revPaySeq;
   revPayBusy = true;
   btn.disabled = true;
@@ -2790,24 +2897,8 @@ async function loadPayChunk() {
     res.rows.forEach(p => { if (!seen.has(payKey(p))) { seen.add(payKey(p)); revPayRows.push(p); } });
     revPayRows.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
     revPayOldest = res.oldest;
-    const wrap = document.getElementById('revLoadMoreWrap');
-    if (res.error && !revPayRows.length) {
-      outEl.innerHTML = '<div class="empty">Payment history unavailable.</div>';
-      metaEl.textContent = '';
-      wrap.hidden = false;
-      return;
-    }
-    if (revPayRows.length) {
-      renderPayTable(revPayRows, { archived: false });
-      metaEl.textContent = `${revPayRows.length} loaded · back to ${fmtBackTo(res.oldest)}`;
-    } else if (revPayCursor.done) {
-      outEl.innerHTML = '<div class="empty">No payments this month.</div>';
-      metaEl.textContent = '';
-    } else {
-      outEl.innerHTML = `<div class="empty">No payments back to ${esc(fmtBackTo(res.oldest))}</div>`;
-      metaEl.textContent = '';
-    }
-    wrap.hidden = revPayCursor.done && !res.error;
+    revPayRes = { oldest: res.oldest, error: !!res.error };
+    if (!paySearchActive()) renderPayPaged(revPayRes);
   } finally {
     if (seq === revPaySeq) {
       revPayBusy = false;
@@ -2888,7 +2979,11 @@ function setupRevenue() {
     loadRevenue();
   });
   document.getElementById('revLoadMore').addEventListener('click', () => {
-    if (!revPayBusy) loadPayChunk();
+    if (!revPayBusy && !paySearchActive()) loadPayChunk();
+  });
+  document.getElementById('revPaySearch').addEventListener('input', () => {
+    clearTimeout(revSearchTimer);
+    revSearchTimer = setTimeout(onPaySearchChange, PAY_SEARCH_DEBOUNCE_MS);
   });
 }
 
