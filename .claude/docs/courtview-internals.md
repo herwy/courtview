@@ -70,10 +70,11 @@ Revenue walks back by Europe/London day within the selected month, newest day fi
 ## Backup and restore
 
 - `courtview-backup.timer` (03:30 UK +- 10 min, `Persistent=true`) runs `cv_backup.py`: sqlite backup API, `integrity_check`, `gpg --encrypt --recipient-file courtview-backup.pub.asc`, then `backups/courtview-YYYYMMDD.db.gpg` (0600, keep 7). Only the public key is on the RPi; the plaintext temp file is always removed.
-- gpg key "CourtView Backup <courtview-backup@doxx.local>", fingerprint `0C6DF971E0D5A34FC9784FA271B04EBF6A997550` (ed25519 sign, cv25519 encrypt, no passphrase, no expiry). The private key lives only in the Mac keyring; losing it makes every backup unreadable. It is not exported anywhere.
+- gpg key "CourtView Backup 2026-10 RSA <courtview-backup@doxx.local>", fingerprint `CFA832B6B2983DD121CACB830317325FB7C4A6F9` (rsa4096 sign + rsa4096 encrypt, no passphrase, no expiry). The private key is in the Mac keyring and exported to the user's password manager. Never print it: export straight to a file.
+- Why RSA: the first key (`0C6DF971…`, ed25519/cv25519, 2026-10-14) didn't survive export/import under GnuPG 2.5.24 (the cv25519 keygrip changes on import, leaving a `ssb#` stub that can't decrypt). It was also partly exposed in a session transcript, so it was rotated the same day and its backups deleted. Test any future key with a fresh-`GNUPGHOME` round trip before relying on it.
 - The Mac pulls via launchd (`launchd/net.doxx.courtview-backup-pull.plist`, 09:15 daily plus RunAtLoad) running `scripts/courtview-backup-pull.sh`: tries `pi-cmd` then `pi-wan`, copies new files to `~/Backups/courtview/` (0700 dir, 0600 files, keep 7), logs to `pull.log` and warns when the newest remote file is older than 36 h. That log is the only staleness signal (the timer has no `OnFailure`).
 - Restore check: `zsh scripts/courtview-backup-verify.sh` decrypts the newest backup in a temp dir, prints `integrity_check`, the PII column count and email/mobile byte counts, then deletes the plaintext.
-- Restore: `gpg --decrypt courtview-YYYYMMDD.db.gpg > courtview_cache.db` on the Mac, then `systemctl stop courtview`, copy over, `chmod 600`, `systemctl start courtview`.
+- Restore: `scripts/courtview-restore.sh [--key KEYFILE] [BACKUP]` decrypts (newest in `~/Backups/courtview` by default) and checks integrity; add `--apply` to confirm, copy to the RPi, stop the service, swap the DB (dropping -wal/-shm), `chmod 600` and start it again.
 - The HMAC key is deliberately not backed up: keeping it beside the data would weaken the pseudonymisation. After a restore on a new host a fresh key changes `customer_key` for new rows only.
 
 ## Heatmap
