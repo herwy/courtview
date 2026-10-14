@@ -2650,6 +2650,8 @@ async function renderRevenueSummary(sumData) {
       </div>`;
     }
     document.getElementById('revSubOut').innerHTML = sh;
+  } else {
+    document.getElementById('revSubOut').innerHTML = '<div class="empty">No subscription revenue this month.</div>';
   }
 }
 
