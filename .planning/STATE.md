@@ -43,6 +43,7 @@ last_updated: "2026-10-14T00:00:00Z"
 | 31 | Telegram house style (doxxnet-labs telegram-style.md): 🔴 CourtView down / 🔴 crash-looping · N restarts with Cause/Since/Fix + expandable log quote + BST footer; new silent 🟢 back · down N min via ExecStartPost systemd-run --check-recovery (60s uptime, flock-serialised, once per incident). 15 stub tests; live loop+recovery test passed | 2026-10-14 | 76e1cb6 | 261014-1p4-telegram-house-style-alerts-and-silent-r |
 | 32 | Racketeer archive-only: before_request 410 guard on every live /api route (archive exempt), UI opens latest snapshot (no Live), Availability message, dropped from Compare, Padium default for new visitors, Best Times empty state. Payment history: walks back by UK-local day within selected month, pages skip+=100 per day, 25-row chunks, local timestamps. node pager tests 11/11, Playwright e2e ALL PASS, 0 Racketeer requests outside /api/archive/ | 2026-10-14 | 57a9654 | 261014-2ge-racketeer-no-live-polling-and-payment-hi |
 | 33 | Subscription revenue panel: empty-state message instead of a blank box (Padium has no paid subscriptions) | 2026-10-14 | f6ac5ca | fast |
+| 34 | Revenue cards: Subscriptions from total_current_subscription_amount (Padelmates' combined field is always 0), new Credits card, Total incl. subscriptions (also on Compare) via revTotalInclSubs() | 2026-10-14 | 1085c20 | fast |
 
 ## Session Continuity
 
