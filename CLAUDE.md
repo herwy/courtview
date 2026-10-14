@@ -1,111 +1,48 @@
 # CLAUDE.md - CourtView
 
-Padelmates API proxy server + dashboard. Flask app on RPi port 8766.
-
----
+A Flask proxy and dashboard over the Padelmates app API, running on the RPi. Internals: `.claude/docs/courtview-internals.md` (index: `.claude/docs/INDEX.md`).
 
 ## Deploy
 
-```bash
-cv-deploy
-```
-
-Auto-selects pi-cmd (LAN) or pi-wan (off LAN). No session check - CourtView is always restartable.
-
-After any change to courtview.py or courtview.html: `cv-deploy`, then verify the change actually landed on the RPi:
+`cv-deploy` picks pi-cmd (LAN) or pi-wan. It runs a pip-audit of the installed packages, copies the files, restarts through systemd, and fails unless MainPID owns :8766. Before reporting done, verify on the RPi:
 
 ```bash
-rpi 'grep -c "<expected_string>" /root/projects/courtview/courtview.html'
-rpi 'systemctl is-active courtview'
+rpi 'grep -c "<expected_string>" /root/projects/courtview/courtview.html'   # must be > 0
+rpi 'systemctl is-active courtview'                                          # must be active
 ```
 
-The grep count must be > 0 AND systemctl must return `active` before reporting done.
-
----
-
-## RPi layout
+## RPi layout (`/root/projects/courtview/` unless noted)
 
 | Path | Purpose |
 |------|---------|
-| `/root/projects/courtview/courtview.py` | WSGI app (gunicorn, plain HTTP on 127.0.0.1:8766; TLS is terminated in front). On-RPi curl: `http://127.0.0.1:8766/...?token=$(cat /root/.courtview_token)`, never `https://localhost` (hangs) |
-| `/root/projects/courtview/courtview.html` | Dashboard HTML |
-| `/root/projects/courtview/courtview_cache.db` | SQLite cache: availability (28-day TTL), heatmap, court popularity, membership_members_cache (6h TTL), club_info_cache (10-min TTL), stats_cache, archive_* (Racketeer, 2026-06-15 to 06-30) |
-| `/root/projects/courtview/access.log` | JSONL access log |
-| `/etc/systemd/system/courtview.service` | systemd unit - Restart=always with backoff (RestartSteps=5, max 5 min), StartLimitIntervalSec=0, OnFailure=notify-telegram@%p. gunicorn stdout/stderr go to the journal |
-| `/root/projects/courtview/cv_notify_fail.py` | OnFailure notifier: "CourtView is down" if still failed after 15s; one "CourtView keeps crashing" alert for 3+ crashes in 10 min (1h cooldown). Plain-English wording with a likely cause read from the journal. State in `unit_failure_state.json` (0600) |
-| `/root/.courtview_token` | Auth token (cookie: courtview_token) |
-| `/root/labs/web/` | Shared with nightwatch dashboard - access.html, access.js, dashboard.css loaded at startup |
+| `courtview.py`, `courtview.html` | App and dashboard. gunicorn serves plain HTTP on 127.0.0.1:8766, with TLS terminated in front. For on-RPi curl use `http://127.0.0.1:8766/...?token=$(cat /root/.courtview_token)`; `https://localhost` hangs |
+| `courtview_cache.db` | SQLite cache and Racketeer archive (tables: see internals doc) |
+| `access.log` | JSONL access log |
+| `cv_notify_fail.py` | OnFailure notifier: "down" if still failed after 15s, one "keeps crashing" alert for 3+ crashes in 10 min (1h cooldown). State file `unit_failure_state.json` (0600) |
+| `/etc/systemd/system/courtview.service` | `Restart=always` with backoff (`RestartSteps=5`, max 5 min), `StartLimitIntervalSec=0`, `OnFailure=notify-telegram@%p`. Logs go to the journal |
+| `/root/.courtview_token` | Auth token (`?token=...` sets the `courtview_token` cookie) |
+| `/root/labs/web/` | `access.html`, `access.js`, `dashboard.css`, owned by doxxnet-labs and loaded at startup |
 
----
+System Python only, no venv: `python3 -m pip install --break-system-packages`.
 
 ## Access
 
-| URL | Purpose |
-|-----|---------|
-| `https://labs.doxx:8766/` | Dashboard (token required) |
-| `https://labs.doxx:8766/access` | Access log page |
-| `https://labs.doxx:8766/api/*` | Padelmates API proxy (whitelist in `ALLOWED_PATHS` in courtview.py) |
-
-Token: stored in `/root/.courtview_token` on the RPi. Pass via `?token=...` (sets cookie) or with the cookie set.
-
----
+`https://labs.doxx:8766/` (dashboard), `/access` (access log), `/api/*` (proxy, whitelisted by `ALLOWED_PATHS`). All need the token.
 
 ## Clubs
 
-Selector lives in the dashboard nav (localStorage key `cv-club-id`). All three clubs are in both the main `CLUBS` array and `COMPARE_CLUBS` in courtview.html.
+The `CLUBS` and `COMPARE_CLUBS` arrays in courtview.html are Racketeer, Padium Canary Wharf and Rocket Padel Ilford. The selected club is stored in localStorage `cv-club-id`.
+- **Racketeer** left Padelmates on 2026-07-01 (booking revenue fell to £0). Background polling is off. On-demand proxying still works, and the archive views cover 2026-06-15 to 06-30.
+- **Stratford (TPC Matchpoint)** was removed on 2026-07-24: a second platform with no revenue data, not worth maintaining.
 
-**Racketeer migrated off Padelmates to a different booking app (2026-07-01).** Confirmed via booking-payment revenue dropping to exactly £0 that day and staying there. Availability and payment-history responses are also empty. Background polling for Racketeer is disabled (removed from `HEATMAP_CLUBS`, excluded from the availability refresh loop, archive refresh thread removed entirely). On-demand `/api/*` proxying and the dashboard's Racketeer archive views still work. The club profile still exists on Padelmates - it's just not taking bookings there anymore.
+## Upstream
 
-**Stratford Padel Club (TPC Matchpoint) was removed entirely (2026-07-24).** It ran on a separate platform (TPC Matchpoint, not Padelmates) with a much weaker integration: no payment/revenue data. Court Popularity was reliably empty because the metric relied on "available slots for today," which TPC consistently returned as zero at the nightly refresh time. Not worth the maintenance cost of a second platform integration for a club providing no usable data. Removed from `CLUBS`/`COMPARE_CLUBS`/`HEATMAP_CLUBS`, all `_tpc_*`/`_api_*_tpc` functions, and every `TPC_CLUB_ID` guard across the API.
-
----
-
-## Heatmap (Stats tab)
-
-Data source: `/club/statistics/operational?club_ids=X` (1 API call per club per 24h).
-
-**Key discovery (2026-05-21):** The param must be `club_ids` (plural). Passing `club_id` returns a MongoDB `$in needs an array` error for some duration values.
-
-Response fields used:
-- `hottest_time_slots` - hour-of-day booking density (30-min buckets, aggregated per hour)
-- `week_day_wise_activity_count_combined_graph` - DOW booking counts
-- `court_wise_activity_count_combined_graph` - per-court booking counts (stored in `court_popularity` table)
-
-The heatmap DOW x hour matrix is the product of normalised hour signal x DOW signal. Stored in `heatmap_cache` table. Raw signals in `heatmap_hour_signal` and `heatmap_dow_signal` tables. Court popularity in `court_popularity` table.
-
-Stale threshold: 24h. Background thread refreshes on startup (if stale) then every 24h. Covers Padium and Rocket Padel Ilford only - Racketeer excluded (see Clubs section).
-
----
-
-## Headers
-
-Android OkHttp headers, derived from Android APK reverse engineering (jadx). TLS fingerprint: `impersonate="chrome110"` on all cffi_requests calls (BoringSSL JA3, matches Android OkHttp 4.9.0).
-
-Rationale: endpoints discovered via Android APK (com.padelmates). Version 8.5.9 / build 1031 verified from that APK. iOS was never reverse-engineered so iOS headers would be invented. Android headers are what we actually know. Both platform values return HTTP 200 from the Padelmates API.
-
----
-
-## Upstream API
-
-`https://fastapi-production-fargate.padelmates.io` - unauthenticated Android/iOS app API (endpoints discovered via Android APK).
-
-Allowed proxy paths are whitelisted in `ALLOWED_PATHS` in courtview.py.
-
-All Padelmates requests are made server-side by Flask. The browser never contacts Padelmates directly. Padelmates only ever sees the RPi's IP and the Android OkHttp headers above - never the browser's IP or UA.
-
-**Security findings (2026-05-21):** See `.claude/docs/padelmates-disclosure-2026-05-21.md`. Key facts:
-- `/club/follower/crud` exposes 15,308+ user records (name, email, phone) per club with no auth. NOT proxied.
-- `/club/statistics/financial` exposes revenue data. Intentionally proxied for local research use.
-- `/club/member/` - 504 on full load, suspected large PII dataset. NOT proxied.
-
----
+Only Flask contacts Padelmates; the browser never does. Padelmates sees the RPi's IP and Android OkHttp headers. Security findings: `.claude/docs/padelmates-disclosure-2026-05-21.md`.
+- `/club/follower/crud` (15,308+ users' name, email and phone) and `/club/member/` are NOT proxied.
+- Revenue (`/club/statistics/financial*`) is proxied for local research.
 
 ## Rules
 
-- Verify deploys on the remote host with `rpi 'grep -c ...'`, never just locally.
-- The SQLite cache (`*.db`) and `access.log` are RPi runtime files - never commit them.
-- Web assets in `/root/labs/web/` are shared with the nightwatch dashboard (separate repo: doxxnet-labs). Do not edit them from here; CourtView only consumes them.
-- No nightwatch session concept here - the Flask server is killable and restartable at any time.
-- Gunicorn is the process manager; Flask is still the app. Gunicorn replaced `app.run()`, not Flask. All routing, proxy logic, and header injection happen inside Flask.
-- systemd manages the process lifecycle: `systemctl restart courtview` to restart, `journalctl -u courtview` to view logs. Boot persistence via WantedBy=multi-user.target - no @reboot crontab.
-- Never `pkill` gunicorn or hand-run `gunicorn --daemon` on :8766. A stray process holding the port crash-loops the unit (2026-10-13: 44 min loop). After any restart, the :8766 listener PIDs must include `systemctl show courtview -p MainPID` (deploy.sh enforces this).
+- Never commit `*.db` or `access.log` (RPi runtime files).
+- Never edit `/root/labs/web/` from here.
+- Restart only with `systemctl restart courtview`; logs are in `journalctl -u courtview`. Never `pkill` gunicorn or hand-run `gunicorn --daemon`: a stray process on :8766 crash-loops the unit (44 min on 2026-10-13). After a restart, MainPID must be among the :8766 listener PIDs.
