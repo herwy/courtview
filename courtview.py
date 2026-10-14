@@ -74,9 +74,11 @@ HEATMAP_CLUBS = [
 HEATMAP_HOURS      = list(range(7, 23))   # 07:00-22:00
 HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h (1 API call per club)
 
-# Racketeer migrated off Padelmates (2026-07-01) — club_id kept to exclude it from
-# background polling; on-demand /api/* proxying and historical archive data still work.
+# Racketeer migrated off Padelmates (2026-07-01). The club_id excludes it from background
+# polling and drives the 410 guard (_block_archived_club); only /api/archive/* serves it.
 RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80"
+ARCHIVED_ERROR    = "archived"
+ARCHIVED_MESSAGE  = "Racketeer left Padelmates on 2026-07-01; only archived snapshots are available."
 
 # Runtime paths on RPi
 TOKEN_PATH      = "/root/.courtview_token"
@@ -672,6 +674,32 @@ def _gate() -> tuple[bool, str]:
         print(f"[auth] fail from {html.escape(ip)}")
         return False, ""
     return True, query_token  # return query_token so caller knows if cookie should be set
+
+
+@app.before_request
+def _block_archived_club():
+    """Return 410 for any live /api route targeting the archived Racketeer club.
+
+    Runs only for authenticated callers (no failure recording); unauthenticated
+    requests fall through so the route's _gate still returns 403.
+    """
+    path = request.path
+    if not path.startswith("/api/") or path.startswith("/api/archive/"):
+        return None
+    ids = {request.args.get("club_id", "").strip()}
+    ids.update(c.strip() for c in request.args.get("club_ids", "").split(","))
+    if request.method == "POST":
+        body = request.get_json(silent=True)
+        if isinstance(body, dict):
+            ids.add(str(body.get("club_id", "")).strip())
+    if RACKETEER_CLUB_ID not in ids:
+        return None
+    provided = request.args.get("token", "") or request.cookies.get(COOKIE_NAME, "")
+    expected = _read_token()
+    if not provided or not expected or not _constant_time_eq(provided, expected):
+        return None
+    print(f"[archived] 410 {request.method} {path}", flush=True)
+    return jsonify({"error": ARCHIVED_ERROR, "message": ARCHIVED_MESSAGE}), 410
 
 
 @app.route("/", methods=["GET"])
