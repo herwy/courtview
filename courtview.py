@@ -10,6 +10,8 @@ Run: gunicorn via courtview.service (systemd); python3 courtview.py is a dev fal
 Deployed to: /root/projects/courtview/courtview.py
 """
 
+import hashlib
+import hmac
 import html
 import json
 import os
@@ -80,7 +82,7 @@ PAYMENTS_PAGE_DELAY       = (0.1, 0.25)     # jitter between pages of one day
 PAYMENTS_FRESH_SECS       = 600
 PAYMENTS_LOOP_SECS        = 1800
 PAYMENTS_MAX_WINDOW_MS    = 32 * 86400 * 1000
-PAYMENTS_SEARCH_LIMIT     = 200
+PAYMENTS_MAX_SKIP         = PAYMENTS_MAX_PAGES_PER_DAY * PAYMENTS_PAGE_SIZE
 
 HEATMAP_HOURS      = list(range(7, 23))   # 07:00-22:00
 HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h (1 API call per club)
@@ -91,8 +93,13 @@ RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80"
 ARCHIVED_ERROR    = "archived"
 ARCHIVED_MESSAGE  = "Racketeer left Padelmates on 2026-07-01; only archived snapshots are available."
 
+# Payment and membership routes serve these clubs only; the archive financial route serves Racketeer only.
+PAYMENT_CLUB_IDS = PAYMENT_SYNC_CLUB_IDS
+ARCHIVE_CLUB_IDS = frozenset({RACKETEER_CLUB_ID})
+
 # Runtime paths on RPi
 TOKEN_PATH      = "/root/.courtview_token"
+HMAC_KEY_PATH   = os.environ.get("COURTVIEW_HMAC_KEY_PATH", "/root/.courtview_hmac_key")
 DB_PATH         = os.environ.get("COURTVIEW_DB_PATH", "/root/projects/courtview/courtview_cache.db")
 ACCESS_LOG_PATH = "/root/projects/courtview/access.log"
 
@@ -107,7 +114,203 @@ def _db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA secure_delete=ON")
     return conn
+
+# ---------------------------------------------------------------------------
+# Privacy: no personal data is stored or returned (UK GDPR). Upstream JSON is
+# stripped in memory before any DB write or response.
+# ---------------------------------------------------------------------------
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+UK_MOBILE_RE = re.compile(r"(?<![0-9A-Za-z])(?:\+44 ?\(?0?\)?|0)7\d{3} ?\d{3} ?\d{3}(?![0-9A-Za-z])")
+UK_LANDLINE_RE = re.compile(r"(?<![0-9A-Za-z])(?:\+44 ?\(?0?\)?|0)[12]\d{2,3} ?\d{3} ?\d{3,4}(?![0-9A-Za-z])")
+
+# Keys are compared lower-cased with underscores and hyphens removed.
+_PII_KEY_RE = re.compile(
+    r"^(email.*|.*email|phone.*|.*phone|mobile.*|firstname|lastname|fullname|playername|"
+    r"booker.*|bookedby.*|playerid|userid|uid|firebase.*|receipt.*|coachname|owner|createdby)$")
+_PII_CONTAINERS = frozenset({"players", "participants", "members", "followers", "attendees",
+                             "users", "coaches", "coach"})
+_PLAYER_TITLE_KEYS = frozenset({"title", "activitytitle"})
+_PLAYER_TITLE_RE = re.compile(r"PLAYER:", re.IGNORECASE)
+
+
+def _redact_text(s: str) -> str:
+    """Remove email addresses and UK phone numbers from free text."""
+    s = EMAIL_RE.sub("", s)
+    s = UK_MOBILE_RE.sub("", s)
+    return UK_LANDLINE_RE.sub("", s)
+
+
+def _scrub_pii(obj):
+    """Recursively copy JSON-like data, dropping personal fields and redacting free text."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            nk = str(k).lower().replace("_", "").replace("-", "")
+            if _PII_KEY_RE.match(nk):
+                continue
+            if nk in _PII_CONTAINERS and isinstance(v, (list, dict)):
+                continue
+            if nk in _PLAYER_TITLE_KEYS and isinstance(v, str) and _PLAYER_TITLE_RE.search(v):
+                continue
+            out[k] = _scrub_pii(v)
+        return out
+    if isinstance(obj, list):
+        return [_scrub_pii(x) for x in obj]
+    if isinstance(obj, str):
+        return _redact_text(obj)
+    return obj
+
+
+def _scrub_json_text(text: str) -> str:
+    """Scrub a JSON document held as text. Non-JSON text is only regex-redacted."""
+    try:
+        return json.dumps(_scrub_pii(json.loads(text)))
+    except (ValueError, TypeError):
+        return _redact_text(text)
+
+
+_HMAC_STATE = {"sig": None, "key": None, "warned": False}
+_HMAC_LOCK = threading.Lock()
+
+
+def _hmac_key():
+    """HMAC secret bytes (>= 32), or None when missing/short. Never created or logged here."""
+    try:
+        st = os.stat(HMAC_KEY_PATH)
+        sig = (HMAC_KEY_PATH, st.st_mtime_ns, st.st_size)
+    except OSError:
+        sig = (HMAC_KEY_PATH, None, None)
+    with _HMAC_LOCK:
+        if _HMAC_STATE["sig"] == sig:
+            return _HMAC_STATE["key"]
+        key = None
+        if sig[1] is not None:
+            try:
+                with open(HMAC_KEY_PATH, "rb") as fh:
+                    raw = fh.read().strip()
+                if len(raw) >= 32:
+                    key = raw
+            except OSError:
+                key = None
+        _HMAC_STATE["sig"], _HMAC_STATE["key"] = sig, key
+        if key is None and not _HMAC_STATE["warned"]:
+            _HMAC_STATE["warned"] = True
+            print("[payments] HMAC key missing or short; payment storage disabled", flush=True)
+        return key
+
+
+def _customer_key(email) -> str | None:
+    """Pseudonymous repeat-customer id: HMAC-SHA256(secret, normalised email), hex."""
+    key = _hmac_key()
+    norm = str(email or "").strip().lower()
+    if key is None or not norm:
+        return None
+    return hmac.new(key, norm.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _pseudonym(namespace: str, value, n: int = 8) -> str:
+    """Stable opaque id for a non-customer identifier (e.g. a coach id)."""
+    msg = f"{namespace}:{value}".encode("utf-8")
+    key = _hmac_key()
+    digest = hmac.new(key, msg, hashlib.sha256).hexdigest() if key else hashlib.sha256(msg).hexdigest()
+    return digest[:n]
+
+
+# Descriptions are kept only when their template (see _norm_desc) was shared by >= 5 distinct customers in
+# the 2026-10-14 scan of the stored data (60,828 rows; 31 templates cover 60,740). Anything else, e.g. a
+# description carrying a third party's name, is replaced by the payment's source_type.
+DESCRIPTION_TEMPLATES = frozenset({
+    "booked court of padium canary wharf: <month> ##, #### ##:## - ##:## <tz>",
+    "booked court of padium canary wharf: <month> ##, #### ##:## - ##:## <tz> by credit pay",
+    "booked court of padium canary wharf: <month> #, #### ##:## - ##:## <tz>",
+    "booked court of padium canary wharf: <month> #, #### ##:## - ##:## <tz> by credit pay",
+    "booked court of rocket ilford: <month> ##, #### ##:## - ##:## <tz>",
+    "booked court of rocket padel ilford: <month> ##, #### ##:## - ##:## <tz>",
+    "booked court of rocket padel ilford: <month> ##, #### ##:## - ##:## <tz> by credit pay",
+    "booked court of rocket padel ilford: <month> #, #### ##:## - ##:## <tz>",
+    "booked court of rocket padel ilford: <month> #, #### ##:## - ##:## <tz> by credit pay",
+    "booking in rocket padel ilford - <month> ##, #### ##:## - ##:## <tz>",
+    "booking in rocket padel ilford - <month> #, #### ##:## - ##:## <tz>",
+    "match in rocket padel ilford - ####-##-## ##:## - ####-##-## ##:## <tz>",
+    "match in rocket padel ilford - <month> ##, #### ##:## - ##:## <tz>",
+    "match in rocket padel ilford - <month> #, #### ##:## - ##:## <tz>",
+    "tournament in padium canary wharf - <month> ##, #### ##:## - ##:## <tz>",
+    "tournament in rocket padel ilford - <month> ##, #### ##:## - ##:## <tz>",
+    "tournament in rocket padel ilford - <month> ##, #### ##:## - ##:## <tz> by credit pay",
+    "tournament in rocket padel ilford - <month> #, #### ##:## - ##:## <tz>",
+    "tournament in rocket padel ilford - <month> #, #### ##:## - ##:## <tz> by credit pay",
+    "training in padium canary wharf - <month> ##, #### ##:## - ##:## <tz>",
+    "training in padium canary wharf - <month> ##, #### ##:## - ##:## <tz> by credit pay",
+    "training in padium canary wharf - <month> #, #### ##:## - ##:## <tz>",
+    "training in padium canary wharf - <month> #, #### ##:## - ##:## <tz> by credit pay",
+    "training in rocket padel ilford - <month> ##, #### ##:## - ##:## <tz>",
+    "training in rocket padel ilford - <month> ##, #### ##:## - ##:## <tz> by credit pay",
+    "training in rocket padel ilford - <month> #, #### ##:## - ##:## <tz>",
+    "training in rocket padel ilford - <month> #, #### ##:## - ##:## <tz> by credit pay",
+    "£## for padium canary wharf - <month> ##, #### ##:## <tz>",
+    "£## for padium canary wharf - <month> #, #### ##:## <tz>",
+    "£### for padium canary wharf - <month> ##, #### ##:## <tz>",
+    "£### for padium canary wharf - <month> #, #### ##:## <tz>",
+})
+
+
+_MONTH_RE = re.compile(r"\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\b")
+_TZ_RE = re.compile(r"\b(?:bst|gmt|utc)\b")
+
+
+def _norm_desc(desc: str) -> str:
+    """Template form of a description: digits, month names and timezone labels are abstracted."""
+    t = _MONTH_RE.sub("<month>", desc.strip().lower())
+    t = _TZ_RE.sub("<tz>", t)
+    return re.sub(r"\d", "#", t)
+
+
+def _clean_description(desc, name=None, email=None, phone=None) -> str:
+    """Strip emails, phones and the customer's own name tokens from a payment description."""
+    text = _redact_text(str(desc or ""))
+    for tok in {str(name or "").strip(), *str(name or "").split()}:
+        if len(tok) >= 3:
+            text = re.sub(r"(?<![A-Za-z0-9])" + re.escape(tok) + r"(?![A-Za-z0-9])", "", text, flags=re.IGNORECASE)
+    for raw in (email, phone):
+        if raw and len(str(raw).strip()) >= 3:
+            text = text.replace(str(raw).strip(), "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _final_description(cleaned: str, source_type) -> str:
+    if DESCRIPTION_TEMPLATES is None:
+        return cleaned
+    if cleaned and _norm_desc(cleaned) in DESCRIPTION_TEMPLATES:
+        return cleaned
+    return str(source_type or "Payment")
+
+
+def _player_field(rec: dict, field: str):
+    """Read an upstream player_* field (name, email, phone) so it can be hashed or stripped, never stored."""
+    return rec.get(f"player_{field}")
+
+
+def _sanitise_payment(rec):
+    """Allowlist one upstream payment record. Name, email, phone, receipt URL are discarded here."""
+    if not isinstance(rec, dict):
+        return None
+    cleaned = _clean_description(rec.get("description"), _player_field(rec, "name"),
+                                 _player_field(rec, "email"), _player_field(rec, "phone"))
+    out = {
+        "createdAt": rec.get("createdAt"),
+        "customer_key": _customer_key(_player_field(rec, "email")),
+        "source_type": rec.get("source_type"),
+        "description": _final_description(cleaned, rec.get("source_type")),
+        "amount": rec.get("amount"),
+        "status": rec.get("status"),
+    }
+    if rec.get("transaction_id"):
+        out["transaction_id"] = str(rec["transaction_id"])
+    return out
+
 
 # Shared web assets served from the nightwatch dashboard directory
 WEB_ASSETS_DIR  = "/root/labs/web"
@@ -443,6 +646,31 @@ def _set_cookie(response, token: str) -> None:
 # SQLite availability cache helpers
 # ---------------------------------------------------------------------------
 
+PAYMENTS_DDL = """CREATE TABLE IF NOT EXISTS payments (
+                   club_id        TEXT NOT NULL,
+                   transaction_id TEXT NOT NULL,
+                   created_utc    INTEGER NOT NULL,
+                   local_day      TEXT NOT NULL,
+                   created_at     TEXT,
+                   customer_key   TEXT,
+                   source_type    TEXT,
+                   description    TEXT,
+                   amount         TEXT,
+                   amount_gbp     REAL,
+                   status         TEXT,
+                   synced_at      INTEGER,
+                   PRIMARY KEY (club_id, transaction_id)
+               )"""
+_PAYMENTS_COLUMNS = ("club_id", "transaction_id", "created_utc", "local_day", "created_at", "customer_key",
+                     "source_type", "description", "amount", "amount_gbp", "status", "synced_at")
+
+
+def _payments_schema_ok(conn) -> bool:
+    """True when payments exists with exactly the pseudonymised column set (no legacy PII columns)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(payments)")}
+    return cols == set(_PAYMENTS_COLUMNS)
+
+
 def init_db() -> None:
     """Create the cache database and tables if they do not exist."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -549,27 +777,10 @@ def init_db() -> None:
                    captured_at INTEGER
                )"""
         )
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS payments (
-                   club_id        TEXT NOT NULL,
-                   transaction_id TEXT NOT NULL,
-                   created_utc    INTEGER NOT NULL,
-                   local_day      TEXT NOT NULL,
-                   created_at     TEXT,
-                   player_name    TEXT,
-                   player_email   TEXT,
-                   player_phone   TEXT,
-                   source_type    TEXT,
-                   description    TEXT,
-                   amount         TEXT,
-                   amount_gbp     REAL,
-                   status         TEXT,
-                   receipt_url    TEXT,
-                   synced_at      INTEGER,
-                   PRIMARY KEY (club_id, transaction_id)
-               )"""
-        )
+        conn.execute(PAYMENTS_DDL)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_club_created ON payments (club_id, created_utc)")
+        if _payments_schema_ok(conn):
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_club_key ON payments (club_id, customer_key)")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS payments_sync (
                    club_id   TEXT NOT NULL,
@@ -942,7 +1153,7 @@ def api_month():
         for start_dt, end_dt, payload_str in rows:
             date_str = pair_to_date.get((start_dt, end_dt))
             if date_str:
-                days[date_str] = json.loads(payload_str)
+                days[date_str] = _scrub_pii(json.loads(payload_str))
     except sqlite3.Error as exc:
         return jsonify({"error": str(exc)}), 500
     finally:
@@ -957,13 +1168,23 @@ def api_month():
     return resp
 
 
+def _counts_payload(club_id: str, raw: str) -> str:
+    """Reduce any stored membership payload to {club_id, counts}; member lists are never returned."""
+    try:
+        counts = json.loads(raw).get("counts", {})
+    except (ValueError, AttributeError, TypeError):
+        counts = {}
+    if not isinstance(counts, dict):
+        counts = {}
+    return json.dumps({"club_id": club_id, "counts": counts})
+
+
 @app.route("/api/membership-members", methods=["GET"])
 def api_membership_members():
-    """Fan out one request per membership plan and return per-plan member counts.
+    """Return per-plan member counts: { club_id, counts: { plan_id: int } }.
 
-    Returns { club_id, counts: { plan_id: int, ... } }.
-    /club/membership/member is NOT in ALLOWED_PATHS - this route keeps PII server-side only.
-    """
+    Counts come from the plan listing's total_members field. The per-plan member lists
+    (/club/membership/member) are never fetched, stored or returned."""
     passed, via_query = _gate()
     if not passed:
         return _forbidden()
@@ -971,9 +1192,10 @@ def api_membership_members():
     club_id = request.args.get("club_id", "")
     if not club_id:
         return jsonify({"error": "club_id required"}), 400
+    if club_id not in PAYMENT_CLUB_IDS:
+        return jsonify({"error": "club not allowed"}), 400
 
     force_refresh = request.args.get("refresh") == "1"
-    empty_resp = json.dumps({"club_id": club_id, "counts": {}})
 
     # Serve from cache if fresh (6h TTL)
     if not force_refresh:
@@ -985,109 +1207,38 @@ def api_membership_members():
             ).fetchone()
             conn.close()
             if row:
-                resp = Response(row[0], status=200, content_type="application/json")
+                resp = Response(_counts_payload(club_id, row[0]), status=200, content_type="application/json")
                 if via_query:
                     _set_cookie(resp, via_query)
                 return resp
         except sqlite3.Error:
             pass
 
-    # H-02: per-club fan-out lock - only one thread fetches at a time per club
-    with _MEMBERSHIP_FETCH_MUTEX:
-        lock = _MEMBERSHIP_FETCH_LOCKS.setdefault(club_id, threading.Lock())
-    if not lock.acquire(blocking=False):
-        # Another thread is fetching for this club; serve stale cache if available
-        try:
-            conn = _db_connect()
-            row = conn.execute(
-                "SELECT payload FROM membership_members_cache WHERE club_id=?",
-                (club_id,),
-            ).fetchone()
-            conn.close()
-            if row:
-                resp = Response(row[0], status=200, content_type="application/json")
-                if via_query:
-                    _set_cookie(resp, via_query)
-                return resp
-        except sqlite3.Error:
-            pass
-        resp = Response(empty_resp, status=200, content_type="application/json")
-        if via_query:
-            _set_cookie(resp, via_query)
-        return resp
-
+    counts: dict = {}
     try:
-        # Fetch the list of membership plans for this club
-        try:
-            plans_r = cffi_requests.get(
-                f"{TARGET}/club/membership/?" + urlencode({"club_id": club_id}),
-                headers=APP_HEADERS,
-                timeout=15,
-                impersonate="chrome110",
-            )
-            if plans_r.status_code != 200:
-                resp = Response(empty_resp, status=200, content_type="application/json")
-                if via_query:
-                    _set_cookie(resp, via_query)
-                return resp
+        plans_r = cffi_requests.get(
+            f"{TARGET}/club/membership/?" + urlencode({"club_id": club_id}),
+            headers=APP_HEADERS,
+            timeout=15,
+            impersonate="chrome110",
+        )
+        if plans_r.status_code == 200:
             plans_raw = plans_r.json()
             # Upstream returns either a list directly or {"memberships": [...]}
-            if isinstance(plans_raw, list):
-                plans = plans_raw
-            elif isinstance(plans_raw, dict):
-                plans = plans_raw.get("memberships") or []
-                if not isinstance(plans, list):
-                    plans = []
-            else:
-                plans = []
-            if not plans:
-                resp = Response(empty_resp, status=200, content_type="application/json")
-                if via_query:
-                    _set_cookie(resp, via_query)
-                return resp
-        except Exception as exc:
-            return jsonify({"error": str(exc)}), 502
+            if isinstance(plans_raw, dict):
+                plans_raw = plans_raw.get("memberships") or []
+            for plan in plans_raw if isinstance(plans_raw, list) else []:
+                if not isinstance(plan, dict):
+                    continue
+                pid = plan.get("_id") or plan.get("id")
+                total = plan.get("total_members")
+                if pid:
+                    counts[str(pid)] = total if isinstance(total, int) and not isinstance(total, bool) else 0
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
 
-        counts: dict = {}
-        members_by_plan: dict = {}
-        for plan in plans:
-            pid = plan.get("_id") or plan.get("id")
-            if not pid:
-                continue
-            pid = str(pid)
-            time.sleep(random.uniform(0.15, 0.30))
-            count = 0
-            names: list = []
-            try:
-                r = cffi_requests.get(
-                    f"{TARGET}/club/membership/member?membership_id={pid}",
-                    headers=APP_HEADERS,
-                    timeout=15,
-                    impersonate="chrome110",
-                )
-                if r.status_code == 200:
-                    parsed = r.json()
-                    raw_list: list = []
-                    if isinstance(parsed, list):
-                        raw_list = parsed
-                    elif isinstance(parsed, dict):
-                        for key in ("members", "results", "data", "items"):
-                            val = parsed.get(key)
-                            if isinstance(val, list):
-                                raw_list = val
-                                break
-                    count = len(raw_list)
-                    names = sorted(
-                        [{"name": m.get("name", ""), "email": m.get("email", "")}
-                         for m in raw_list if m.get("name")],
-                        key=lambda x: x["name"].lower(),
-                    )
-            except Exception:
-                count = 0
-            counts[pid] = count
-            members_by_plan[pid] = names
-
-        payload = json.dumps({"club_id": club_id, "counts": counts, "members": members_by_plan})
+    payload = json.dumps({"club_id": club_id, "counts": counts})
+    if counts:
         try:
             conn = _db_connect()
             conn.execute(
@@ -1099,12 +1250,10 @@ def api_membership_members():
         except sqlite3.Error:
             pass
 
-        resp = Response(payload, status=200, content_type="application/json")
-        if via_query:
-            _set_cookie(resp, via_query)
-        return resp
-    finally:
-        lock.release()
+    resp = Response(payload, status=200, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
 
 
 @app.route("/api/club-info", methods=["GET"])
@@ -1128,7 +1277,7 @@ def api_club_info():
             ).fetchone()
             conn.close()
             if row:
-                resp = Response(row[0], status=200, content_type="application/json")
+                resp = Response(_scrub_json_text(row[0]), status=200, content_type="application/json")
                 if via_query:
                     _set_cookie(resp, via_query)
                 return resp
@@ -1162,7 +1311,7 @@ def api_club_info():
     for t in threads:
         t.join(timeout=20)
 
-    payload = json.dumps(results)
+    payload = json.dumps(_scrub_pii(results))
     try:
         conn = _db_connect()
         conn.execute(
@@ -1210,7 +1359,7 @@ def api_booked_hours():
             try:
                 url = f"{TARGET}/home/activity/get_booked_hours?" + urlencode({"club_id": club_id, "start_datetime": start, "end_datetime": end})
                 r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-                payload = r.content.decode("utf-8", errors="replace")
+                payload = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
                 if r.status_code == 200:
                     set_stats_cached(ck, payload)
             except Exception as exc:
@@ -1219,7 +1368,7 @@ def api_booked_hours():
         try:
             url = f"{TARGET}/home/activity/get_booked_hours?" + urlencode({"club_id": club_id, "start_datetime": start, "end_datetime": end})
             r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-            payload = r.content.decode("utf-8", errors="replace")
+            payload = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
         except Exception as exc:
             return jsonify({"error": str(exc)}), 502
     if r.status_code != 200:
@@ -1317,7 +1466,7 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
                 cid = act.get("coach_id")
                 if not cid:
                     continue
-                entry = coach_rates.setdefault(cid, {"name": act.get("coach_name") or "", "rates": []})
+                entry = coach_rates.setdefault(cid, {"rates": []})
                 ppp = act.get("payment_per_person")
                 if ppp is not None:
                     try:
@@ -1340,7 +1489,7 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
             return (jsonify({"error": str(exc)}), 502)
 
     coach_rate_summary = {
-        cid: {
+        _pseudonym("coach", cid): {
             "avg_rate": round(sum(d["rates"]) / len(d["rates"]), 2) if d["rates"] else None,
             "sample": len(d["rates"]),
         }
@@ -1352,6 +1501,22 @@ def _do_fetch_activity_summary(club_id: str, start: str, end: str, ck: str):
     if ck:
         set_stats_cached(ck, payload)
     return payload
+
+
+def _activity_view(act) -> dict:
+    """Allowlist one activity for the court grid: timing, courts, type, spots and price only."""
+    if not isinstance(act, dict):
+        return {}
+    courts = []
+    for c in act.get("courts") or []:
+        if isinstance(c, dict):
+            courts.append({k: c.get(k) for k in ("id", "court_id", "name") if k in c})
+    out = {"courts": courts}
+    for k in ("start_datetime", "end_datetime", "activity_type", "booking_type",
+              "no_of_participants", "total_capacity", "payment_per_person"):
+        if k in act:
+            out[k] = act[k]
+    return out
 
 
 @app.route("/api/day-activities", methods=["GET"])
@@ -1388,7 +1553,7 @@ def api_day_activities():
         return jsonify({"error": str(exc)}), 502
 
     resp = Response(
-        json.dumps({"club_id": club_id, "activities": all_activities}),
+        json.dumps({"club_id": club_id, "activities": [_activity_view(a) for a in all_activities]}),
         status=200,
         content_type="application/json",
     )
@@ -1428,7 +1593,7 @@ def api_revenue_summary():
                 url = f"{TARGET}/club/statistics/financial/v2?" + urlencode(
                     {"club_ids": club_id, "start_time": start, "end_time": end})
                 r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-                payload = r.content.decode("utf-8", errors="replace")
+                payload = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
                 if r.status_code == 200:
                     set_stats_cached(ck, payload)
             except Exception as exc:
@@ -1438,7 +1603,7 @@ def api_revenue_summary():
             url = f"{TARGET}/club/statistics/financial/v2?" + urlencode(
                 {"club_ids": club_id, "start_time": start, "end_time": end})
             r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-            payload = r.content.decode("utf-8", errors="replace")
+            payload = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
         except Exception as exc:
             return jsonify({"error": str(exc)}), 502
 
@@ -1451,7 +1616,9 @@ def api_revenue_summary():
 
 
 def _fetch_payment_page(club_id: str, start_ms, end_ms, skip: int, limit: int = PAYMENTS_PAGE_SIZE):
-    """The only caller of online_payment_history. Returns the record list on 200, None otherwise.
+    """The only caller of online_payment_history. Returns sanitised records on 200, None otherwise.
+    Every record is reduced by _sanitise_payment before returning, so no caller ever holds a name,
+    email, phone or receipt URL. List length equals the upstream page length (paging relies on it).
     Exceptions (network, JSON) propagate to the caller."""
     url = f"{TARGET}/club/statistics/online_payment_history?" + urlencode(
         {"club_id": club_id, "start_datetime": start_ms, "end_datetime": end_ms, "limit": limit, "skip": skip})
@@ -1459,34 +1626,75 @@ def _fetch_payment_page(club_id: str, start_ms, end_ms, skip: int, limit: int = 
     if r.status_code != 200:
         return None
     page = r.json()
-    return page if isinstance(page, list) else None
+    if not isinstance(page, list):
+        return None
+    return [_sanitise_payment(rec) or {} for rec in page]
+
+
+def _payments_ready() -> bool:
+    """Payments need the HMAC secret and the pseudonymised schema; otherwise nothing is stored."""
+    if _hmac_key() is None:
+        return False
+    conn = _db_connect()
+    try:
+        return _payments_schema_ok(conn)
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def _payments_unavailable():
+    return jsonify({"error": "payments unavailable"}), 503
+
+
+def _payment_public_id(club_id: str, transaction_id: str) -> str:
+    return hashlib.sha256(f"{club_id}|{transaction_id}".encode("utf-8")).hexdigest()[:12]
 
 
 @app.route("/api/payment-history", methods=["GET"])
 def api_payment_history():
-    """Paginate /club/statistics/online_payment_history server-side."""
+    """Page the local payments table (synced from upstream, pseudonymised).
+
+    Rows hold date, description, amount and status only; transaction ids never leave the DB."""
     passed, via_query = _gate()
     if not passed:
         return _forbidden()
 
-    club_id = request.args.get("club_id", "")
-    start   = request.args.get("start", "")
-    end     = request.args.get("end", "")
+    win = _parse_window_args()
+    if len(win) == 2:
+        return win
+    club_id, start_ms, end_ms = win
+    if club_id not in PAYMENT_CLUB_IDS:
+        return jsonify({"error": "club not allowed"}), 400
     try:
-        limit = min(int(request.args.get("limit", "100")), 100)
-        skip  = int(request.args.get("skip", "0"))
+        limit = min(int(request.args.get("limit", "100")), PAYMENTS_PAGE_SIZE)
+        skip = int(request.args.get("skip", "0"))
     except (TypeError, ValueError):
         return jsonify({"error": "limit and skip must be integers"}), 400
-    if not club_id or not start or not end:
-        return jsonify({"error": "club_id, start and end required"}), 400
+    if limit < 1 or skip < 0 or skip > PAYMENTS_MAX_SKIP:
+        return jsonify({"error": "invalid limit or skip"}), 400
+    if not _payments_ready():
+        return _payments_unavailable()
 
+    _sync_payments(club_id, start_ms, end_ms)
     try:
-        items = _fetch_payment_page(club_id, start, end, skip, limit) or []
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 502
-
+        conn = _db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT created_at, description, amount, status, club_id, transaction_id FROM payments "
+                "WHERE club_id=? AND created_utc BETWEEN ? AND ? "
+                "ORDER BY created_utc DESC, transaction_id LIMIT ? OFFSET ?",
+                (club_id, start_ms, end_ms, limit + 1, skip)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+    has_more = len(rows) > limit
+    items = [{"id": _payment_public_id(r[4], r[5]), "createdAt": r[0], "description": r[1],
+              "amount": r[2], "status": r[3]} for r in rows[:limit]]
     resp = Response(
-        json.dumps({"payments": items, "skip": skip, "limit": limit, "has_more": len(items) == limit}),
+        json.dumps({"payments": items, "skip": skip, "limit": limit, "has_more": has_more}),
         status=200,
         content_type="application/json",
     )
@@ -1503,26 +1711,27 @@ def _parse_gbp_amount(raw) -> float | None:
         return None
 
 
-def _aggregate_leaders(records: list) -> list:
-    """Sum successful payments per player from a flat list of payment records, top 5 desc."""
+def _aggregate_leaders(rows: list) -> list:
+    """Top 5 customers by successful spend. rows = [(customer_key, amount, status)].
+    Output carries a short anonymous id only (first 4 hex of the HMAC key, upper-case)."""
     totals: dict = {}
-    for rec in records:
-        if rec.get("status") != "PAYMENT_SUCCESS":
+    for customer_key, amount_raw, status in rows:
+        if status != "PAYMENT_SUCCESS" or not customer_key:
             continue
-        amount = _parse_gbp_amount(rec.get("amount"))
+        amount = _parse_gbp_amount(amount_raw)
         if amount is None:
             continue
-        key = rec.get("player_email") or rec.get("player_name") or "unknown"
-        entry = totals.setdefault(key, {"player_name": rec.get("player_name") or "Unknown", "total": 0.0, "count": 0})
+        entry = totals.setdefault(customer_key, {"total": 0.0, "bookings": 0})
         entry["total"] += amount
-        entry["count"] += 1
+        entry["bookings"] += 1
 
-    leaders = sorted(totals.values(), key=lambda e: e["total"], reverse=True)[:5]
-    max_total = leaders[0]["total"] if leaders else 0
-    for e in leaders:
-        e["total"] = round(e["total"], 2)
-        e["pct"] = round(e["total"] / max_total * 100, 1) if max_total else 0
-    return leaders
+    ranked = sorted(totals.items(), key=lambda kv: (-kv[1]["total"], kv[0]))[:5]
+    max_total = ranked[0][1]["total"] if ranked else 0
+    return [
+        {"customer_id": ck[:4].upper(), "bookings": e["bookings"], "total": round(e["total"], 2),
+         "pct": round(e["total"] / max_total * 100, 1) if max_total else 0}
+        for ck, e in ranked
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1553,14 +1762,16 @@ def _parse_created_utc(raw) -> int | None:
 
 
 def _payment_txn_id(rec: dict) -> str:
+    """Real upstream transaction id, else a synthetic id built from non-personal fields only."""
     tid = rec.get("transaction_id")
     if tid:
         return str(tid)
-    return "synthetic:" + "|".join(str(rec.get(k)) for k in ("createdAt", "player_email", "amount", "status"))
+    basis = "|".join(str(rec.get(k)) for k in ("createdAt", "customer_key", "amount", "status"))
+    return "synthetic:" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
 
 
 def _upsert_payments(conn, club_id: str, records: list, synced_at: int) -> int:
-    """Upsert upstream payment records. Returns the number of rows written."""
+    """Upsert sanitised payment records. Returns the number of rows written."""
     n = 0
     for rec in records:
         if not isinstance(rec, dict):
@@ -1569,21 +1780,18 @@ def _upsert_payments(conn, club_id: str, records: list, synced_at: int) -> int:
         if created is None:
             continue
         conn.execute(
-            """INSERT INTO payments (club_id, transaction_id, created_utc, local_day, created_at, player_name,
-                   player_email, player_phone, source_type, description, amount, amount_gbp, status,
-                   receipt_url, synced_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """INSERT INTO payments (club_id, transaction_id, created_utc, local_day, created_at, customer_key,
+                   source_type, description, amount, amount_gbp, status, synced_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(club_id, transaction_id) DO UPDATE SET
                    created_utc=excluded.created_utc, local_day=excluded.local_day,
-                   created_at=excluded.created_at, player_name=excluded.player_name,
-                   player_email=excluded.player_email, player_phone=excluded.player_phone,
+                   created_at=excluded.created_at, customer_key=excluded.customer_key,
                    source_type=excluded.source_type, description=excluded.description,
                    amount=excluded.amount, amount_gbp=excluded.amount_gbp, status=excluded.status,
-                   receipt_url=excluded.receipt_url, synced_at=excluded.synced_at""",
+                   synced_at=excluded.synced_at""",
             (club_id, _payment_txn_id(rec), created, _london_day(created), rec.get("createdAt"),
-             rec.get("player_name"), rec.get("player_email"), rec.get("player_phone"),
-             rec.get("source_type"), rec.get("description"), rec.get("amount"),
-             _parse_gbp_amount(rec.get("amount")), rec.get("status"), rec.get("receiptUrl"), synced_at),
+             rec.get("customer_key"), rec.get("source_type"), rec.get("description"), rec.get("amount"),
+             _parse_gbp_amount(rec.get("amount")), rec.get("status"), synced_at),
         )
         n += 1
     return n
@@ -1603,6 +1811,8 @@ def _day_needs_sync(row, day_close_ms: int, now_s: float) -> bool:
 
 def _sync_payment_day(club_id: str, day: str) -> tuple:
     """Sync one London day. Returns (pages, rows, complete)."""
+    if not _payments_ready():
+        return (0, 0, 0)
     day_start, day_next = _london_day_bounds(day)
     key = f"paysync:{club_id}:{day}"
     with _STATS_FETCH_MUTEX:
@@ -1711,11 +1921,6 @@ def _payments_sync_loop() -> None:
         time.sleep(PAYMENTS_LOOP_SECS)
 
 
-def _like_escape(q: str) -> str:
-    """Escape LIKE wildcards for use with ESCAPE '\\' (backslash first)."""
-    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
 def _parse_window_args():
     """Validate club_id/start/end. Returns (club_id, start_ms, end_ms) or (Response, status)."""
     club_id = request.args.get("club_id", "").strip()
@@ -1731,114 +1936,10 @@ def _parse_window_args():
     return club_id, start_ms, end_ms
 
 
-def _parse_search_args():
-    """Returns (club_id, start_ms, end_ms, q) or (Response, status) on a validation error."""
-    win = _parse_window_args()
-    if len(win) == 2:
-        return win
-    q = request.args.get("q", "").strip()
-    if not 2 <= len(q) <= 100:
-        return jsonify({"error": "q must be 2-100 characters"}), 400
-    return win + (q,)
-
-
-def _payment_row_to_record(row) -> dict:
-    (tid, created_at, name, email, phone, source, desc, amount, status, receipt) = row
-    return {
-        "transaction_id": tid, "createdAt": created_at, "player_name": name, "player_email": email,
-        "player_phone": phone, "source_type": source, "description": desc, "amount": amount,
-        "status": status, "receiptUrl": receipt,
-    }
-
-
-def _search_response(payments: list, total: int, complete: bool, via_query):
-    resp = Response(
-        json.dumps({"payments": payments, "total": total, "limit": PAYMENTS_SEARCH_LIMIT,
-                    "truncated": total > len(payments), "complete": complete}),
-        status=200, content_type="application/json")
-    if via_query:
-        _set_cookie(resp, via_query)
-    return resp
-
-
-@app.route("/api/payment-search", methods=["GET"])
-def api_payment_search():
-    """Search synced payments by player name or email within a window (<= 32 days)."""
-    passed, via_query = _gate()
-    if not passed:
-        return _forbidden()
-    args = _parse_search_args()
-    if len(args) == 2:
-        return args
-    club_id, start_ms, end_ms, q = args
-    if club_id not in PAYMENT_SYNC_CLUB_IDS:
-        return jsonify({"error": "club not synced"}), 400
-    sync = _sync_payments(club_id, start_ms, end_ms)
-    pat = "%" + _like_escape(q) + "%"
-    where = ("club_id=? AND created_utc BETWEEN ? AND ? "
-             "AND (player_name LIKE ? ESCAPE '\\' OR player_email LIKE ? ESCAPE '\\')")
-    params = (club_id, start_ms, end_ms, pat, pat)
-    try:
-        conn = _db_connect()
-        try:
-            total = conn.execute(f"SELECT COUNT(*) FROM payments WHERE {where}", params).fetchone()[0]
-            rows = conn.execute(
-                "SELECT transaction_id, created_at, player_name, player_email, player_phone, source_type, "
-                f"description, amount, status, receipt_url FROM payments WHERE {where} "
-                "ORDER BY created_utc DESC LIMIT ?", params + (PAYMENTS_SEARCH_LIMIT,)).fetchall()
-        finally:
-            conn.close()
-    except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
-    return _search_response([_payment_row_to_record(r) for r in rows], total, sync["complete"], via_query)
-
-
-@app.route("/api/archive/payment-search", methods=["GET"])
-def api_archive_payment_search():
-    """Search archived Racketeer payment snapshots. Never contacts upstream."""
-    passed, via_query = _gate()
-    if not passed:
-        return _forbidden()
-    args = _parse_search_args()
-    if len(args) == 2:
-        return args
-    club_id, start_ms, end_ms, q = args
-    try:
-        conn = _db_connect()
-        try:
-            payloads = conn.execute(
-                "SELECT payload FROM archive_financial WHERE club_id=? AND endpoint='payment-history'",
-                (club_id,)).fetchall()
-        finally:
-            conn.close()
-    except sqlite3.Error as exc:
-        return jsonify({"error": str(exc)}), 500
-    needle = q.casefold()
-    seen: dict = {}
-    for (payload,) in payloads:
-        try:
-            records = json.loads(payload).get("payments", [])
-        except (ValueError, AttributeError, TypeError):
-            continue
-        if not isinstance(records, list):
-            continue
-        for r in records:
-            if not isinstance(r, dict):
-                continue
-            created = _parse_created_utc(r.get("createdAt"))
-            if created is None or not start_ms <= created <= end_ms:
-                continue
-            if needle not in str(r.get("player_name") or "").casefold() and \
-                    needle not in str(r.get("player_email") or "").casefold():
-                continue
-            seen.setdefault(_payment_txn_id(r), r)
-    matches = sorted(seen.values(), key=lambda r: r.get("createdAt") or "", reverse=True)
-    return _search_response(matches[:PAYMENTS_SEARCH_LIMIT], len(matches), True, via_query)
-
-
 @app.route("/api/payment-leaderboard", methods=["GET"])
 def api_payment_leaderboard():
-    """Top spenders for a club+window, aggregated from the local payments table."""
+    """Top spenders for a club+window, aggregated from the local payments table.
+    Customers are anonymous ("Customer #XXXX"); the id is a prefix of an HMAC key."""
     passed, via_query = _gate()
     if not passed:
         return _forbidden()
@@ -1846,22 +1947,23 @@ def api_payment_leaderboard():
     if len(win) == 2:
         return win
     club_id, start_ms, end_ms = win
-    if club_id not in PAYMENT_SYNC_CLUB_IDS:
-        return jsonify({"error": "club not synced"}), 400
+    if club_id not in PAYMENT_CLUB_IDS:
+        return jsonify({"error": "club not allowed"}), 400
+    if not _payments_ready():
+        return _payments_unavailable()
     _sync_payments(club_id, start_ms, end_ms)
     try:
         conn = _db_connect()
         try:
             rows = conn.execute(
-                "SELECT player_name, player_email, amount, status FROM payments "
+                "SELECT customer_key, amount, status FROM payments "
                 "WHERE club_id=? AND created_utc BETWEEN ? AND ? AND status='PAYMENT_SUCCESS'",
                 (club_id, start_ms, end_ms)).fetchall()
         finally:
             conn.close()
     except sqlite3.Error as exc:
         return jsonify({"error": str(exc)}), 500
-    records = [{"player_name": r[0], "player_email": r[1], "amount": r[2], "status": r[3]} for r in rows]
-    resp = Response(json.dumps({"leaders": _aggregate_leaders(records)}), status=200,
+    resp = Response(json.dumps({"leaders": _aggregate_leaders(rows)}), status=200,
                     content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
@@ -1992,10 +2094,36 @@ def api_archive_club_info():
         return jsonify({"error": str(exc)}), 500
     if not row:
         return jsonify({"error": "no snapshot"}), 404
-    resp = Response(row[0], status=200, content_type="application/json")
+    resp = Response(_scrub_json_text(row[0]), status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
+
+
+def _archive_payments_text(club_id: str, text: str) -> str:
+    """Archived payment-history payload -> {payments: [{id, createdAt, description, amount, status}]}."""
+    try:
+        doc = json.loads(text)
+    except (ValueError, TypeError):
+        return json.dumps({"payments": []})
+    if not isinstance(doc, dict):
+        return json.dumps({"payments": []})
+    records = doc.get("payments")
+    rows = []
+    for rec in records if isinstance(records, list) else []:
+        if not isinstance(rec, dict):
+            continue
+        clean = _sanitise_payment(rec) if ("player_email" in rec or "player_name" in rec) else rec
+        rows.append({
+            "id": _payment_public_id(club_id, _payment_txn_id(clean)),
+            "createdAt": clean.get("createdAt"),
+            "description": _redact_text(str(clean.get("description") or "")),
+            "amount": clean.get("amount"),
+            "status": clean.get("status"),
+        })
+    other = _scrub_pii({k: v for k, v in doc.items() if k != "payments"})
+    other["payments"] = rows
+    return json.dumps(other)
 
 
 @app.route("/api/archive/financial", methods=["GET"])
@@ -2007,6 +2135,8 @@ def api_archive_financial():
     club_id = request.args.get("club_id", "")
     if not club_id:
         return jsonify({"error": "club_id required"}), 400
+    if club_id not in ARCHIVE_CLUB_IDS:
+        return jsonify({"error": "club not allowed"}), 400
     try:
         captured_at = int(request.args.get("captured_at", ""))
     except (TypeError, ValueError):
@@ -2027,10 +2157,66 @@ def api_archive_financial():
         return jsonify({"error": str(exc)}), 500
     if not row:
         return jsonify({"error": "no snapshot"}), 404
-    resp = Response(row[0], status=200, content_type="application/json")
+    body = _archive_payments_text(club_id, row[0]) if endpoint == "payment-history" else _scrub_json_text(row[0])
+    resp = Response(body, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
+
+
+_COACH_TYPES = ("group", "private", "course")
+
+
+def _num(v) -> float:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+
+def _anonymise_coach_stats(data):
+    """Coach names are personal data once tied to per-person revenue and occupancy.
+
+    Coaches become "Coach 1..n" (ordered by sessions desc) with a pseudonymous coach_id; only numeric
+    statistics are kept per coach. Everything else in the document goes through _scrub_pii."""
+    if not isinstance(data, dict):
+        return _scrub_pii(data)
+    totals: dict = {}
+    for t in _COACH_TYPES:
+        block = data.get(t)
+        if isinstance(block, dict):
+            for c in block.get("coach_statistics") or []:
+                if isinstance(c, dict):
+                    cid = str(c.get("coach_id"))
+                    totals[cid] = totals.get(cid, 0.0) + _num(c.get("total_sessions"))
+    order = sorted(totals, key=lambda cid: (-totals[cid], _pseudonym("coach", cid)))
+    labels = {cid: f"Coach {i + 1}" for i, cid in enumerate(order)}
+    rest = {}
+    for k, v in data.items():
+        if k in _COACH_TYPES and isinstance(v, dict):
+            v = {kk: vv for kk, vv in v.items() if kk != "coach_statistics"}
+        rest[k] = v
+    out = _scrub_pii(rest)
+    for t in _COACH_TYPES:
+        block, orig = out.get(t), data.get(t)
+        if isinstance(block, dict) and isinstance(orig, dict) and "coach_statistics" in orig:
+            rows = []
+            for c in orig.get("coach_statistics") or []:
+                if not isinstance(c, dict):
+                    continue
+                cid = str(c.get("coach_id"))
+                row = {k: v for k, v in c.items()
+                       if isinstance(v, (int, float)) and not isinstance(v, bool)}
+                row["coach_id"] = _pseudonym("coach", cid)
+                row["coach_name"] = labels[cid]
+                rows.append(row)
+            rows.sort(key=lambda r: r["coach_name"].split()[1].zfill(4))
+            block["coach_statistics"] = rows
+    return out
+
+
+def _coach_stats_payload(text: str) -> str:
+    try:
+        return json.dumps(_anonymise_coach_stats(json.loads(text)))
+    except (ValueError, TypeError):
+        return _redact_text(text)
 
 
 @app.route("/api/coach-stats", methods=["GET"])
@@ -2063,7 +2249,7 @@ def api_coach_stats():
                 url = f"{TARGET}/club/statistics/coach?" + urlencode(
                     {"club_ids": club_id, "start_time": start, "end_time": end})
                 r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-                payload = r.content.decode("utf-8", errors="replace")
+                payload = _coach_stats_payload(r.content.decode("utf-8", errors="replace"))
                 if r.status_code == 200:
                     set_stats_cached(ck, payload)
             except Exception as exc:
@@ -2073,68 +2259,11 @@ def api_coach_stats():
             url = f"{TARGET}/club/statistics/coach?" + urlencode(
                 {"club_ids": club_id, "start_time": start, "end_time": end})
             r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-            payload = r.content.decode("utf-8", errors="replace")
+            payload = _coach_stats_payload(r.content.decode("utf-8", errors="replace"))
         except Exception as exc:
             return jsonify({"error": str(exc)}), 502
     if r.status_code != 200:
         return jsonify({"error": "upstream error"}), 502
-    resp = Response(payload, status=200, content_type="application/json")
-    if via_query:
-        _set_cookie(resp, via_query)
-    return resp
-
-
-@app.route("/api/coach-bios", methods=["GET"])
-def api_coach_bios():
-    """Fetch coach bios from global_search in parallel, one query per coach name."""
-    passed, via_query = _gate()
-    if not passed:
-        return _forbidden()
-    club_id = request.args.get("club_id", "")
-    names_raw = request.args.get("names", "")
-    if not club_id or not names_raw:
-        return jsonify({"error": "club_id and names required"}), 400
-
-    ck = f"coach-bios:{club_id}:{names_raw}"
-    cached = get_stats_cached(ck)
-    if cached:
-        resp = Response(cached, status=200, content_type="application/json")
-        if via_query: _set_cookie(resp, via_query)
-        return resp
-
-    # Stampede guard: only one thread fetches per key
-    with _STATS_FETCH_MUTEX:
-        lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
-    with lock:
-        cached = get_stats_cached(ck)
-        if cached:
-            resp = Response(cached, status=200, content_type="application/json")
-            if via_query: _set_cookie(resp, via_query)
-            return resp
-
-        names = [n.strip() for n in names_raw.split(",") if n.strip()]
-
-        def fetch_bio(name: str) -> dict:
-            try:
-                url = f"{TARGET}/club/global_search?" + urlencode({"club_id": club_id, "query": name, "limit": 5})
-                r = cffi_requests.get(url, headers=APP_HEADERS, timeout=10, impersonate="chrome110")
-                if r.status_code != 200:
-                    return {}
-                coaches = r.json().get("coaches", [])
-                for c in coaches:
-                    if c.get("name", "").lower().startswith(name.split()[0].lower()):
-                        return {c["_id"]: {"name": c.get("name", ""), "info": c.get("info", ""), "photo_url": c.get("photo_url", "")}}
-            except Exception:
-                pass
-            return {}
-
-        bios: dict = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
-            for result in ex.map(fetch_bio, names):
-                bios.update(result)
-        payload = json.dumps(bios)
-        set_stats_cached(ck, payload)
-
     resp = Response(payload, status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
@@ -2160,7 +2289,7 @@ def proxy(p):
         club_id, start, end = _cache_key(request.args.to_dict())
         cached = get_cached(club_id, start, end)
         if cached is not None:
-            resp = Response(cached, status=200, content_type="application/json")
+            resp = Response(_scrub_json_text(cached), status=200, content_type="application/json")
             if via_query:
                 _set_cookie(resp, via_query)
             return resp
@@ -2184,13 +2313,17 @@ def proxy(p):
             impersonate="chrome110",
         )
 
-        # Store in cache if this is the availability path
+        ct = upstream.headers.get("content-type", "application/json")
+        body = upstream.content
+        if "json" in ct.lower():
+            body = _scrub_json_text(upstream.content.decode("utf-8", errors="replace")).encode("utf-8")
+
+        # Store the scrubbed payload if this is the availability path
         if full_path == CACHED_PATH and upstream.status_code == 200:
             club_id, start, end = _cache_key(request.args.to_dict())
-            store_cached(club_id, start, end, upstream.content.decode("utf-8", errors="replace"))
+            store_cached(club_id, start, end, body.decode("utf-8", errors="replace"))
 
-        ct = upstream.headers.get("content-type", "application/json")
-        resp = Response(upstream.content, status=upstream.status_code, content_type=ct)
+        resp = Response(body, status=upstream.status_code, content_type=ct)
 
     except Exception as exc:
         resp = jsonify({"error": str(exc)})
@@ -2474,7 +2607,8 @@ def _refresh_loop() -> None:
                     impersonate="chrome110",
                 )
                 if r.status_code == 200:
-                    store_cached(club_id, start, end, r.content.decode("utf-8", errors="replace"))
+                    store_cached(club_id, start, end,
+                                 _scrub_json_text(r.content.decode("utf-8", errors="replace")))
                     refreshed += 1
                 time.sleep(random.uniform(0.05, 0.18))
             except Exception as exc:
@@ -2503,9 +2637,6 @@ def _refresh_loop() -> None:
 
 _STARTUP_LOCK = threading.Lock()
 _STARTUP_DONE = False
-
-_MEMBERSHIP_FETCH_LOCKS: dict = {}
-_MEMBERSHIP_FETCH_MUTEX = threading.Lock()
 
 # Per-key stampede guard for stats cache (same pattern as membership)
 _STATS_FETCH_LOCKS: dict = {}

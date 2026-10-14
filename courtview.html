@@ -197,11 +197,6 @@ nav {
 .pay-table td.pay-amt { font-weight:600; color:var(--text-1); font-variant-numeric:tabular-nums; white-space:nowrap; }
 .pay-table td.pay-status-ok { color:var(--op-tx); font-size:11px; }
 .pay-table td.pay-status-fail { color:#ef4444; font-size:11px; }
-.pay-receipt { color:var(--accent-v); text-decoration:none; font-size:11px; }
-.pay-receipt:hover { text-decoration:underline; }
-.coach-bio-row td { padding:0 12px 10px 12px; color:var(--text-3); font-size:12px; line-height:1.5; border-bottom:1px solid var(--border-s); }
-.coach-expand { background:none; border:none; color:var(--accent-v); font-size:11px; cursor:pointer; padding:0; margin-left:6px; opacity:0.7; }
-.coach-expand:hover { opacity:1; }
 
 /* SECTION */
 .sec { margin-bottom: 36px; }
@@ -340,12 +335,6 @@ nav {
 }
 .dbtn:hover { background: rgba(255,255,255,0.04); color: var(--text-2); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-.pay-search { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.pay-search input {
-  background: rgba(255,255,255,0.02); border: 1px solid var(--border-s); border-radius: 6px;
-  padding: 6px 12px; font-family: inherit; font-size: 12px; color: var(--text-2); width: 220px;
-}
-.pay-search input:focus-visible { outline: 2px solid var(--accent-v); outline-offset: 2px; }
 .dbtn.on { background: rgba(113,112,255,0.12); border-color: rgba(113,112,255,0.3); color: var(--accent-v); }
 .dbtn:focus-visible { outline: 2px solid var(--accent-v); outline-offset: 2px; }
 
@@ -459,11 +448,6 @@ nav {
   content: '·'; position: absolute; left: 4px; top: 0;
   color: var(--accent-v); font-weight: 700;
 }
-.plan-toggle { font-size: 11px; color: var(--text-4); cursor: pointer; background: none; border: none; padding: 0; margin-top: 6px; text-align: left; }
-.plan-toggle:hover { color: var(--text-3); }
-.plan-member-list { display: none; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); max-height: 160px; overflow-y: auto; }
-.plan-member-list.open { display: block; }
-.plan-member-list .pml-row { font-size: 12px; color: var(--text-3); padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .credit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
 .credit {
@@ -850,11 +834,7 @@ nav {
     <section aria-labelledby="rev-pay-title" class="sec">
       <div class="sec-hd">
         <h2 class="sec-title" id="rev-pay-title">Payment history</h2>
-        <div class="pay-search">
-          <label for="revPaySearch" class="sr-only">Search payments by name or email</label>
-          <input type="search" id="revPaySearch" placeholder="Search name or email" autocomplete="off" maxlength="100">
-          <span class="sec-meta" id="revPayMeta"></span>
-        </div>
+        <span class="sec-meta" id="revPayMeta"></span>
       </div>
       <div class="stats-table-wrap">
         <div id="revPayOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Loading...</div></div>
@@ -1078,13 +1058,19 @@ function normaliseV2(v2) {
   );
 }
 
+/* Booking type label shown in grid tooltips (same mapping as the server's activity-summary) */
+function actTypeLabel(act) {
+  const t = act.activity_type, b = act.booking_type;
+  if (t === 'Book Court') return b === 'OPEN_MATCH' ? 'Open Match' : 'Private Booking';
+  if (t === 'Match') return 'Club Match';
+  return t || 'Booked';
+}
+
 function attachBookedByCell(courts, reservedBookings) {
   const courtBookings = new Map();
   for (const bk of reservedBookings) {
     if (!bk || !bk.start_datetime) continue;
-    const name = (bk.title?.match(/PLAYER:\s*(.+)/i)?.[1] ||
-                  Object.values(bk.open_match?.players || {})[0]?.name || '').trim();
-    if (!name) continue;
+    const name = bk.open_match ? 'Open match' : 'Booked';
     const si = cellIdx(bk.start_datetime);
     const span = (bk.end_datetime > bk.start_datetime)
       ? Math.max(1, Math.ceil((bk.end_datetime - bk.start_datetime) / (SLOT_W * 60000)))
@@ -1191,18 +1177,16 @@ function renderGrid(courts, actMap = new Map()) {
       } else {
         const act = actMap.get(`${court.court_id}:${i}`);
         if (act) {
-          const booker = act.activity_title?.match(/PLAYER:\s*(.+)/i)?.[1]?.trim()
-                      || act.players?.[0]?.name || '';
-          const names  = (act.players || []).map(p => esc(p.name)).join(', ');
+          const typeLbl = actTypeLabel(act);
           const ppp    = act.payment_per_person ? `£${act.payment_per_person.toFixed(2)} pp` : '';
           const spots  = act.total_capacity
             ? `${act.no_of_participants || 0}/${act.total_capacity} players`
             : '';
           const endTime = act.end_datetime ? localHM(act.end_datetime) : '';
-          h += `<div class="cell bkd" aria-label="${esc(court.name)} ${time} booked by ${esc(booker)}">
+          h += `<div class="cell bkd" aria-label="${esc(court.name)} ${time} ${esc(typeLbl)}">
             <div class="tt" aria-hidden="true">
               <span class="tt-t">${time}${endTime ? '–'+endTime : ''} · ${esc(court.name)}</span>
-              ${names ? `<span class="tt-r" style="color:var(--text-2)">${names}</span>` : ''}
+              <span class="tt-r" style="color:var(--text-2)">${esc(typeLbl)}</span>
               ${spots ? `<span class="tt-r">${esc(spots)}</span>` : ''}
               ${ppp   ? `<span class="tt-r">${esc(ppp)}</span>`   : ''}
             </div>
@@ -1210,7 +1194,7 @@ function renderGrid(courts, actMap = new Map()) {
         } else {
           const bookedBy = court.bookedByCell?.get(i);
           if (bookedBy) {
-            h += `<div class="cell bkd" aria-label="${esc(court.name)} ${time} booked by ${esc(bookedBy)}">
+            h += `<div class="cell bkd" aria-label="${esc(court.name)} ${time} ${esc(bookedBy)}">
               <div class="tt" aria-hidden="true">
                 <span class="tt-t">${time} · ${esc(court.name)}</span>
                 <span class="tt-r">${esc(bookedBy)}</span>
@@ -1926,8 +1910,6 @@ async function loadClubInfo() {
   }
 }
 
-let membersByPlan = {};
-
 async function loadMemberCounts(clubId) {
   if (isArchivedClub(clubId)) return;
   let d;
@@ -1938,8 +1920,6 @@ async function loadMemberCounts(clubId) {
   } catch (e) { return; }
   if (!d || !d.counts) return;
   if (clubId !== CLUB) return;
-
-  membersByPlan = d.members || {};
 
   const ids    = Object.keys(d.counts);
   const counts = ids.map(id => Number(d.counts[id]) || 0);
@@ -1959,27 +1939,6 @@ async function loadMemberCounts(clubId) {
       fill.style.width = pct + '%';
     }
 
-    // Inject member list + toggle if not already present
-    if (c > 0 && !card.querySelector('.plan-toggle')) {
-      const names = membersByPlan[id] || [];
-      const toggle = document.createElement('button');
-      toggle.className = 'plan-toggle';
-      toggle.textContent = `Show ${c} member${c !== 1 ? 's' : ''}`;
-      const list = document.createElement('div');
-      list.className = 'plan-member-list';
-      names.forEach(m => {
-        const row = document.createElement('div');
-        row.className = 'pml-row';
-        row.textContent = m.name + (m.email ? ` · ${m.email}` : '');
-        list.appendChild(row);
-      });
-      toggle.addEventListener('click', () => {
-        const open = list.classList.toggle('open');
-        toggle.textContent = open ? `Hide members` : `Show ${c} member${c !== 1 ? 's' : ''}`;
-      });
-      card.appendChild(toggle);
-      card.appendChild(list);
-    }
   }
 }
 
@@ -1994,8 +1953,6 @@ function renderClubInfo(profile, members, credits, extras, activities) {
   if (c.organization?.name) h += `<div class="club-org">${esc(c.organization.name)}</div>`;
   h += '<div class="club-meta">';
   if (addr) h += `<div><strong>Address</strong>${esc(addr)}</div>`;
-  if (c.email) h += `<div><strong>Email</strong><a href="mailto:${esc(c.email)}">${esc(c.email)}</a></div>`;
-  if (c.phone) h += `<div><strong>Phone</strong>${esc(c.phone)}</div>`;
   if (c.website) {
     const href = c.website.startsWith('http') ? c.website : 'https://' + c.website;
     h += `<div><strong>Website</strong><a href="${esc(href)}" target="_blank" rel="noopener">${esc(c.website)}</a></div>`;
@@ -2416,25 +2373,16 @@ async function loadStats() {
       const cr = coachRates[c.coach_id];
       const rpp = cr?.avg_rate != null ? fmtGBP(cr.avg_rate) : '-';
       ch += `<tr data-coach-id="${esc(c.coach_id)}">
-        <td>${esc(c.coach_name)}<button class="coach-expand" data-cid="${esc(c.coach_id)}" title="Show bio">&#9432;</button></td>
+        <td>${esc(c.coach_name)}</td>
         <td class="num">${c.total_sessions}</td>
         <td class="num">${fmtGBP(c.total_revenue)}</td>
         <td class="num">${rpp}</td>
         <td class="num">${c.total_participants}</td>
         <td class="num">${c.occupancy_rate.toFixed(1)}%</td>
-      </tr>
-      <tr class="coach-bio-row" id="bio-${esc(c.coach_id)}" hidden><td colspan="6">Loading bio...</td></tr>`;
+      </tr>`;
     }
     ch += '</tbody></table></div>';
     document.getElementById('statsCoachOut').innerHTML = ch;
-
-    // Wire expand buttons
-    document.querySelectorAll('.coach-expand').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const bioRow = document.getElementById('bio-' + btn.dataset.cid);
-        if (bioRow) bioRow.hidden = !bioRow.hidden;
-      });
-    });
 
     // If mix hadn't resolved yet when coaching rendered, patch rate/pp cells now
     mixPromise.then(lateMix => {
@@ -2448,18 +2396,6 @@ async function loadStats() {
         }
       });
     });
-
-    // Fetch bios in background and populate bio rows
-    const names = coaches.map(c => c.coach_name.split(' ')[0]).join(',');
-    apiFetch(`/api/coach-bios?club_id=${clubId}&names=${encodeURIComponent(names)}`)
-      .then(r => r.ok ? r.json() : null).catch(() => null)
-      .then(bios => {
-        if (!bios) return;
-        for (const [cid, bio] of Object.entries(bios)) {
-          const row = document.getElementById('bio-' + cid);
-          if (row) row.querySelector('td').textContent = bio.info || 'No bio available.';
-        }
-      });
   } else {
     document.getElementById('statsCoachOut').innerHTML = '<div class="empty">No coaching data this period.</div>';
   }
@@ -2592,12 +2528,7 @@ let revPayOldest = null;
 let revPaySeq = 0;
 let revPayBusy = false;
 let revPayRes = { oldest: null, error: false };
-let revSearchSeq = 0;
-let revSearchTimer = null;
-let revSearchMonth = null;
 let revArchivePayRows = [];
-const PAY_SEARCH_DEBOUNCE_MS = 300;
-const PAY_SEARCH_MIN_CHARS = 2;
 const PAY_LOAD_MORE_LABEL = 'Load more';
 
 function revMonthBounds(d) {
@@ -2692,52 +2623,6 @@ async function renderRevenueSummary(sumData) {
   }
 }
 
-function paySearchQuery() {
-  return document.getElementById('revPaySearch').value.trim();
-}
-
-function paySearchActive() {
-  return paySearchQuery().length >= PAY_SEARCH_MIN_CHARS;
-}
-
-async function runPaySearch() {
-  const clubId = CLUB;
-  const q = paySearchQuery();
-  const mySeq = ++revSearchSeq;
-  const month = revSearchMonth || revMonth;
-  const { start, end } = revMonthBounds(month);
-  const label = month.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
-  const metaEl = document.getElementById('revPayMeta');
-  const outEl = document.getElementById('revPayOut');
-  document.getElementById('revLoadMoreWrap').hidden = true;
-  metaEl.textContent = 'Searching...';
-  const route = clubId === RACKETEER_CLUB_ID ? '/api/archive/payment-search' : '/api/payment-search';
-  let data = null;
-  try {
-    const r = await fetch(`${route}?club_id=${clubId}&start=${start}&end=${end}&q=${encodeURIComponent(q)}`);
-    data = r.ok ? await r.json() : null;
-  } catch (e) {
-    data = null;
-  }
-  if (mySeq !== revSearchSeq || clubId !== CLUB || paySearchQuery() !== q) return;
-  if (!data) {
-    outEl.innerHTML = '<div class="empty">Search unavailable.</div>';
-    metaEl.textContent = '';
-    return;
-  }
-  const payments = data.payments || [];
-  if (!payments.length) {
-    outEl.innerHTML = `<div class="empty">No payments matching "${esc(q)}" in ${esc(label)}.</div>`;
-    metaEl.textContent = data.complete ? '' : 'sync incomplete';
-    return;
-  }
-  renderPayTable(payments, { archived: false });
-  const total = Number(data.total) || payments.length;
-  metaEl.textContent = `${total} match${total === 1 ? '' : 'es'} in ${label}`
-    + (data.truncated ? ' · showing first 200' : '')
-    + (data.complete ? '' : ' · sync incomplete');
-}
-
 function renderPayPaged(res) {
   const metaEl = document.getElementById('revPayMeta');
   const outEl = document.getElementById('revPayOut');
@@ -2761,23 +2646,8 @@ function renderPayPaged(res) {
   wrap.hidden = revPayCursor.done && !res.error;
 }
 
-function restorePayView() {
-  if (CLUB === RACKETEER_CLUB_ID) {
-    if (revArchivePayRows.length) renderPayTable(revArchivePayRows, { archived: true });
-    return;
-  }
-  if (!revPayCursor) return;
-  renderPayPaged(revPayRes);
-}
-
-function onPaySearchChange() {
-  if (paySearchActive()) runPaySearch();
-  else { ++revSearchSeq; restorePayView(); }
-}
-
 async function loadRevenue(resetPay = true) {
   revLoaded = true;
-  ++revSearchSeq;
   const clubId = CLUB;
   const isRacketeer = clubId === RACKETEER_CLUB_ID;
   const mySeq = ++revReqSeq;
@@ -2819,10 +2689,7 @@ async function loadRevenue(resetPay = true) {
           if (!isCurrent()) return;
           if (!payData) throw new Error('no payment data');
           revArchivePayRows = payData.payments || [];
-          const snapDate = new Date(Number(ts) * 1000);
-          revSearchMonth = new Date(snapDate.getFullYear(), snapDate.getMonth(), 1);
           renderPayTable(revArchivePayRows, { archived: true });
-          if (paySearchActive()) runPaySearch();
         } catch (e) {
           if (isCurrent()) document.getElementById('revPayOut').innerHTML = `<div class="empty">Payment history unavailable for this snapshot.</div>`;
         }
@@ -2853,9 +2720,7 @@ async function loadRevenue(resetPay = true) {
   revPayRows = [];
   revPayCursor = payPagerStart(revMonth.getFullYear(), revMonth.getMonth(), Date.now());
   revPayRes = { oldest: null, error: false };
-  revSearchMonth = revMonth;
   loadPayChunk();
-  if (paySearchActive()) runPaySearch();
 
   const [sumData, leadersData] = await Promise.all([
     fetch(`/api/revenue-summary?club_id=${clubId}&start=${start}&end=${end}`)
@@ -2874,7 +2739,7 @@ async function loadRevenue(resetPay = true) {
 }
 
 function payKey(p) {
-  return p.transaction_id || `${p.createdAt}|${p.player_email}|${p.amount}`;
+  return p.id;
 }
 
 async function loadPayChunk() {
@@ -2898,7 +2763,7 @@ async function loadPayChunk() {
     revPayRows.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
     revPayOldest = res.oldest;
     revPayRes = { oldest: res.oldest, error: !!res.error };
-    if (!paySearchActive()) renderPayPaged(revPayRes);
+    renderPayPaged(revPayRes);
   } finally {
     if (seq === revPaySeq) {
       revPayBusy = false;
@@ -2920,12 +2785,13 @@ function renderLeaders(data) {
   meta.textContent = `Top ${Math.min(3, leaders.length)} · successful payments`;
   let h = '<div class="cp-list">';
   leaders.slice(0, 3).forEach((p, i) => {
-    const name = esc(p.player_name || 'Unknown');
+    const n = Number(p.bookings) || 0;
+    const label = `Customer #${esc(p.customer_id)} · ${n} booking${n === 1 ? '' : 's'}`;
     const pct  = Math.max(3, Number(p.pct) || 0);
     h += `<div class="cp-row">
-            <div class="cp-name" title="${name}">${i + 1}. ${name}</div>
+            <div class="cp-name" title="${label}">${i + 1}. ${label}</div>
             <div class="cp-bar-track"><div class="cp-bar-fill" style="width:${pct}%"></div></div>
-            <div class="cp-count">${fmtGBP(p.total)}</div>
+            <div class="cp-count">${fmtGBP(Number(p.total) || 0)}</div>
           </div>`;
   });
   h += '</div>';
@@ -2935,8 +2801,7 @@ function renderLeaders(data) {
 function renderPayTable(payments, { archived }) {
   const rows = [...payments].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   let h = `<table class="pay-table"><thead><tr>
-    <th>Date</th><th>Player</th><th>Email</th><th>Phone</th>
-    <th>Description</th><th>Amount</th><th>Status</th><th>Receipt</th>
+    <th>Date</th><th>Description</th><th>Amount</th><th>Status</th>
   </tr></thead><tbody id="revPayBody">`;
   h += rows.map(payRow).join('');
   h += '</tbody></table>';
@@ -2950,18 +2815,11 @@ function renderPayTable(payments, { archived }) {
 function payRow(p) {
   const ok = p.status === 'PAYMENT_SUCCESS';
   const date = p.createdAt ? fmtPayLocal(p.createdAt) : '';
-  const receipt = p.receiptUrl
-    ? `<a class="pay-receipt" href="${esc(p.receiptUrl)}" target="_blank" rel="noopener">PDF</a>`
-    : '';
   return `<tr>
     <td style="white-space:nowrap;color:var(--text-3)">${esc(date)}</td>
-    <td>${esc(p.player_name || '')}</td>
-    <td style="color:var(--text-3)">${esc(p.player_email || '')}</td>
-    <td style="color:var(--text-3);white-space:nowrap">${esc(p.player_phone || '')}</td>
     <td style="color:var(--text-3);max-width:220px">${esc(p.description || '')}</td>
     <td class="pay-amt">${esc(p.amount || '')}</td>
     <td class="${ok ? 'pay-status-ok' : 'pay-status-fail'}">${ok ? 'Paid' : esc(p.status || '')}</td>
-    <td>${receipt}</td>
   </tr>`;
 }
 
@@ -2979,11 +2837,7 @@ function setupRevenue() {
     loadRevenue();
   });
   document.getElementById('revLoadMore').addEventListener('click', () => {
-    if (!revPayBusy && !paySearchActive()) loadPayChunk();
-  });
-  document.getElementById('revPaySearch').addEventListener('input', () => {
-    clearTimeout(revSearchTimer);
-    revSearchTimer = setTimeout(onPaySearchChange, PAY_SEARCH_DEBOUNCE_MS);
+    if (!revPayBusy) loadPayChunk();
   });
 }
 
