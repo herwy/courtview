@@ -27,6 +27,9 @@ MOBILE_RE = re.compile(r"(?<![0-9A-Za-z])(?:\+44 ?\(?0?\)?|0)7\d{3} ?\d{3} ?\d{3
 PAY_HEADERS = ["Date", "Description", "Amount", "Status"]
 LEADER_RE = re.compile(r"^\d\. Customer #[0-9A-F]{4}")
 scan = {"bodies": 0, "email": 0, "mobile": 0}
+console_bad = []   # console messages that mention a CSP violation or a refused resource
+page_errors = []   # uncaught page errors
+UNAVAILABLE = "No longer available from Padelmates"
 
 failures = 0
 
@@ -61,6 +64,9 @@ def new_page(browser, base, club_id, token):
     page.on("request", lambda r: reqs.append(r.url))
     page.on("response", lambda r: statuses.append((r.status, r.url)))
     page.on("response", scan_body)
+    page.on("console", lambda m: console_bad.append(m.text[:160])
+            if ("Content Security Policy" in m.text or "Refused to" in m.text) else None)
+    page.on("pageerror", lambda e: page_errors.append(str(e)[:160]))
     return ctx, page, reqs, statuses
 
 
@@ -148,15 +154,39 @@ def scenario_padium(browser, base, token):
           len(leaders) > 0 and all(LEADER_RE.match(t) for t in leaders))
 
     open_tab(page, "club")
-    open_tab(page, "stats")
     check("club info shows no email or phone rows",
           "Email" not in page.inner_text("#clubOut") and "Phone" not in page.inner_text("#clubOut"))
+    check("club info has no Extras section", "Extras" not in page.inner_text("#clubOut"))
+    check("no spinner left on Club Info", not page.locator("#clubOut .sp:visible").count())
+    open_tab(page, "stats")
+    check("stats KPI area says unavailable", UNAVAILABLE in page.inner_text("#statsKpiOut"))
+    check("no spinner left on Stats", not page.locator("#statsKpiOut .sp:visible").count())
+    open_tab(page, "compare")
+    compare = page.inner_text("#compareOut")
+    check("compare footnote says unavailable", UNAVAILABLE in compare)
+    check("compare has no Activities or Occupancy column",
+          "Activities (mo)" not in compare and "Occupancy (mo)" not in compare)
+    check("no spinner left on Compare", not page.locator("#compareOut .sp:visible").count())
     open_tab(page, "book")
+    booked = [u for u in reqs if "/api/booked-hours" in u]
+    check(f"no /api/booked-hours request (count={len(booked)})", not booked, "; ".join(booked[:2]))
 
     page.wait_for_timeout(RECS_WAIT_MS)
     open_tab(page, "book")
     rec = page.inner_text("#recOut")
     check("Best Times not stuck on 'Loading recommendations...'", "Loading recommendations..." not in rec, rec[:60])
+    ctx.close()
+
+
+def scenario_access(browser, base, token):
+    print("--- Scenario A (/access)")
+    ctx, page, reqs, statuses = new_page(browser, base, PADIUM, token)
+    before = len(console_bad)
+    page.goto(base + "/access")
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(1500)
+    check("access page title is 'CourtView Access Log'", page.title() == "CourtView Access Log", page.title())
+    check("no CSP console errors on /access", len(console_bad) == before, "; ".join(console_bad[before:before + 2]))
     ctx.close()
 
 
@@ -170,7 +200,10 @@ def main():
         browser = p.chromium.launch()
         scenario_racketeer(browser, base, token)
         scenario_padium(browser, base, token)
+        scenario_access(browser, base, token)
         browser.close()
+    check(f"no CSP violations (console errors={len(console_bad)})", not console_bad, "; ".join(console_bad[:3]))
+    check(f"no page errors (count={len(page_errors)})", not page_errors, "; ".join(page_errors[:3]))
     check(f"no email or UK mobile pattern in /api JSON bodies (bodies={scan['bodies']}, "
           f"email={scan['email']}, mobile={scan['mobile']})",
           scan["bodies"] > 0 and scan["email"] == 0 and scan["mobile"] == 0)
