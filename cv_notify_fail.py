@@ -1,22 +1,33 @@
 #!/usr/bin/env python3
 """
-cv_notify_fail.py - Telegram alert for courtview.service failures.
+cv_notify_fail.py - Telegram alerts for courtview.service (house style).
+
+Message shape follows ~/dev/doxxnet-labs/.claude/docs/telegram-style.md
+(one status dot, short first line, labelled facts, expandable logs,
+Europe/London footer).
 
 Run by notify-telegram@courtview.service (OnFailure= in courtview.service).
 systemd starts OnFailure= units on every crash, including each one that
 Restart= recovers from, so this script decides whether to alert:
 
   1. Wait WAIT_S seconds (longer than RestartSec plus start time).
-  2. Still failed (`systemctl is-failed`): send a FAILED alert.
+  2. Still failed (`systemctl is-failed`): send a loud red "down" alert.
   3. Otherwise record the invocation in STATE_FILE. A single recovered crash
      sends nothing. LOOP_COUNT or more invocations within LOOP_WINDOW_S send
-     ONE crash-looping alert, then nothing more for LOOP_ALERT_COOLDOWN_S.
+     ONE loud red "crash-looping" alert, then nothing more for
+     LOOP_ALERT_COOLDOWN_S.
+
+Either alert opens an incident (incident_since in STATE_FILE). The unit's
+ExecStartPost schedules `--check-recovery` 90s after every start: if an
+incident is open and the unit has been active for RECOVERY_MIN_ACTIVE_S, one
+silent green "back" message is sent and the incident is cleared.
 
 courtview.service sets StartLimitIntervalSec=0, so systemd never gives up on
 a restart loop; the invocation count is what makes a loop visible.
 Ported from doxxnet-labs scripts/notify_unit_failure.py.
 
-Usage: cv_notify_fail.py <unit>   (the %i of the template, e.g. courtview)
+Usage: cv_notify_fail.py <unit>                   (the %i of the template)
+       cv_notify_fail.py --check-recovery <unit>
 """
 import html
 import json
@@ -25,13 +36,15 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, '/root/labs')
 
 WAIT_S = 15
 SUBPROCESS_TIMEOUT_S = 10
 JOURNAL_LINES = 20
-MAX_CAUSE_CHARS = 200
+MAX_CAUSE_CHARS = 80
 PORT = 8766
 LOOP_COUNT = 3
 LOOP_WINDOW_S = 600
@@ -39,6 +52,17 @@ LOOP_ALERT_COOLDOWN_S = 3600
 STATE_RETENTION_S = 3600
 STATE_FILE = '/root/projects/courtview/unit_failure_state.json'
 STATE_MODE = 0o600
+RECOVERY_MIN_ACTIVE_S = 60
+LOG_QUOTE_LINES = 5
+MAX_FACTS = 3
+FIRST_LINE_MAX = 40
+SECONDS_PER_MIN = 60
+USEC_PER_S = 1_000_000
+TZ = ZoneInfo('Europe/London')
+DOTS = {'problem': '🔴', 'warning': '🟠', 'recovery': '🟢', 'info': '🔵'}
+SILENT_KINDS = ('recovery', 'info')
+FACT_ORDER = ('Cause', 'Since', 'Fix', 'Where')
+PORT_IN_USE_MARKERS = ('Address already in use', 'Connection in use')
 
 _UNIT_RE = re.compile(r'^[A-Za-z0-9:_.\-@]+$')
 
@@ -55,38 +79,82 @@ def journal_tail(unit):
         return []
 
 
-def likely_cause(lines):
-    """Translate the last journal lines into one plain-English sentence."""
-    if any('Address already in use' in line for line in lines):
-        return f'Another program is holding port {PORT}, so CourtView cannot start.'
+def _esc(text):
+    return html.escape(text, quote=False)
+
+
+def _trunc(text, limit):
+    return text if len(text) <= limit else text[:max(limit - 1, 0)] + '…'
+
+
+def _hhmm(ts):
+    return datetime.fromtimestamp(ts, TZ).strftime('%H:%M')
+
+
+def format_alert(kind, title, *, context=None, impact=None, facts=(), logs=(), source):
+    """Build a house-style Telegram HTML message. Returns (message, silent)."""
+    dot = DOTS[kind]
+    budget = FIRST_LINE_MAX - len(dot) - 1
+    if context:
+        room = budget - len(title) - len(' · ')
+        if room >= 1:
+            context = _trunc(context, room)
+        else:
+            context = None
+    title = _trunc(title, budget)
+    head = f'{dot} <b>{_esc(title)}</b>'
+    if context:
+        head += f' · {_esc(context)}'
+    lines = [head]
+    if impact:
+        lines.append(_esc(impact))
+    ordered = sorted(facts, key=lambda f: FACT_ORDER.index(f[0]))[:MAX_FACTS]
+    if ordered:
+        lines.append('')
+        lines.extend(f'<b>{label}</b>   {value}' for label, value in ordered)
+    quoted = [ln for ln in logs if ln.strip()][-LOG_QUOTE_LINES:]
+    if quoted:
+        lines.append('')
+        lines.append('<blockquote expandable>' + '\n'.join(_esc(ln) for ln in quoted) + '</blockquote>')
+    stamp = datetime.fromtimestamp(time.time(), TZ).strftime('%H:%M %Z')
+    lines.append(f'<i>{stamp} · {_esc(source)}</i>')
+    return '\n'.join(lines), kind in SILENT_KINDS
+
+
+def cause_and_fix(unit, lines):
+    """Return (cause_html, fix_html) from the last journal lines."""
+    if any(m in line for line in lines for m in PORT_IN_USE_MARKERS):
+        return (f'<code>port {PORT} in use</code>',
+                f"<code>ss -ltnp 'sport = :{PORT}'</code>")
+    fix = f'<code>journalctl -u {html.escape(unit)} -n 50</code>'
     errors = [line for line in lines if 'error' in line.lower() or 'traceback' in line.lower()]
     if errors:
-        return 'An error on startup: <code>' + html.escape(errors[-1].strip()[:MAX_CAUSE_CHARS]) + '</code>'
-    return 'Unknown.'
+        return '<code>' + _esc(_trunc(errors[-1].strip(), MAX_CAUSE_CHARS)) + '</code>', fix
+    return 'unknown', fix
 
 
-def failed_message(unit, lines):
-    name = html.escape(display_name(unit))
-    return (
-        f'<b>{name} is down</b>\n\n'
-        f'<b>What\'s happening:</b> {name} has stopped and will not restart by itself.\n'
-        f'<b>Likely cause:</b> {likely_cause(lines)}\n'
-        f'<b>To fix:</b> <code>systemctl restart {html.escape(unit)}</code>\n\n'
-        f'<i>Logs: journalctl -u {html.escape(unit)} -n 50</i>'
-    )
+def down_message(unit, lines, *, source=None):
+    cause, _ = cause_and_fix(unit, lines)
+    return format_alert(
+        'problem', f'{display_name(unit)} down',
+        impact="Stopped and won't restart by itself.",
+        facts=[('Cause', cause), ('Fix', f'<code>systemctl restart {html.escape(unit)}</code>')],
+        logs=lines, source=source or unit)
 
 
-def loop_message(unit, count, lines):
-    name = html.escape(display_name(unit))
-    return (
-        f'<b>{name} keeps crashing</b>\n\n'
-        f'<b>What\'s happening:</b> {name} crashed {count} times in the last 10 minutes. '
-        f'The dashboard is probably down.\n'
-        f'<b>Likely cause:</b> {likely_cause(lines)}\n'
-        f'<b>What happens next:</b> It keeps restarting by itself, waiting longer each time '
-        f'(up to 5 minutes). No more alerts about this for 1 hour.\n\n'
-        f'<i>Logs: journalctl -u {html.escape(unit)} -n 50</i>'
-    )
+def loop_message(unit, count, since_ts, lines, *, source=None):
+    cause, fix = cause_and_fix(unit, lines)
+    return format_alert(
+        'problem', f'{display_name(unit)} crash-looping', context=f'{count} restarts',
+        impact='Dashboard probably down. Retrying with backoff, up to 5 min apart.',
+        facts=[('Cause', cause), ('Since', _hhmm(since_ts)), ('Fix', fix)],
+        logs=lines, source=source or unit)
+
+
+def back_message(unit, down_s, *, source=None):
+    minutes = max(1, round(down_s / SECONDS_PER_MIN))
+    return format_alert('recovery', f'{display_name(unit)} back', context=f'down {minutes} min',
+                        source=source or unit)
 
 
 def is_failed(unit):
@@ -95,6 +163,29 @@ def is_failed(unit):
                               capture_output=True, timeout=SUBPROCESS_TIMEOUT_S).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def is_active(unit):
+    try:
+        return subprocess.run(['systemctl', 'is-active', '--quiet', unit],
+                              capture_output=True, timeout=SUBPROCESS_TIMEOUT_S).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def active_seconds(unit):
+    """Seconds the unit has been active; 0 if not active or unparsable."""
+    try:
+        out = subprocess.run(['systemctl', 'show', '-p', 'ActiveEnterTimestampMonotonic', '--value', unit],
+                             capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_S).stdout.strip()
+        entered = int(out)
+        if entered <= 0:
+            return 0
+        with open('/proc/uptime') as fh:
+            uptime = float(fh.read().split()[0])
+        return max(0.0, uptime - entered / USEC_PER_S)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
 
 
 def _load_state():
@@ -124,35 +215,77 @@ def _prune(state, now):
         alerted = entry.get('alerted')
         if not isinstance(alerted, (int, float)) or alerted <= cutoff:
             alerted = None
-        if calls or alerted is not None:
-            pruned[name] = {'calls': calls, 'alerted': alerted}
+        since = entry.get('incident_since')
+        if not isinstance(since, (int, float)):
+            since = None
+        if calls or alerted is not None or since is not None:
+            pruned[name] = {'calls': calls, 'alerted': alerted, 'incident_since': since}
     return pruned
 
 
+def _open_incident(entry, since):
+    if entry.get('incident_since') is None:
+        entry['incident_since'] = since
+
+
+def check_recovery(unit, send_telegram):
+    now = time.time()
+    state = _prune(_load_state(), now)
+    entry = state.get(unit)
+    if not entry or entry.get('incident_since') is None:
+        return 0
+    if not is_active(unit) or active_seconds(unit) < RECOVERY_MIN_ACTIVE_S:
+        return 0
+    msg, silent = back_message(unit, now - entry['incident_since'])
+    if not send_telegram(msg, silent=silent):
+        return 1
+    entry['incident_since'] = None
+    _save_state(state)
+    return 0
+
+
 def main(argv):
-    unit = argv[0] if len(argv) == 1 else 'courtview'
-    if not _UNIT_RE.match(unit) or '..' in unit:
-        print('usage: cv_notify_fail.py <unit>', file=sys.stderr)
+    recovery = len(argv) == 2 and argv[0] == '--check-recovery'
+    if recovery:
+        unit = argv[1]
+    elif len(argv) == 1:
+        unit = argv[0]
+    else:
+        unit = ''
+    if not unit or not _UNIT_RE.match(unit) or '..' in unit:
+        print('usage: cv_notify_fail.py <unit> | --check-recovery <unit>', file=sys.stderr)
         return 2
 
-    time.sleep(WAIT_S)
+    if not recovery:
+        time.sleep(WAIT_S)
     from notify import send_telegram
 
-    if is_failed(unit):
-        send_telegram(failed_message(unit, journal_tail(unit)))
-        return 0
+    if recovery:
+        return check_recovery(unit, send_telegram)
 
     now = time.time()
     state = _prune(_load_state(), now)
-    entry = state.setdefault(unit, {'calls': [], 'alerted': None})
+    entry = state.setdefault(unit, {'calls': [], 'alerted': None, 'incident_since': None})
+
+    if is_failed(unit):
+        msg, silent = down_message(unit, journal_tail(unit))
+        if not send_telegram(msg, silent=silent):
+            return 1
+        window = [t for t in entry['calls'] if t > now - LOOP_WINDOW_S]
+        _open_incident(entry, min(window) if window else now)
+        _save_state(state)
+        return 0
+
     entry['calls'].append(now)
     recent = [t for t in entry['calls'] if t > now - LOOP_WINDOW_S]
     in_cooldown = entry['alerted'] is not None and entry['alerted'] > now - LOOP_ALERT_COOLDOWN_S
 
     rc = 0
     if len(recent) >= LOOP_COUNT and not in_cooldown:
-        if send_telegram(loop_message(unit, len(recent), journal_tail(unit))):
+        msg, silent = loop_message(unit, len(recent), min(recent), journal_tail(unit))
+        if send_telegram(msg, silent=silent):
             entry['alerted'] = now
+            _open_incident(entry, min(recent))
         else:
             rc = 1
     else:
