@@ -242,6 +242,13 @@ def _systemctl(verb, unit):
         print(f'[cv_notify_fail] systemctl {verb} {_timer(unit)} failed: {type(exc).__name__}', file=sys.stderr)
 
 
+def _send(send_telegram, msg, silent, label):
+    """Send one alert and log the outcome (counted from the journal in drills)."""
+    sent = send_telegram(msg, silent=silent)
+    print(f'[cv_notify_fail] {label} alert {"sent" if sent else "queued"}')
+    return sent
+
+
 def _open_incident(entry, since):
     if entry.get('incident_since') is None:
         entry['incident_since'] = since
@@ -270,7 +277,7 @@ def _check_recovery_locked(unit, send_telegram):
     if not is_active(unit) or active_seconds(unit) < RECOVERY_MIN_ACTIVE_S:
         return 0
     msg, silent = back_message(unit, now - entry['incident_since'])
-    sent = send_telegram(msg, silent=silent)
+    sent = _send(send_telegram, msg, silent, 'green')
     # A failed send is already queued in the outbox, so the incident closes either way
     # (otherwise every retry would queue another green).
     entry['incident_since'] = None
@@ -304,7 +311,7 @@ def main(argv):
 
     if is_failed(unit):
         msg, silent = down_message(unit, journal_tail(unit))
-        sent = send_telegram(msg, silent=silent)
+        sent = _send(send_telegram, msg, silent, 'red down')
         window = [t for t in entry['calls'] if t > now - LOOP_WINDOW_S]
         _open_incident(entry, min(window) if window else now)
         _save_state(state)
@@ -321,7 +328,7 @@ def main(argv):
         entry['alerted'] = now
         _open_incident(entry, min(recent))
         _systemctl('start', unit)
-        if not send_telegram(msg, silent=silent):
+        if not _send(send_telegram, msg, silent, 'red loop'):
             rc = 1
     else:
         print('recovered, no alert')
