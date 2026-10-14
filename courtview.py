@@ -14,6 +14,7 @@ Run: gunicorn via courtview.service (systemd); python3 courtview.py is a dev fal
 Deployed to: /root/projects/courtview/courtview.py
 """
 
+import base64
 import hashlib
 import hmac
 import html
@@ -33,7 +34,8 @@ from zoneinfo import ZoneInfo
 from time import time as _now
 from urllib.parse import urlencode, parse_qsl
 
-from flask import Flask, Response, jsonify, make_response, request
+from flask import Flask, Response, g, jsonify, make_response, request
+from werkzeug.security import safe_join
 from curl_cffi import requests as cffi_requests
 
 # ---------------------------------------------------------------------------
@@ -710,6 +712,9 @@ _ACCESS_FD   = None  # opened at startup
 
 _ACCESS_PATHS = {"/access", "/access/data"}
 
+ACCESS_LOG_MAX_BYTES = 1 * 1024 * 1024   # rotate access.log past this size
+ACCESS_LOG_KEEP      = 5                 # access.log.1 .. access.log.5
+
 # Web assets loaded from the nightwatch dashboard directory at startup
 _ACCESS_HTML_BYTES: bytes = b""
 _ACCESS_JS_BYTES:   bytes = b""
@@ -737,11 +742,12 @@ def _strip_wireslammer() -> None:
     """Patch in-memory access page for CourtView: remove Wireslammer, retitle, strip logo."""
     global _ACCESS_HTML_BYTES, _ACCESS_JS_BYTES
 
-    # Retitle
-    _ACCESS_HTML_BYTES = _ACCESS_HTML_BYTES.replace(
-        b'<title>doxxnet Labs</title>',
-        b'<title>CourtView Access Log</title>',
-    )
+    # Retitle: replace whatever the first <title> says (labs' page reads "Access Log - doxxnet Labs")
+    _ACCESS_HTML_BYTES, n_title = re.subn(
+        rb'<title>.*?</title>', b'<title>CourtView Access Log</title>',
+        _ACCESS_HTML_BYTES, count=1, flags=re.IGNORECASE | re.DOTALL)
+    if not n_title:
+        print("[startup] WARNING: access page title not found, not retitled")
 
     # Remove logo div (<!-- Logo --> comment through its closing </div>)
     _ACCESS_HTML_BYTES = re.sub(
@@ -793,7 +799,39 @@ def _strip_wireslammer() -> None:
         )
 
 
+def _open_access_log():
+    """Append-open ACCESS_LOG_PATH at 0600 (line buffered)."""
+    fd = os.open(ACCESS_LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.fchmod(fd, 0o600)
+    return os.fdopen(fd, "a", buffering=1)
+
+
+def _rotate_access_log() -> None:
+    """Shift access.log -> .1 -> ... -> .KEEP (oldest dropped), all 0600, then reopen.
+    Caller holds _ACCESS_LOCK. gunicorn runs one worker, so an in-process lock is enough."""
+    global _ACCESS_FD
+    try:
+        _ACCESS_FD.close()
+    except OSError:
+        pass
+    _ACCESS_FD = None
+    try:
+        for i in range(ACCESS_LOG_KEEP, 0, -1):
+            src = ACCESS_LOG_PATH if i == 1 else f"{ACCESS_LOG_PATH}.{i - 1}"
+            dst = f"{ACCESS_LOG_PATH}.{i}"
+            if os.path.exists(src):
+                os.replace(src, dst)
+                os.chmod(dst, 0o600)
+    except OSError as exc:
+        print(f"[access] rotate error: {type(exc).__name__}", flush=True)
+    try:
+        _ACCESS_FD = _open_access_log()
+    except OSError as exc:
+        print(f"[access] reopen error: {type(exc).__name__}", flush=True)
+
+
 def _log_access(ip: str, path: str, auth: str, ua: str = "") -> None:
+    global _ACCESS_FD
     entry = {
         "ts":   datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "ip":   ip,
@@ -807,8 +845,10 @@ def _log_access(ip: str, path: str, auth: str, ua: str = "") -> None:
             try:
                 _ACCESS_FD.write(json.dumps(entry) + "\n")
                 _ACCESS_FD.flush()
-            except OSError:
-                pass
+                if os.fstat(_ACCESS_FD.fileno()).st_size > ACCESS_LOG_MAX_BYTES:
+                    _rotate_access_log()
+            except OSError as exc:
+                print(f"[access] log write error: {type(exc).__name__}", flush=True)
     with _IP_LOCK:
         if ip not in _IP_CACHE:
             _IP_CACHE[ip] = _LOOKUP_PENDING
@@ -1378,18 +1418,51 @@ def _purge_availability(now_s: float) -> int:
 # Flask application
 # ---------------------------------------------------------------------------
 
-app = Flask(__name__)
+# static_folder=None: Flask's built-in /static route would bypass the token gate.
+app = Flask(__name__, static_folder=None)
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024  # 1 MiB (Caddy already caps requests at 1 MB)
+app.url_map.merge_slashes = False
+
+# Content-Security-Policy profiles. style-src keeps 'unsafe-inline' because courtview.html has
+# ~40 static style attributes plus many generated inside innerHTML templates, which no hash or
+# nonce can cover without a rewrite. script-src is hash-only (no 'unsafe-inline'), so injected
+# markup cannot run script.
+CSP_DASHBOARD_TMPL = (
+    "default-src 'self'; script-src 'self' {script}; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+    "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
+    "form-action 'none'; frame-ancestors 'none'"
+)
+CSP_ACCESS = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+    "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+CSP_API = "default-src 'none'; frame-ancestors 'none'"
+_dashboard_csp: str = CSP_DASHBOARD_TMPL.format(script="")
 
 # Load dashboard HTML into memory at startup
 _dashboard_bytes: bytes = b""
 
 
+def _build_dashboard_csp(html_bytes: bytes) -> str:
+    """CSP whose script-src allows exactly the inline <script> body in the served bytes (sha256).
+    If it cannot be found, script-src stays 'self' only: the page breaks visibly, never weakens."""
+    found = re.findall(rb"<script>(.*?)</script>", html_bytes, flags=re.DOTALL)
+    if len(found) != 1:
+        print(f"[startup] WARNING: expected 1 inline script in dashboard, found {len(found)}; "
+              "script-src falls back to 'self'")
+        return CSP_DASHBOARD_TMPL.format(script="")
+    digest = base64.b64encode(hashlib.sha256(found[0]).digest()).decode("ascii")
+    return CSP_DASHBOARD_TMPL.format(script=f"'sha256-{digest}'")
+
+
 def _load_dashboard() -> None:
-    global _dashboard_bytes
+    global _dashboard_bytes, _dashboard_csp
     try:
         with open(DASHBOARD_HTML, "rb") as fh:
             _dashboard_bytes = fh.read()
         print(f"[startup] loaded {DASHBOARD_HTML} ({len(_dashboard_bytes)} bytes)")
+        _dashboard_csp = _build_dashboard_csp(_dashboard_bytes)
     except OSError as exc:
         print(f"[startup] WARNING: could not load dashboard HTML: {exc}")
 
@@ -1415,17 +1488,21 @@ def _gate() -> tuple[bool, str]:
     """Check rate limit and token. Return (passed, token_value)."""
     ip = _get_client_ip()
     if _is_rate_limited(ip):
+        g.cv_auth = "RATE_LIMITED"
         return False, ""
     query_token, cookie_token = _provided_token()
     provided = query_token or cookie_token
     expected = _read_token()
     if not expected or not provided:
+        g.cv_auth = "BLOCKED"
         _record_auth_fail(ip)
         return False, ""
     if not _constant_time_eq(provided, expected):
+        g.cv_auth = "BLOCKED"
         _record_auth_fail(ip)
         print(f"[auth] fail from {html.escape(ip)}")
         return False, ""
+    g.cv_auth = "TOKEN" if query_token else "OK"
     return True, query_token  # return query_token so caller knows if cookie should be set
 
 
@@ -1456,6 +1533,7 @@ def _block_archived_club():
     expected = _read_token()
     if not provided or not expected or not _constant_time_eq(provided, expected):
         return None
+    g.cv_auth = "OK"
     print(f"[archived] 410 {request.method} {path}", flush=True)
     return jsonify({"error": ARCHIVED_ERROR, "message": ARCHIVED_MESSAGE}), 410
 
@@ -1477,18 +1555,25 @@ def index():
 
 @app.route("/<path:filename>", methods=["GET"])
 def static_asset(filename):
-    """Serve static files (.css, .js) from the same directory as this script. Auth-gated."""
-    allowed_exts = {".css", ".js", ".ico", ".png", ".svg", ".woff2"}
-    _, ext = os.path.splitext(filename)
-    if ext.lower() not in allowed_exts:
-        # Not a recognised static asset and not an /api/ path - 404
-        return Response(b"Not found.", status=404, content_type="text/plain")
-
+    """Serve static files (.css, .js) from the same directory as this script. Auth-gated first
+    (no 404 oracle for unauthenticated callers), then traversal-hardened."""
     passed, via_query = _gate()
     if not passed:
         return _forbidden()
 
-    asset_path = os.path.join(os.path.dirname(__file__), filename)
+    raw = (request.environ.get("RAW_URI") or request.environ.get("REQUEST_URI") or "").lower()
+    if (".." in filename or "\\" in filename or "%" in filename or "\x00" in filename
+            or filename.startswith("/") or any(t in raw for t in ("%2e", "%2f", "%5c"))):
+        return Response(b"Not found.", status=404, content_type="text/plain")
+
+    allowed_exts = {".css", ".js", ".ico", ".png", ".svg", ".woff2"}
+    _, ext = os.path.splitext(filename)
+    if ext.lower() not in allowed_exts:
+        return Response(b"Not found.", status=404, content_type="text/plain")
+
+    asset_path = safe_join(os.path.dirname(os.path.abspath(__file__)), filename)
+    if asset_path is None:
+        return Response(b"Not found.", status=404, content_type="text/plain")
     try:
         with open(asset_path, "rb") as fh:
             data = fh.read()
@@ -3032,17 +3117,23 @@ def proxy(p):
                 resp401.status_code = 502
                 return resp401
 
-            ct = upstream.headers.get("content-type", "application/json")
-            body = upstream.content
-            if "json" in ct.lower():
-                body = _scrub_json_text(upstream.content.decode("utf-8", errors="replace")).encode("utf-8")
+            # Always relay as application/json (never the upstream content-type), and only
+            # when the body really is JSON.
+            text = upstream.content.decode("utf-8", errors="replace")
+            try:
+                json.loads(text)
+            except ValueError:
+                bad = jsonify({"error": "upstream returned non-JSON"})
+                bad.status_code = 502
+                return bad
+            body = _scrub_json_text(text).encode("utf-8")
 
             # Store the scrubbed payload only when it is real availability (never an error dict)
             if full_path == CACHED_PATH and upstream.status_code == 200:
                 club_id, start, end = _cache_key(request.args.to_dict())
                 store_cached(club_id, start, end, body.decode("utf-8", errors="replace"))
 
-            return Response(body, status=upstream.status_code, content_type=ct)
+            return Response(body, status=upstream.status_code, content_type="application/json")
         except Exception as exc:
             return _exc_error(exc, 502)
 
@@ -3063,18 +3154,40 @@ def proxy(p):
 
 
 @app.after_request
+def _security_headers(response):
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    path = request.path
+    if path == "/":
+        csp = _dashboard_csp
+    elif path == "/access":
+        csp = CSP_ACCESS
+    else:
+        csp = CSP_API
+    response.headers.setdefault("Content-Security-Policy", csp)  # _forbidden keeps its own
+    if path.startswith("/api/") or path == "/access/data":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.errorhandler(404)
+def _not_found(_exc):
+    """Unmatched URLs: still token-gated so unauthenticated callers cannot probe the URL space."""
+    passed, _ = _gate()
+    if not passed:
+        return _forbidden()
+    return Response(b"Not found.", status=404, content_type="text/plain")
+
+
+@app.after_request
 def log_req(response):
     path = request.path
     if path not in _ACCESS_PATHS:
         ip = _get_client_ip()
-        if response.status_code == 429:
-            auth = "RATE_LIMITED"
-        elif response.status_code == 403:
-            auth = "BLOCKED"
-        elif request.args.get("token"):
-            auth = "TOKEN"
-        else:
-            auth = "OK"
+        # Label comes from the gate result; requests that never reached the gate
+        # (e.g. non-GET 403s) fall back to the status code.
+        auth = g.get("cv_auth") or ("RATE_LIMITED" if response.status_code == 429 else "BLOCKED")
         ua = request.headers.get("User-Agent", "")
         _log_access(ip, path, auth, ua)
     return response
@@ -3084,6 +3197,7 @@ def log_req(response):
 def access_page():
     ip = _get_client_ip()
     if _is_rate_limited(ip):
+        g.cv_auth = "RATE_LIMITED"
         return Response(b"Too Many Requests", status=429, content_type="text/plain")
     passed, via_query = _gate()
     if not passed:
@@ -3119,6 +3233,7 @@ def dashboard_css():
 def access_data():
     ip = _get_client_ip()
     if _is_rate_limited(ip):
+        g.cv_auth = "RATE_LIMITED"
         return Response(b"Too Many Requests", status=429, content_type="text/plain")
     passed, _ = _gate()
     if not passed:
@@ -3397,7 +3512,7 @@ def _startup() -> None:
 
     # Open access log file and pre-load recent entries into memory
     try:
-        _ACCESS_FD = open(ACCESS_LOG_PATH, "a", buffering=1)
+        _ACCESS_FD = _open_access_log()
         try:
             with open(ACCESS_LOG_PATH, "r") as _fh:
                 _lines = _fh.readlines()

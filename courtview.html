@@ -694,10 +694,10 @@ nav {
         <h2 class="sec-title" id="b2b-title">Back-to-Back Sessions</h2>
       </div>
       <div class="dur-row" role="group" aria-label="Target session duration">
-        <button class="dbtn on" data-dur="120" onclick="pickDur(this)">2 hrs</button>
-        <button class="dbtn"    data-dur="150" onclick="pickDur(this)">2.5 hrs</button>
-        <button class="dbtn"    data-dur="180" onclick="pickDur(this)">3 hrs</button>
-        <button class="dbtn"    data-dur="240" onclick="pickDur(this)">4 hrs</button>
+        <button class="dbtn on" data-dur="120">2 hrs</button>
+        <button class="dbtn"    data-dur="150">2.5 hrs</button>
+        <button class="dbtn"    data-dur="180">3 hrs</button>
+        <button class="dbtn"    data-dur="240">4 hrs</button>
       </div>
       <div id="b2bOut"><div class="spin-wrap"><div class="sp" aria-hidden="true"></div>Calculating...</div></div>
     </section>
@@ -2994,6 +2994,7 @@ function warmOtherClubs() {
 }
 
 /* INIT */
+document.querySelectorAll('.dbtn[data-dur]').forEach(b => b.addEventListener('click', () => pickDur(b)));
 setupTabs();
 setupRevenue();
 buildDateTabs();
