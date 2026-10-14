@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright
 
 RACKETEER = "5111764d9bb14be3adbdb8e133e8bd80"
 PADIUM = "47d2eb0db7194a9dbd29783c3a2a82ad"
-DEFAULT_BASE = "https://labs.doxx:8766"
+DEFAULT_BASE = "https://courtview.labs.doxx:47200"
 WARMUP_WAIT_MS = 8000
 RECS_WAIT_MS = 30000
 TABS = ["book", "club", "stats", "compare", "revenue"]

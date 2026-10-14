@@ -20,14 +20,14 @@ rpi 'systemctl is-active courtview'                                          # m
 | `access.log` | JSONL access log |
 | `cv_notify_fail.py` | OnFailure notifier: 🔴 "down" (still failed after 15s) or 🔴 "crash-looping" (3+ crashes in 10 min, 1h cooldown), plus a silent 🟢 "back" via `--check-recovery` (ExecStartPost, 90s after start, needs 60s up, once per incident). Style: `~/dev/doxxnet-labs/.claude/docs/telegram-style.md`. State `unit_failure_state.json` (0600) |
 | `/etc/systemd/system/courtview.service` | `Restart=always` with backoff (`RestartSteps=5`, max 5 min), `StartLimitIntervalSec=0`, `OnFailure=notify-telegram@%p`, `ExecStartPost` recovery check. Logs go to the journal |
-| `/root/.courtview_token` | Auth token (`?token=...` sets the `courtview_token` cookie) |
+| `/root/.courtview_token` | Auth token (`?token=...` sets the `courtview_token` cookie). Rotate safely: write a temp file in /root, `chmod 600`, then `mv` it over the token. A transient empty or unreadable file keeps the last good token |
 | `/root/labs/web/` | `access.html`, `access.js`, `dashboard.css`, owned by doxxnet-labs and loaded at startup |
 
 System Python only, no venv: `python3 -m pip install --break-system-packages`.
 
 ## Access
 
-`https://labs.doxx:8766/` (dashboard), `/access` (access log), `/api/*` (proxy, whitelisted by `ALLOWED_PATHS`). All need the token.
+`https://courtview.labs.doxx:47200/` (Caddy -> 127.0.0.1:8766): dashboard, `/access` (access log), `/api/*` (proxy, whitelisted by `ALLOWED_PATHS`). All need the token. The app is GET/HEAD-only (other methods get 403/405, no CORS headers), and `?token=` is honoured on GET/HEAD only.
 
 ## Clubs
 

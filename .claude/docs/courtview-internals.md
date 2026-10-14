@@ -28,7 +28,7 @@ Quirks:
 
 ## Racketeer guard
 
-`@app.before_request _block_archived_club` returns 410 `{error: "archived"}` for any `/api/` path except `/api/archive/` when `club_id`, `club_ids` or a POST JSON `club_id` is Racketeer. Cache-only routes (`/api/month`, `/api/heatmap`, `/api/court-popularity`) are included. Racketeer payment search goes through `/api/archive/payment-search`, which reads `archive_financial` only and never contacts upstream. The token is checked first without recording failures, so unauthenticated callers still get 403. Each 410 logs `[archived] 410 METHOD path` to the journal; a clean UI load produces none.
+`@app.before_request _block_archived_club` returns 410 `{error: "archived"}` for any `/api/` path except `/api/archive/` when `club_id` or `club_ids` is Racketeer. Cache-only routes (`/api/month`, `/api/heatmap`, `/api/court-popularity`) are included. Racketeer payment search goes through `/api/archive/payment-search`, which reads `archive_financial` only and never contacts upstream. The token is checked first without recording failures, so unauthenticated callers still get 403. Each 410 logs `[archived] 410 METHOD path` to the journal; a clean UI load produces none.
 
 ## Payment history paging
 
@@ -72,4 +72,5 @@ One `operational` call per club every 24h (background thread; Padium and Rocket 
 - Archive selector (Racketeer only, on the Club Info, Stats and Revenue tabs): CSS defaults it to `display:none`, so `showArchiveSelector` must set `'flex'`, not `''`. It has no Live option and auto-loads the latest snapshot. `switchClub()` must hide all three selectors. For Racketeer every `load*` function returns after its archive branch; falling through to a live fetch now just gets a 410.
 - Membership plans: `hidden=True` plans still show, and `price=None` shows as "Free / partner". Rocket's paid plans are all hidden, and Padium has only corporate plans.
 - `/?token=x` sets the cookie and redirects (302) to `/`, which strips the token from the URL and history.
+- `_read_token` is keyed on `(st_mtime_ns, st_size)` and keeps the last good token when the file is empty, unreadable or missing (not cached, so the next request retries). Transitions log `[token] ...` to the journal (never the value). With no good token at startup it returns "" and everything is denied. A `before_request` guard (`_allow_only_get_head`) returns 403 for any method other than GET/HEAD, `?token=` is ignored on other methods, and no response carries `Access-Control-*` headers.
 - Tabs pre-load in the background after availability loads. Other clubs warm up after 6s.
