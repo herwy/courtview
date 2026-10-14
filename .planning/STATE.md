@@ -45,6 +45,7 @@ last_updated: "2026-10-14T00:00:00Z"
 | 33 | Subscription revenue panel: empty-state message instead of a blank box (Padium has no paid subscriptions) | 2026-10-14 | f6ac5ca | fast |
 | 34 | Revenue cards: Subscriptions from total_current_subscription_amount (Padelmates' combined field is always 0), new Credits card, Total incl. subscriptions (also on Compare) via revTotalInclSubs() | 2026-10-14 | 1085c20 | fast |
 | 35 | Payment search + table-backed Top spenders: payments/payments_sync tables (per London day, final days never re-fetched, 10-min freshness, 30-min background loop, Padium+Rocket only), shared _fetch_payment_page (all 18 upstream calls Android headers + chrome110), /api/payment-search + /api/archive/payment-search (Racketeer), leaderboard uncapped (was 2,000; Padium Sep has 5,776 successful). Backfill 405 pages. 20 unit + 11 pager tests, Playwright ALL PASS | 2026-10-14 | a0e2549 | 261014-2xq-payment-search-with-local-payments-table |
+| 36 | Auth hardening (via doxxnet-labs review request): last-good token reload keyed on (mtime_ns,size), empty/unreadable read keeps old token, fail closed at startup; GET/HEAD-only (proxy POST/OPTIONS + origin-reflecting CORS removed, before_request 403), ?token= GET-only; CLAUDE.md URL now courtview.labs.doxx:47200 + safe rotation. 16 auth + 20 payments + 11 pager tests, rotation drill 77/77 200, Playwright ALL PASS | 2026-10-14 | 02acc51 | 261014-e6u-auth-hardening-token-last-good-and-get-o |
 
 ## Session Continuity
 
