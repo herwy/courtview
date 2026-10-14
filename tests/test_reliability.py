@@ -452,5 +452,367 @@ class HealthTests(RouteBase):
             self.assertEqual(self.client.get("/api/health").status_code, 403)
 
 
+# ---------------------------------------------------------------------------
+# Availability window, purge, job_state, status JSON
+# ---------------------------------------------------------------------------
+
+def ms_utc(y, mo, d, h=0, mi=0, s=0):
+    return int(datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+class WindowTests(RouteBase):
+    def put(self, club, start, end, fetched_at=None):
+        c = self.db()
+        c.execute("INSERT OR REPLACE INTO availability VALUES (?,?,?,?,?)",
+                  (club, str(start), str(end), json.dumps({"allSlots": []}), fetched_at or int(time.time())))
+        c.commit()
+        c.close()
+
+    def test_refresh_targets_are_today_forward_only(self):
+        now = time.time()
+        today = datetime.fromtimestamp(now, cv._LONDON_TZ).date()
+        keys = cv._london_day_keys(today)
+        lo = int(keys[0][1])
+        day = 86400 * 1000
+        self.put(CLUB, lo - 3 * day, lo - 3 * day + 86399999)       # past
+        self.put(RACK, lo + day, lo + day + 86399999)               # Racketeer
+        self.put(CLUB, lo + 40 * day, lo + 40 * day + 86399999)     # beyond +28 d
+        self.put("other-live", lo + 2 * day, lo + 2 * day + 86399999)  # extra in-window row: kept
+        self.put(CLUB, keys[3][1], keys[3][2])                      # duplicate of a generated key
+        targets = cv._availability_refresh_targets(now)
+        self.assertEqual(len(targets), len(set(targets)))
+        expected = {(c["id"], k[1], k[2]) for c in cv.HEATMAP_CLUBS for k in keys}
+        self.assertEqual(len(expected), 56)
+        self.assertEqual(set(targets), expected | {("other-live", str(lo + 2 * day), str(lo + 2 * day + 86399999))})
+        self.assertFalse(any(t[0] == RACK for t in targets))
+        self.assertTrue(all(int(t[1]) >= lo for t in targets))
+        self.assertTrue(all(int(t[1]) < lo + 28 * day + 3600000 for t in targets))
+
+    def test_purge_removes_past_nonnumeric_and_racketeer(self):
+        now = time.time()
+        today = datetime.fromtimestamp(now, cv._LONDON_TZ).date()
+        keys = cv._london_day_keys(today, 3)
+        lo = int(keys[0][1])
+        day = 86400 * 1000
+        self.put(CLUB, lo - day, lo - 1)
+        self.put(CLUB, "abc", "def")
+        self.put(RACK, keys[1][1], keys[1][2])
+        self.put(CLUB, keys[0][1], keys[0][2])   # today stays
+        self.put(CLUB, keys[2][1], keys[2][2])   # future stays
+        self.assertEqual(cv._purge_availability(now), 3)
+        c = self.db()
+        left = c.execute("SELECT club_id, start_datetime FROM availability ORDER BY start_datetime").fetchall()
+        c.close()
+        self.assertEqual(left, [(CLUB, keys[0][1]), (CLUB, keys[2][1])])
+
+    def test_cycle_fetches_only_targets_and_records_state_and_status(self):
+        self.handler = lambda path, q: Resp(200, {"allSlots": [], "reservedBookings": []})
+        now = time.time()
+        keys = cv._london_day_keys(datetime.fromtimestamp(now, cv._LONDON_TZ).date())
+        self.put(CLUB, int(keys[0][1]) - 86400000, int(keys[0][1]) - 1)  # past: purged, not fetched
+        ok, attempted, refreshed = cv._availability_cycle()
+        self.assertEqual((ok, attempted, refreshed), (True, 56, 56))
+        self.assertEqual(len(self.calls), 56)
+        self.assertEqual(self.count("availability"), 56)
+        st = cv._job_states()["availability"]
+        self.assertEqual((st["ok"], st["calls"], st["errors"]), (True, 56, 0))
+        status = json.load(open(os.path.join(cv.STATUS_DIR, "availability.json")))
+        self.assertEqual(status["job"], "availability")
+        self.assertEqual(status["calls"], 56)
+
+    def test_cycle_stops_when_breaker_opens(self):
+        self.handler = lambda path, q: Resp(500)
+        ok, attempted, refreshed = cv._availability_cycle()
+        self.assertFalse(ok)
+        self.assertEqual(refreshed, 0)
+        self.assertLess(attempted, 56)
+        self.assertFalse(cv._job_states()["availability"]["ok"])
+
+
+class JobStateTests(RouteBase):
+    T = 1_790_000_000
+
+    def setUp(self):
+        super().setUp()
+        self.clock = [self.T]
+        p = mock.patch.object(cv, "_now", lambda: self.clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_empty_db_is_due_now(self):
+        for job in ("availability", "heatmap", "payments"):
+            self.assertEqual(cv._job_due_in(job, 21600, 1800), 0.0)
+
+    def test_persisted_run_survives_restart(self):
+        cv._job_record("availability", self.T, True, 56, 0)
+        self.clock[0] = self.T + 3600
+        self.assertAlmostEqual(cv._job_due_in("availability", 21600, 1800), 18000, delta=1)
+        # a restart re-reads job_state only: no in-memory timer exists to reset
+        self.assertAlmostEqual(cv._job_due_in("availability", 21600, 1800), 18000, delta=1)
+
+    def test_failed_run_retries_after_30_min(self):
+        cv._job_record("heatmap", self.T, False, 2, 1)
+        self.clock[0] = self.T + 1000
+        self.assertAlmostEqual(cv._job_due_in("heatmap", 86400, 1800), 800, delta=1)
+        self.clock[0] = self.T + 1801
+        self.assertEqual(cv._job_due_in("heatmap", 86400, 1800), 0.0)
+
+    def test_seeds_from_existing_data(self):
+        c = self.db()
+        c.execute("INSERT INTO availability VALUES (?,?,?,?,?)", (CLUB, "1", "2", "{}", self.T - 100))
+        c.execute("INSERT INTO availability VALUES (?,?,?,?,?)", (RACK, "1", "2", "{}", self.T - 5))  # ignored
+        for club, fa in ((CLUB, self.T - 7200), (CLUB2, self.T - 3600)):
+            c.execute("INSERT INTO heatmap_cache VALUES (?,?,?,?,?,?)", (club, 0, 8, 0.5, 30, fa))
+        c.execute("INSERT INTO payments_sync VALUES (?,?,?,?,?,?)", (CLUB, "2026-10-01", self.T - 600, 1, 1, 1))
+        c.commit()
+        c.close()
+        self.assertAlmostEqual(cv._job_due_in("availability", 21600, 1800), 21600 - 100, delta=1)
+        self.assertAlmostEqual(cv._job_due_in("heatmap", 86400, 1800), 86400 - 7200, delta=1)  # oldest club
+        self.assertAlmostEqual(cv._job_due_in("payments", 1800, 1800), 1800 - 600, delta=1)
+        self.assertEqual(self.count("job_state"), 3)
+
+    def test_heatmap_with_one_club_never_fetched_is_due(self):
+        c = self.db()
+        c.execute("INSERT INTO heatmap_cache VALUES (?,?,?,?,?,?)", (CLUB, 0, 8, 0.5, 30, self.T - 60))
+        c.commit()
+        c.close()
+        self.assertEqual(cv._job_due_in("heatmap", 86400, 1800), 0.0)
+
+    def test_wait_for_job_returns_immediately_when_due_and_logs_persisted_wait(self):
+        import contextlib
+        import io
+        cv._job_record("availability", self.T, True, 1, 0)
+        sleeps = []
+
+        def fake_sleep(n):
+            sleeps.append(n)
+            self.clock[0] += n
+
+        buf = io.StringIO()
+        with mock.patch.object(cv.time, "sleep", fake_sleep), contextlib.redirect_stdout(buf):
+            cv._wait_for_job("availability", 700, 100)
+        self.assertEqual(sleeps, [300, 300, 100])
+        self.assertEqual(buf.getvalue().count("next run in 11m (persisted)"), 1)
+
+    def test_heatmap_loop_records_failure(self):
+        self.handler = lambda path, q: Resp(200, {"hottest_time_slots": [{"x": "10:00", "y": 3}]})  # arrays missing
+        calls = []
+
+        def waiter(job, period, retry):
+            calls.append(job)
+            if len(calls) > 1:
+                raise SystemExit
+
+        with mock.patch.object(cv, "_wait_for_job", waiter):
+            with self.assertRaises(SystemExit):
+                cv._heatmap_refresh_loop()
+        st = cv._job_states()["heatmap"]
+        self.assertEqual((st["ok"], st["calls"], st["errors"]), (False, 2, 2))
+        self.assertEqual(self.count("heatmap_cache"), 0)
+
+    def test_heatmap_validation(self):
+        arrays = {"hottest_time_slots": [{"x": "10:00", "y": 3}],
+                  "week_day_wise_activity_count_combined_graph": [{"x": "Mon", "y": 2}],
+                  "court_wise_activity_count_combined_graph": [{"x": "Court 1", "y": 4}]}
+        for bad in ({k: v for k, v in arrays.items() if k != "court_wise_activity_count_combined_graph"},
+                    {k: [] for k in arrays}, {"detail": "boom"}):
+            self.handler = lambda path, q, b=bad: Resp(200, b)
+            self.assertFalse(cv._fetch_heatmap_for_club(CLUB, 7))
+            self.assertEqual(self.count("heatmap_cache"), 0)
+        self.handler = lambda path, q: Resp(200, arrays)
+        self.assertTrue(cv._fetch_heatmap_for_club(CLUB, 7))
+        self.assertGreater(self.count("heatmap_cache"), 0)
+
+
+class StatusFileTests(unittest.TestCase):
+    def test_atomic_mode_keys_and_no_leftovers(self):
+        d = os.path.join(_TMP, "status-test")
+        old = os.umask(0o077)
+        try:
+            with mock.patch.object(cv, "STATUS_DIR", d):
+                cv._write_job_status("availability", 1_790_000_000, True, 56, 1)
+                cv._write_job_status("availability", 1_790_000_100, False, 2, 2)
+        finally:
+            os.umask(old)
+        self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o755)
+        path = os.path.join(d, "availability.json")
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o644)
+        body = json.load(open(path))
+        self.assertEqual(set(body), {"job", "last_run", "ok", "calls", "errors"})
+        self.assertRegex(body["last_run"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(body, {"job": "availability", "last_run": cv._iso_z(1_790_000_100), "ok": False,
+                                "calls": 2, "errors": 2})
+        self.assertEqual(os.listdir(d), ["availability.json"])
+
+    def test_failure_does_not_raise(self):
+        with mock.patch.object(cv, "STATUS_DIR", "/proc/definitely/not/writable"):
+            cv._write_job_status("payments", 1, True, 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Payment routes are read-only; the background queue does the syncing
+# ---------------------------------------------------------------------------
+
+class PaymentRouteTests(RouteBase):
+    NOW = ms_utc(2026, 9, 20, 12)
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(cv, "_now", lambda: self.NOW / 1000)
+        p.start()
+        self.addCleanup(p.stop)
+        cv._PAY_QUEUE.clear()
+        self.addCleanup(cv._PAY_QUEUE.clear)
+
+    def window(self):
+        return f"club_id={CLUB}&start={ms_utc(2026, 9, 10)}&end={ms_utc(2026, 9, 12)}"
+
+    def test_routes_never_sync_inline_and_queue_the_window(self):
+        boom = mock.Mock(side_effect=AssertionError("inline sync"))
+        with mock.patch.object(cv, "_sync_payments", boom), mock.patch.object(cv, "_sync_payment_day", boom), \
+                mock.patch.object(cv, "_fetch_payment_page", boom):
+            for route in ("payment-leaderboard", "payment-history"):
+                r = self.client.get(f"/api/{route}?{self.window()}")
+                self.assertEqual(r.status_code, 200, route)
+                body = r.get_json()
+                self.assertFalse(body["complete"])
+                self.assertIsNone(body["synced_through"])
+                self.assertTrue(body["queued"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(list(cv._PAY_QUEUE), [(CLUB, "2026-09-10", "2026-09-12")])
+
+    def test_complete_window_is_not_queued(self):
+        c = self.db()
+        for d in ("2026-09-10", "2026-09-11", "2026-09-12"):
+            c.execute("INSERT INTO payments_sync VALUES (?,?,?,?,?,?)", (CLUB, d, self.NOW // 1000, 1, 1, 0))
+        c.commit()
+        c.close()
+        body = self.client.get(f"/api/payment-leaderboard?{self.window()}").get_json()
+        self.assertTrue(body["complete"])
+        self.assertFalse(body["queued"])
+        self.assertEqual(cv._PAY_QUEUE, {})
+
+    def test_enqueue_rules(self):
+        s, e = ms_utc(2026, 9, 10), ms_utc(2026, 9, 11)
+        self.assertFalse(cv._enqueue_payment_window(RACK, s, e))
+        self.assertFalse(cv._enqueue_payment_window("unknown", s, e))
+        self.assertTrue(cv._enqueue_payment_window(CLUB, s, e))
+        self.assertTrue(cv._enqueue_payment_window(CLUB, s, e))  # same window: still one entry
+        self.assertEqual(len(cv._PAY_QUEUE), 1)
+        for i in range(1, 30):
+            cv._enqueue_payment_window(CLUB2, ms_utc(2026, 8, 1) + i * 86400000, ms_utc(2026, 8, 1) + i * 86400000)
+        self.assertEqual(len(cv._PAY_QUEUE), cv.PAYMENTS_QUEUE_MAX)
+        self.assertFalse(cv._enqueue_payment_window(CLUB2, ms_utc(2026, 7, 1), ms_utc(2026, 7, 1)))
+
+    def test_drain_syncs_each_window_once(self):
+        cv._enqueue_payment_window(CLUB, ms_utc(2026, 9, 10), ms_utc(2026, 9, 12))
+        seen = []
+        with mock.patch.object(cv, "_sync_payments", lambda club, s, e: seen.append((club, s, e)) or {}):
+            self.assertEqual(cv._drain_payment_queue(), 1)
+            self.assertEqual(cv._drain_payment_queue(), 0)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], CLUB)
+        self.assertEqual(cv._london_day(seen[0][1]), "2026-09-10")
+        self.assertEqual(cv._london_day(seen[0][2]), "2026-09-12")
+
+    def test_window_sync_status(self):
+        s, e = ms_utc(2026, 9, 10, 6), ms_utc(2026, 9, 11, 21)
+        self.assertEqual(cv._window_sync_status(CLUB, s, e), {"complete": False, "synced_through": None})
+        c = self.db()
+        close_0910 = cv._london_day_bounds("2026-09-10")[1]
+        c.execute("INSERT INTO payments_sync VALUES (?,?,?,?,?,?)",
+                  (CLUB, "2026-09-10", close_0910 // 1000 + 3600, 1, 1, 0))      # final: counts as its close
+        c.execute("INSERT INTO payments_sync VALUES (?,?,?,?,?,?)",
+                  (CLUB, "2026-09-11", ms_utc(2026, 9, 11, 10) // 1000, 1, 1, 0))  # not final
+        c.commit()
+        res = cv._window_sync_status(CLUB, s, e)
+        self.assertTrue(res["complete"])
+        self.assertEqual(res["synced_through"], cv._iso_z(close_0910 / 1000))
+        self.assertRegex(res["synced_through"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        c.execute("UPDATE payments_sync SET complete=0 WHERE local_day='2026-09-11'")
+        c.commit()
+        self.assertFalse(cv._window_sync_status(CLUB, s, e)["complete"])
+        # clamped to the window end
+        early_end = ms_utc(2026, 9, 10, 6, 30)
+        c.execute("UPDATE payments_sync SET synced_at=? WHERE local_day='2026-09-10'", (ms_utc(2026, 9, 10, 12) // 1000,))
+        c.execute("UPDATE payments_sync SET complete=0 WHERE local_day='2026-09-10'")
+        c.commit()
+        c.close()
+        self.assertEqual(cv._window_sync_status(CLUB, s, early_end)["synced_through"], cv._iso_z(early_end / 1000))
+
+
+# ---------------------------------------------------------------------------
+# /api/availability-fresh
+# ---------------------------------------------------------------------------
+
+class FreshRouteTests(RouteBase):
+    def setUp(self):
+        super().setUp()
+        now = time.time()
+        today = datetime.fromtimestamp(now, cv._LONDON_TZ).date()
+        _d, self.start, self.end = cv._london_day_keys(today, 1)[0]
+        self.url = f"/api/availability-fresh?club_id={CLUB}&start_datetime={self.start}&end_datetime={self.end}"
+
+    def seed(self, age):
+        c = self.db()
+        c.execute("INSERT OR REPLACE INTO availability VALUES (?,?,?,?,?)",
+                  (CLUB, self.start, self.end, json.dumps({"allSlots": [], "marker": age}), int(time.time()) - age))
+        c.commit()
+        c.close()
+
+    def test_fresh_row_served_without_upstream(self):
+        self.seed(100)
+        r = self.client.get(self.url)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["marker"], 100)
+        self.assertEqual(self.calls, [])
+
+    def test_old_row_one_call_even_when_concurrent(self):
+        self.seed(1000)
+
+        def h(path, q):
+            REAL_SLEEP(0.1)
+            return Resp(200, {"allSlots": [], "marker": "new"})
+        self.handler = h
+        out = []
+        threads = [threading.Thread(target=lambda: out.append(cv.app.test_client().get(self.url).get_json()))
+                   for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual([o["marker"] for o in out], ["new", "new"])
+
+    def test_rejects_bad_windows_and_clubs(self):
+        now_ms = int(time.time() * 1000)
+        for start, end, club in ((now_ms - 40 * 3600000, now_ms - 39 * 3600000, CLUB),
+                                 (now_ms + 50 * 3600000, now_ms + 51 * 3600000, CLUB),
+                                 (now_ms, now_ms + 27 * 3600000, CLUB),
+                                 (now_ms, now_ms - 1, CLUB),
+                                 (now_ms, now_ms + 1000, "zzz")):
+            r = self.client.get(f"/api/availability-fresh?club_id={club}&start_datetime={start}&end_datetime={end}")
+            self.assertEqual(r.status_code, 400, (start, end, club))
+        self.assertEqual(self.client.get(
+            f"/api/availability-fresh?club_id={CLUB}&start_datetime=x&end_datetime=y").status_code, 400)
+        self.assertEqual(self.calls, [])
+
+    def test_failure_serves_stale_or_502(self):
+        self.handler = lambda path, q: Resp(500)
+        self.assertEqual(self.client.get(self.url).status_code, 502)
+        self.seed(5000)
+        r = self.client.get(self.url)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers.get("X-CourtView-Stale"), "1")
+        self.assertEqual(r.get_json()["marker"], 5000)
+
+    def test_error_shape_never_replaces_the_row(self):
+        self.seed(5000)
+        self.handler = lambda path, q: Resp(200, {"detail": "boom"})
+        r = self.client.get(self.url)
+        self.assertEqual(r.headers.get("X-CourtView-Stale"), "1")
+        self.assertEqual(r.get_json()["marker"], 5000)
+
+
 if __name__ == "__main__":
     unittest.main()

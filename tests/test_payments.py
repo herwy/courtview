@@ -269,17 +269,20 @@ class LeaderboardTests(RouteBase):
         fake = self.up(recs)
         url = f"/api/payment-leaderboard?club_id={CLUB}&start={ms(2026, 8, 31, 23)}&end={ms(2026, 9, 27, 22)}"
         self.now = ms(2026, 9, 28, 12)
+        cv._sync_payments(CLUB, ms(2026, 8, 31, 23), ms(2026, 9, 27, 22))  # the background loop's job
+        synced_calls = len(fake.calls)
         r = self.client.get(url)
         d = r.get_json()
-        self.assertEqual(list(d.keys()), ["leaders"])
+        self.assertEqual(list(d.keys()), ["leaders", "complete", "synced_through", "queued"])
+        self.assertTrue(d["complete"])
+        self.assertFalse(d["queued"])
         top = sorted(expected.items(), key=lambda kv: kv[1], reverse=True)[:5]
         cid = lambda name: cv._customer_key(f"{name.split()[0].lower()}@example.com")[:4].upper()
         self.assertEqual([(l["customer_id"], l["total"]) for l in d["leaders"]],
                          [(cid(n), float(t)) for n, t in top])
-        self.assertEqual(sum(1 for _ in fake.calls) > 25, True)
-        n = len(fake.calls)
+        self.assertGreater(synced_calls, 25)
         self.client.get(url)
-        self.assertEqual(len(fake.calls), n)
+        self.assertEqual(len(fake.calls), synced_calls)  # the route never touches upstream
 
     def test_bad_club(self):
         r = self.client.get(f"/api/payment-leaderboard?club_id=zzz&start=1&end=2")

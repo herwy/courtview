@@ -934,9 +934,11 @@ function fmtGBP(n) {
 }
 
 /* API */
-async function fetchDay(date, clubId = CLUB) {
+async function fetchDay(date, clubId = CLUB, { fresh = false } = {}) {
   if (isArchivedClub(clubId)) throw new Error('archived club');
-  const url = `${API}/player/player_booking/all_courts_slot_prices_v3?club_id=${clubId}&start_datetime=${dayStart(date)}&end_datetime=${dayEnd(date)}`;
+  // fresh: max 5 min old (watch notifications); the normal route can serve a 6 h old cache
+  const base = fresh ? '/api/availability-fresh' : `${API}/player/player_booking/all_courts_slot_prices_v3`;
+  const url = `${base}?club_id=${clubId}&start_datetime=${dayStart(date)}&end_datetime=${dayEnd(date)}`;
   const r = await apiFetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const data = await r.json();
@@ -1766,7 +1768,7 @@ async function pollWatches() {
   try {
     const today = new Date();
     const key = cacheKey(CLUB, isoDate(today));
-    const courts = await fetchDay(today);
+    const courts = await fetchDay(today, CLUB, { fresh: true });
     monthCache[key] = courts;
     const padel = courts.filter(c => c.sport_type === 'PADEL');
     for (const w of watches) {
@@ -2736,6 +2738,36 @@ async function loadRevenue(resetPay = true) {
 
   // Top spenders
   renderLeaders(leadersData);
+  if (leadersData && !leadersData.complete && leadersData.queued) {
+    pollLeadersWhileSyncing(clubId, mySeq, start, end);
+  }
+}
+
+/* The server syncs payments in the background: re-fetch the leaderboard every 15 s (max 8 times)
+ * while it reports an incomplete window, then refresh the Revenue tab once it is complete. */
+async function pollLeadersWhileSyncing(clubId, mySeq, start, end) {
+  for (let i = 0; i < 8; i++) {
+    await new Promise(r => setTimeout(r, 15000));
+    if (clubId !== CLUB || mySeq !== revReqSeq) return;
+    const data = await fetch(`/api/payment-leaderboard?club_id=${clubId}&start=${start}&end=${end}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null);
+    if (clubId !== CLUB || mySeq !== revReqSeq) return;
+    if (!data) continue;
+    renderLeaders(data);
+    if (data.complete) {
+      loadRevenue(false);
+      return;
+    }
+  }
+}
+
+function fmtDataUpTo(iso) {
+  const t = Date.parse(iso);
+  if (isNaN(t)) return '';
+  const dayOf = ms => new Date(ms).toLocaleDateString('en-CA', { timeZone: TZ });
+  if (dayOf(t) === dayOf(Date.now())) return `Data up to ${localHM(t)}`;
+  const d = new Date(t).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: TZ });
+  return `Data up to ${d} ${localHM(t)}`;
 }
 
 function payKey(p) {
@@ -2777,12 +2809,17 @@ function renderLeaders(data) {
   const out  = document.getElementById('revLeadersOut');
   const meta = document.getElementById('revLeadersMeta');
   const leaders = data?.leaders || [];
+  const syncing = data && !data.complete && data.queued;
+  const note = [syncing ? 'syncing...' : '', data?.synced_through ? fmtDataUpTo(data.synced_through) : '']
+    .filter(Boolean).join(' · ');
   if (!leaders.length) {
-    out.innerHTML = '<div class="empty">No successful payments this month.</div>';
-    meta.textContent = '';
+    out.innerHTML = syncing
+      ? '<div class="empty">Syncing payments...</div>'
+      : '<div class="empty">No successful payments this month.</div>';
+    meta.textContent = note;
     return;
   }
-  meta.textContent = `Top ${Math.min(3, leaders.length)} · successful payments`;
+  meta.textContent = [`Top ${Math.min(3, leaders.length)} · successful payments`, note].filter(Boolean).join(' · ');
   let h = '<div class="cp-list">';
   leaders.slice(0, 3).forEach((p, i) => {
     const n = Number(p.bookings) || 0;

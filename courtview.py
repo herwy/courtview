@@ -341,6 +341,13 @@ PAYMENTS_MAX_SKIP         = PAYMENTS_MAX_PAGES_PER_DAY * PAYMENTS_PAGE_SIZE
 HEATMAP_HOURS      = list(range(7, 23))   # 07:00-22:00
 HEATMAP_STALE_SECS = 24 * 3600           # refresh every 24h (1 API call per club)
 
+# Background job schedule (persisted in job_state, so a restart neither resets nor re-runs a job)
+AVAIL_REFRESH_SECS = 6 * 3600
+JOB_RETRY_SECS     = 1800                # a failed run is retried after 30 min
+WATCH_FRESH_SECS   = 300                 # /api/availability-fresh max cache age
+PAYMENTS_QUEUE_MAX = 16                  # queued on-demand payment windows
+STATUS_DIR = os.environ.get("COURTVIEW_STATUS_DIR", "/root/projects/courtview/status")
+
 # Racketeer migrated off Padelmates (2026-07-01). The club_id excludes it from background
 # polling and drives the 410 guard (_block_archived_club); only /api/archive/* serves it.
 RACKETEER_CLUB_ID = "5111764d9bb14be3adbdb8e133e8bd80"
@@ -1046,6 +1053,16 @@ def init_db() -> None:
                    PRIMARY KEY (club_id, local_day)
                )"""
         )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS job_state (
+                   job        TEXT PRIMARY KEY,
+                   last_run   INTEGER,
+                   ok         INTEGER,
+                   calls      INTEGER,
+                   errors     INTEGER,
+                   updated_at INTEGER
+               )"""
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_heatmap_club   ON archive_heatmap   (club_id, captured_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_club_info_club  ON archive_club_info  (club_id, captured_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_financial_club  ON archive_financial  (club_id, captured_at)")
@@ -1124,6 +1141,12 @@ def get_cached(club_id: str, start: str, end: str) -> str | None:
         conn.close()
 
 
+def _is_availability(parsed) -> bool:
+    """Real availability only: a dict with "allSlots" or a non-empty list. An error dict such as
+    {"detail": ...} or an empty list is never stored or served as data."""
+    return (isinstance(parsed, dict) and "allSlots" in parsed) or (isinstance(parsed, list) and bool(parsed))
+
+
 def store_cached(club_id: str, start: str, end: str, payload: str) -> None:
     """Insert or replace a cache entry."""
     if not club_id:
@@ -1133,9 +1156,7 @@ def store_cached(club_id: str, start: str, end: str, payload: str) -> None:
         parsed = json.loads(payload)
     except (ValueError, TypeError):
         return
-    # Only real availability is cached: a dict with "allSlots" or a non-empty list.
-    # An error dict such as {"detail": ...} or an empty list is never stored.
-    if not ((isinstance(parsed, dict) and "allSlots" in parsed) or (isinstance(parsed, list) and parsed)):
+    if not _is_availability(parsed):
         return
     conn = _db_connect()
     try:
@@ -1148,6 +1169,165 @@ def store_cached(club_id: str, start: str, end: str, payload: str) -> None:
         print(f"[cache] store error: {exc}")
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Persisted job schedule, status JSON, availability window helpers
+# ---------------------------------------------------------------------------
+
+def _job_seed(conn, job: str) -> int:
+    """First-deploy last_run, derived from existing data so the first deploy does not re-run a job
+    that just ran. 0 means "never ran" (due now)."""
+    if job == "availability":
+        row = conn.execute("SELECT MAX(fetched_at) FROM availability WHERE club_id != ?",
+                           (RACKETEER_CLUB_ID,)).fetchone()
+    elif job == "heatmap":
+        oldest = []
+        for club in HEATMAP_CLUBS:
+            r = conn.execute("SELECT MIN(fetched_at) FROM heatmap_cache WHERE club_id=?", (club["id"],)).fetchone()
+            oldest.append(r[0] if r and r[0] else 0)
+        row = (min(oldest) if oldest else 0,)
+    elif job == "payments":
+        row = conn.execute("SELECT MAX(synced_at) FROM payments_sync").fetchone()
+    else:
+        row = (0,)
+    return int(row[0]) if row and row[0] else 0
+
+
+def _job_due_in(job: str, period_s: int, retry_s: int) -> float:
+    """Seconds until the job is due (<= 0 means now). Seeds job_state from data when absent."""
+    try:
+        conn = _db_connect()
+        try:
+            row = conn.execute("SELECT last_run, ok FROM job_state WHERE job=?", (job,)).fetchone()
+            if row is None:
+                seed = _job_seed(conn, job)
+                if not seed:
+                    return 0.0
+                conn.execute("INSERT OR IGNORE INTO job_state (job, last_run, ok, calls, errors, updated_at) "
+                             "VALUES (?,?,?,?,?,?)", (job, seed, 1, 0, 0, int(_now())))
+                conn.commit()
+                row = (seed, 1)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0.0
+    last_run, ok = row
+    return max(0.0, (last_run or 0) + (period_s if ok else retry_s) - _now())
+
+
+def _job_record(job: str, started_at: int, ok: bool, calls: int, errors: int) -> None:
+    try:
+        conn = _db_connect()
+        try:
+            conn.execute("INSERT OR REPLACE INTO job_state (job, last_run, ok, calls, errors, updated_at) "
+                         "VALUES (?,?,?,?,?,?)", (job, int(started_at), int(bool(ok)), int(calls), int(errors),
+                                                  int(_now())))
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        print(f"[{job}] job_state write error: {exc}", flush=True)
+
+
+def _wait_for_job(job: str, period_s: int, retry_s: int) -> None:
+    """Block until the job is due, polling job_state at most every 5 min. Logs once per wait."""
+    announced = False
+    while True:
+        due = _job_due_in(job, period_s, retry_s)
+        if due <= 0:
+            return
+        if not announced:
+            print(f"[{job}] next run in {int(due // 60)}m (persisted)", flush=True)
+            announced = True
+        time.sleep(min(due, 300))
+
+
+def _write_job_status(job: str, last_run: int, ok: bool, calls: int, errors: int) -> None:
+    """Atomically write STATUS_DIR/<job>.json (0644, dir 0755) for labs_heartbeat. Five keys, no
+    personal data. UMask=0077 on the unit means the modes must be set explicitly. Never raises."""
+    tmp = None
+    try:
+        os.makedirs(STATUS_DIR, exist_ok=True)
+        os.chmod(STATUS_DIR, 0o755)
+        fd, tmp = tempfile.mkstemp(dir=STATUS_DIR, prefix="." + job + ".", suffix=".tmp")
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"job": job, "last_run": _iso_z(last_run), "ok": bool(ok),
+                       "calls": int(calls), "errors": int(errors)}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+            os.fchmod(fh.fileno(), 0o644)
+        os.replace(tmp, os.path.join(STATUS_DIR, job + ".json"))
+        tmp = None
+    except Exception as exc:
+        print(f"[{job}] status write failed: {type(exc).__name__}", flush=True)
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _london_day_keys(today, n: int = 28) -> list:
+    """[(date_str, start_ms, end_ms)] for n London days from `today` (the keys /api/month reads)."""
+    keys = []
+    for i in range(n):
+        d = today + timedelta(days=i)
+        start_ms = int(datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=_LONDON_TZ).timestamp() * 1000)
+        end_ms = int(datetime(d.year, d.month, d.day, 23, 59, 59, 999000, tzinfo=_LONDON_TZ).timestamp() * 1000)
+        keys.append((str(d), str(start_ms), str(end_ms)))
+    return keys
+
+
+def _availability_refresh_targets(now_s: float) -> list:
+    """(club_id, start_ms, end_ms) to refresh: the 28 London days today..today+27 for each live
+    club, plus any other existing non-Racketeer row inside that window. Never past days."""
+    today = datetime.fromtimestamp(now_s, _LONDON_TZ).date()
+    keys = _london_day_keys(today)
+    lo = int(keys[0][1])
+    hi = int(_london_day_keys(today + timedelta(days=28), 1)[0][1])
+    targets: dict = {}
+    for club in HEATMAP_CLUBS:
+        if club["id"] == RACKETEER_CLUB_ID:
+            continue
+        for _d, start, end in keys:
+            targets[(club["id"], start, end)] = None
+    try:
+        conn = _db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT club_id, start_datetime, end_datetime FROM availability "
+                "WHERE club_id != ? AND CAST(start_datetime AS INTEGER) >= ? AND CAST(start_datetime AS INTEGER) < ?",
+                (RACKETEER_CLUB_ID, lo, hi)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        print(f"[refresh] db read error: {exc}", flush=True)
+        rows = []
+    for club_id, start, end in rows:
+        targets.setdefault((club_id, start, end), None)
+    return list(targets)
+
+
+def _purge_availability(now_s: float) -> int:
+    """Delete availability rows that end before today's London midnight, rows with non-numeric
+    keys and every Racketeer row. Returns the number of rows deleted."""
+    today = datetime.fromtimestamp(now_s, _LONDON_TZ).date()
+    midnight = int(_london_day_keys(today, 1)[0][1])
+    try:
+        conn = _db_connect()
+        try:
+            cur = conn.execute(
+                "DELETE FROM availability WHERE club_id=? OR end_datetime IS NULL "
+                "OR CAST(end_datetime AS INTEGER) < ?", (RACKETEER_CLUB_ID, midnight))
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        print(f"[refresh] purge error: {exc}", flush=True)
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1382,15 +1562,7 @@ def api_month():
     cutoff = int(_now()) - CACHE_TTL
     today  = datetime.now(_LONDON_TZ).date()
 
-    # Build all 28 (date_str, start_ms, end_ms) tuples up front
-    date_params: list = []
-    for i in range(28):
-        d        = today + timedelta(days=i)
-        start_ms = int(datetime(d.year, d.month, d.day, 0, 0, 0,
-                                tzinfo=_LONDON_TZ).timestamp() * 1000)
-        end_ms   = int(datetime(d.year, d.month, d.day, 23, 59, 59, 999000,
-                                tzinfo=_LONDON_TZ).timestamp() * 1000)
-        date_params.append((str(d), str(start_ms), str(end_ms)))
+    date_params = _london_day_keys(today)
 
     days: dict = {dp[0]: None for dp in date_params}
     conn = _db_connect()
@@ -1422,6 +1594,80 @@ def api_month():
     if via_query:
         _set_cookie(resp, via_query)
     return resp
+
+
+def _availability_row(club_id: str, start: str, end: str, max_age_s=None):
+    """Stored availability payload, optionally only when fetched within max_age_s. None if absent."""
+    sql = "SELECT payload FROM availability WHERE club_id=? AND start_datetime=? AND end_datetime=?"
+    args = [club_id, start, end]
+    if max_age_s is not None:
+        sql += " AND fetched_at>=?"
+        args.append(int(_now()) - max_age_s)
+    try:
+        conn = _db_connect()
+        try:
+            row = conn.execute(sql, args).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+@app.route("/api/availability-fresh", methods=["GET"])
+def api_availability_fresh():
+    """Availability for one day, at most WATCH_FRESH_SECS old (watch notifications; the normal
+    availability cache can be 6 h old). Live clubs and a window near now only, single-flight."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    club_id = request.args.get("club_id", "").strip()
+    if club_id not in PAYMENT_CLUB_IDS:
+        return jsonify({"error": "club not allowed"}), 400
+    start = request.args.get("start_datetime", "")
+    end = request.args.get("end_datetime", "")
+    try:
+        start_i, end_i = int(start), int(end)
+    except (TypeError, ValueError):
+        return jsonify({"error": "start_datetime and end_datetime must be integer ms"}), 400
+    now_ms = int(_now() * 1000)
+    if not (now_ms - 36 * 3600000 <= start_i <= now_ms + 48 * 3600000) \
+            or end_i < start_i or end_i - start_i > 26 * 3600000:
+        return jsonify({"error": "window outside allowed range"}), 400
+
+    def _respond(body: str, stale: bool = False):
+        resp = Response(_scrub_json_text(body), status=200, content_type="application/json")
+        if stale:
+            resp.headers["X-CourtView-Stale"] = "1"
+        if via_query:
+            _set_cookie(resp, via_query)
+        return resp
+
+    fresh = _availability_row(club_id, start, end, WATCH_FRESH_SECS)
+    if fresh is not None:
+        return _respond(fresh)
+    with _single_flight_lock(f"availfresh:{club_id}:{start}:{end}"):
+        fresh = _availability_row(club_id, start, end, WATCH_FRESH_SECS)
+        if fresh is not None:
+            return _respond(fresh)
+        try:
+            r = UPSTREAM.get(CACHED_PATH, [("club_id", club_id), ("start_datetime", start),
+                                           ("end_datetime", end)], timeout=15)
+            if r.status_code == 200:
+                body = _scrub_json_text(r.content.decode("utf-8", errors="replace"))
+                try:
+                    good = _is_availability(json.loads(body))
+                except ValueError:
+                    good = False
+                if good:
+                    store_cached(club_id, start, end, body)
+                    return _respond(body)
+        except Exception:
+            pass
+        stale = _availability_row(club_id, start, end)
+        if stale is not None:
+            return _respond(stale, stale=True)
+        return jsonify({"error": "upstream error"}), 502
 
 
 def _counts_payload(club_id: str, raw: str) -> str:
@@ -1989,7 +2235,8 @@ def api_payment_history():
     if not _payments_ready():
         return _payments_unavailable()
 
-    _sync_payments(club_id, start_ms, end_ms)
+    sync = _window_sync_status(club_id, start_ms, end_ms)
+    queued = False if sync["complete"] else _enqueue_payment_window(club_id, start_ms, end_ms)
     try:
         conn = _db_connect()
         try:
@@ -2006,7 +2253,8 @@ def api_payment_history():
     items = [{"id": _payment_public_id(r[4], r[5]), "createdAt": r[0], "description": r[1],
               "amount": r[2], "status": r[3]} for r in rows[:limit]]
     resp = Response(
-        json.dumps({"payments": items, "skip": skip, "limit": limit, "has_more": has_more}),
+        json.dumps({"payments": items, "skip": skip, "limit": limit, "has_more": has_more,
+                    "complete": sync["complete"], "synced_through": sync["synced_through"], "queued": queued}),
         status=200,
         content_type="application/json",
     )
@@ -2167,21 +2415,96 @@ def _sync_payment_day(club_id: str, day: str) -> tuple:
             conn.close()
 
 
-def _sync_payments(club_id: str, start_ms: int, end_ms: int) -> dict:
-    """Make sure every London day in [start_ms, end_ms] is synced (per the freshness rule)."""
-    result = {"complete": False, "days": 0, "pages": 0, "rows": 0}
-    if club_id == RACKETEER_CLUB_ID or club_id not in PAYMENT_SYNC_CLUB_IDS:
-        return result
-    now_s = _now()
-    end_ms = min(int(end_ms), int(now_s * 1000))
+def _london_days(start_ms: int, end_ms: int) -> list:
+    """London days ('YYYY-MM-DD') covering [start_ms, end_ms], with end clamped to now."""
+    end_ms = min(int(end_ms), int(_now() * 1000))
     if end_ms < start_ms:
-        return result
+        return []
     days = []
     d = _london_day(int(start_ms))
     last = _london_day(end_ms)
     while d <= last:
         days.append(d)
         d = (datetime.strptime(d, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    return days
+
+
+def _window_sync_status(club_id: str, start_ms: int, end_ms: int) -> dict:
+    """Read-only sync state of a window: {"complete", "synced_through"}.
+
+    complete: every London day in the window (clamped to now) has complete=1.
+    synced_through: ISO 8601 Z of the oldest per-day freshness (a final day counts as its close,
+    otherwise its synced_at), clamped to min(end, now); None when any day has no sync row."""
+    days = _london_days(start_ms, end_ms)
+    if not days:
+        return {"complete": True, "synced_through": None}
+    conn = _db_connect()
+    try:
+        rows = {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT local_day, synced_at, complete FROM payments_sync WHERE club_id=? AND local_day BETWEEN ? AND ?",
+            (club_id, days[0], days[-1]))}
+    finally:
+        conn.close()
+    if any(d not in rows for d in days):
+        return {"complete": False, "synced_through": None}
+    through = None
+    for d in days:
+        synced_at, complete = rows[d]
+        synced_ms = (synced_at or 0) * 1000
+        close_ms = _london_day_bounds(d)[1]
+        final = bool(complete) and synced_ms >= close_ms + PAYMENTS_FRESH_SECS * 1000
+        val = close_ms if final else synced_ms
+        through = val if through is None else min(through, val)
+    through = min(through, int(end_ms), int(_now() * 1000))
+    return {"complete": all(rows[d][1] == 1 for d in days),
+            "synced_through": _iso_z(through / 1000)}
+
+
+_PAY_QUEUE: dict = {}
+_PAY_QUEUE_LOCK = threading.Lock()
+_PAY_WAKE = threading.Event()
+
+
+def _enqueue_payment_window(club_id: str, start_ms: int, end_ms: int) -> bool:
+    """Queue a window for the background loop. True when queued (or already queued); False for
+    Racketeer, unknown clubs, empty windows and when the queue is full."""
+    if club_id == RACKETEER_CLUB_ID or club_id not in PAYMENT_SYNC_CLUB_IDS:
+        return False
+    days = _london_days(start_ms, end_ms)
+    if not days:
+        return False
+    key = (club_id, days[0], days[-1])
+    with _PAY_QUEUE_LOCK:
+        if key not in _PAY_QUEUE and len(_PAY_QUEUE) >= PAYMENTS_QUEUE_MAX:
+            return False
+        _PAY_QUEUE[key] = True
+    _PAY_WAKE.set()
+    return True
+
+
+def _drain_payment_queue() -> int:
+    """Sync every queued window (called from the payments loop thread). Returns windows synced."""
+    with _PAY_QUEUE_LOCK:
+        keys = list(_PAY_QUEUE)
+        _PAY_QUEUE.clear()
+    for club_id, first, last in keys:
+        print(f"[payments] queued window club={club_id[:8]} days={first}..{last}", flush=True)
+        try:
+            _sync_payments(club_id, _london_day_bounds(first)[0], _london_day_bounds(last)[1] - 1)
+        except Exception as exc:
+            print(f"[payments] queued sync error club={club_id[:8]}: {type(exc).__name__}", flush=True)
+    return len(keys)
+
+
+def _sync_payments(club_id: str, start_ms: int, end_ms: int) -> dict:
+    """Make sure every London day in [start_ms, end_ms] is synced (per the freshness rule)."""
+    result = {"complete": False, "days": 0, "pages": 0, "rows": 0, "errors": 0}
+    if club_id == RACKETEER_CLUB_ID or club_id not in PAYMENT_SYNC_CLUB_IDS:
+        return result
+    now_s = _now()
+    days = _london_days(start_ms, end_ms)
+    if not days:
+        return result
     conn = _db_connect()
     try:
         rows = {r[0]: (r[1], r[2]) for r in conn.execute(
@@ -2207,28 +2530,53 @@ def _sync_payments(club_id: str, start_ms: int, end_ms: int) -> dict:
     finally:
         conn.close()
     result["complete"] = done == len(days)
+    result["errors"] = len(days) - done
     return result
 
 
+def _endpoint_calls(path: str) -> int:
+    return UPSTREAM.snapshot()["endpoints"].get(path, {}).get("calls", 0)
+
+
+def _payments_scheduled_run() -> None:
+    """Sync previous + current London month for each live club; record state and status JSON."""
+    started = int(_now())
+    calls0 = _endpoint_calls("/club/statistics/online_payment_history")
+    now_ms = int(_now() * 1000)
+    today = _london_day(now_ms)
+    prev = datetime.strptime(today[:7] + "-01", "%Y-%m-%d") - timedelta(days=1)
+    start_ms = _london_day_bounds(prev.strftime("%Y-%m-") + "01")[0]
+    errors = 0
+    for club in HEATMAP_CLUBS:
+        try:
+            res = _sync_payments(club["id"], start_ms, now_ms)
+            errors += res["errors"]
+            print(f"[payments] scheduled club={club['id'][:8]} days={res['days']} "
+                  f"pages={res['pages']} rows={res['rows']} complete={int(res['complete'])}", flush=True)
+        except Exception as exc:
+            errors += 1
+            print(f"[payments] loop error club={club['id'][:8]}: {type(exc).__name__}: {exc}", flush=True)
+    calls = _endpoint_calls("/club/statistics/online_payment_history") - calls0
+    _job_record("payments", started, errors == 0, calls, errors)
+    _write_job_status("payments", started, errors == 0, calls, errors)
+
+
 def _payments_sync_loop() -> None:
-    """Backfill previous+current London month on startup, then keep today/yesterday fresh."""
-    time.sleep(20)  # let the heatmap startup go first
-    first = True
+    """Drain on-demand windows queued by the routes, and run the scheduled prev+current-month pass
+    every 30 min. The schedule is persisted in job_state (a restart does not re-run it)."""
+    announced = False
     while True:
-        now_ms = int(_now() * 1000)
-        today = _london_day(now_ms)
-        prev = datetime.strptime(today[:7] + "-01", "%Y-%m-%d") - timedelta(days=1)
-        start_ms = _london_day_bounds(prev.strftime("%Y-%m-") + "01")[0]
-        for club in HEATMAP_CLUBS:
-            try:
-                res = _sync_payments(club["id"], start_ms, now_ms)
-                if first:
-                    print(f"[payments] backfill done club={club['id'][:8]} days={res['days']} "
-                          f"pages={res['pages']} rows={res['rows']} complete={int(res['complete'])}", flush=True)
-            except Exception as exc:
-                print(f"[payments] loop error club={club['id'][:8]}: {type(exc).__name__}: {exc}", flush=True)
-        first = False
-        time.sleep(PAYMENTS_LOOP_SECS)
+        _PAY_WAKE.clear()
+        _drain_payment_queue()
+        due = _job_due_in("payments", PAYMENTS_LOOP_SECS, JOB_RETRY_SECS)
+        if due <= 0:
+            announced = False
+            _payments_scheduled_run()
+            continue
+        if not announced:
+            print(f"[payments] next run in {int(due // 60)}m (persisted)", flush=True)
+            announced = True
+        _PAY_WAKE.wait(min(due, 300))
 
 
 def _parse_window_args():
@@ -2261,7 +2609,8 @@ def api_payment_leaderboard():
         return jsonify({"error": "club not allowed"}), 400
     if not _payments_ready():
         return _payments_unavailable()
-    _sync_payments(club_id, start_ms, end_ms)
+    sync = _window_sync_status(club_id, start_ms, end_ms)
+    queued = False if sync["complete"] else _enqueue_payment_window(club_id, start_ms, end_ms)
     try:
         conn = _db_connect()
         try:
@@ -2273,8 +2622,9 @@ def api_payment_leaderboard():
             conn.close()
     except sqlite3.Error as exc:
         return jsonify({"error": str(exc)}), 500
-    resp = Response(json.dumps({"leaders": _aggregate_leaders(rows)}), status=200,
-                    content_type="application/json")
+    resp = Response(json.dumps({"leaders": _aggregate_leaders(rows), "complete": sync["complete"],
+                                "synced_through": sync["synced_through"], "queued": queued}),
+                    status=200, content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
@@ -2771,22 +3121,11 @@ def access_data():
 # Heatmap: server-side get_booked_hours aggregation
 # ---------------------------------------------------------------------------
 
-def _heatmap_is_stale(club_id: str) -> bool:
-    """Return True if heatmap data for this club is absent or older than HEATMAP_STALE_SECS."""
-    cutoff = int(_now()) - HEATMAP_STALE_SECS
-    try:
-        conn = _db_connect()
-        row = conn.execute(
-            "SELECT MIN(fetched_at) FROM heatmap_cache WHERE club_id=?", (club_id,)
-        ).fetchone()
-        conn.close()
-        oldest = row[0] if row and row[0] is not None else 0
-        return oldest < cutoff
-    except sqlite3.Error:
-        return True
+_HEATMAP_ARRAYS = ("hottest_time_slots", "week_day_wise_activity_count_combined_graph",
+                   "court_wise_activity_count_combined_graph")
 
 
-def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
+def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> bool:
     """One call to /club/statistics/operational; build DOW x hour matrix from hottest_time_slots
     (hour-of-day signal) × week_day_wise_activity_count_combined_graph (DOW signal)."""
     print(f"[heatmap] fetching operational stats for club {club_id}")
@@ -2798,12 +3137,17 @@ def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
                              "end_time": now_ms, "user_timezone": "Europe/London"}, timeout=15)
         data = r.json()
     except Exception as exc:
-        print(f"[heatmap] fetch error for club {club_id}: {exc}")
-        return
+        print(f"[heatmap] fetch error for club {club_id}: {type(exc).__name__}")
+        return False
 
-    if "detail" in data:
-        print(f"[heatmap] API error for club {club_id}: {data['detail']}")
-        return
+    # Validate before any DB write: an error shape or empty payload must never overwrite real data.
+    if not isinstance(data, dict) or "detail" in data:
+        print(f"[heatmap] API error for club {club_id}")
+        return False
+    if r.status_code != 200 or any(not isinstance(data.get(k), list) for k in _HEATMAP_ARRAYS) \
+            or not any(data[k] for k in _HEATMAP_ARRAYS):
+        print(f"[heatmap] invalid payload for club {club_id} (status {r.status_code}), nothing written")
+        return False
 
     # --- Hour-of-day signal from hottest_time_slots (30-min buckets → aggregate per hour) ---
     hour_counts: dict = {}
@@ -2877,88 +3221,103 @@ def _fetch_heatmap_for_club(club_id: str, n_courts: int) -> None:
             )
         conn.commit()
         print(f"[heatmap] stored 30-day operational data for club {club_id} ({len(court_rows)} courts)")
+        return True
     except sqlite3.Error as exc:
         print(f"[heatmap] db write error: {exc}")
+        return False
     finally:
         conn.close()
 
 
 def _heatmap_refresh_loop() -> None:
-    """On startup refresh any stale clubs, then refresh all clubs every 24h."""
-    # Staggered startup: refresh each club that needs it
-    for club in HEATMAP_CLUBS:
-        if _heatmap_is_stale(club["id"]):
-            try:
-                _fetch_heatmap_for_club(club["id"], club["courts"])
-            except Exception as exc:
-                print(f"[heatmap] startup refresh failed for club {club['id']}: {exc}")
-    # Daily refresh loop
+    """Refresh every club once per 24h. The schedule lives in job_state, so a restart neither
+    resets nor immediately re-runs it; a failed run is retried after 30 min."""
     while True:
-        time.sleep(HEATMAP_STALE_SECS)
+        _wait_for_job("heatmap", HEATMAP_STALE_SECS, JOB_RETRY_SECS)
+        started = int(_now())
+        calls = errors = 0
         for club in HEATMAP_CLUBS:
+            calls += 1
             try:
-                _fetch_heatmap_for_club(club["id"], club["courts"])
+                good = _fetch_heatmap_for_club(club["id"], club["courts"])
             except Exception as exc:
-                print(f"[heatmap] daily refresh failed for club {club['id']}: {exc}")
+                print(f"[heatmap] refresh failed for club {club['id']}: {type(exc).__name__}")
+                good = False
+            if not good:
+                errors += 1
+        _job_record("heatmap", started, errors == 0, calls, errors)
 
 
 # ---------------------------------------------------------------------------
 # Background cache refresh thread
 # ---------------------------------------------------------------------------
 
-def _refresh_loop() -> None:
-    """Every 6 hours, re-fetch all availability entries from the past 28 days."""
-    while True:
-        time.sleep(6 * 3600)
-        cutoff = int(_now()) - CACHE_TTL
+def _availability_cycle() -> tuple:
+    """One refresh cycle: purge, then fetch London days today..today+27 for the live clubs.
+    Returns (ok, attempted, refreshed). ok is False when the breaker stopped the cycle or at
+    least half the attempts failed (it is then retried after 30 min)."""
+    t0 = _now()
+    purged = _purge_availability(t0)
+    targets = _availability_refresh_targets(t0)
+    refreshed = errors = 0
+    attempted = 0
+    aborted = False
+    for club_id, start, end in targets:
+        params = [("club_id", club_id)]
+        if start:
+            params.append(("start_datetime", start))
+        if end:
+            params.append(("end_datetime", end))
+        attempted += 1
         try:
-            conn = _db_connect()
-            rows = conn.execute(
-                "SELECT club_id, start_datetime, end_datetime FROM availability WHERE fetched_at > ? AND club_id != ?",
-                (cutoff, RACKETEER_CLUB_ID),
-            ).fetchall()
+            r = UPSTREAM.get(CACHED_PATH, params, timeout=15)
+            if r.status_code == 200:
+                store_cached(club_id, start, end,
+                             _scrub_json_text(r.content.decode("utf-8", errors="replace")))
+                refreshed += 1
+            else:
+                errors += 1
+        except UpstreamUnavailable:
+            errors += 1
+            aborted = True
+            break
+        except Exception as exc:
+            errors += 1
+            print(f"[refresh] fetch error: {type(exc).__name__}", flush=True)
+        time.sleep(random.uniform(0.05, 0.18))
+
+    ok = not aborted and errors * 2 <= attempted
+    print(f"[refresh] {refreshed}/{len(targets)} refreshed, purged {purged} in {round(_now() - t0, 1)}s", flush=True)
+
+    # Periodically evict stale stats_cache entries (no TTL enforced at write time)
+    stats_cutoff = int(_now()) - STATS_CACHE_TTL
+    try:
+        conn = _db_connect()
+        try:
+            conn.execute("DELETE FROM stats_cache WHERE fetched_at < ?", (stats_cutoff,))
+            conn.commit()
+            print("[refresh] stats_cache stale entries evicted")
+        finally:
             conn.close()
-        except sqlite3.Error as exc:
-            print(f"[refresh] db read error: {exc}")
-            continue
+    except sqlite3.Error as exc:
+        print(f"[refresh] stats_cache cleanup error: {exc}")
 
-        if not rows:
-            print("[refresh] no entries to refresh")
-            continue
+    _job_record("availability", int(t0), ok, attempted, errors)
+    _write_job_status("availability", int(t0), ok, attempted, errors)
+    return ok, attempted, refreshed
 
-        t0 = _now()
-        refreshed = 0
-        for club_id, start, end in rows:
-            try:
-                params = [("club_id", club_id)]
-                if start:
-                    params.append(("start_datetime", start))
-                if end:
-                    params.append(("end_datetime", end))
-                r = UPSTREAM.get(CACHED_PATH, params, timeout=15)
-                if r.status_code == 200:
-                    store_cached(club_id, start, end,
-                                 _scrub_json_text(r.content.decode("utf-8", errors="replace")))
-                    refreshed += 1
-                time.sleep(random.uniform(0.05, 0.18))
-            except Exception as exc:
-                print(f"[refresh] error for club_id={club_id}: {exc}")
 
-        elapsed = round(_now() - t0, 1)
-        print(f"[refresh] {refreshed} entries refreshed in {elapsed}s")
-
-        # Periodically evict stale stats_cache entries (no TTL enforced at write time)
-        stats_cutoff = int(_now()) - STATS_CACHE_TTL
+def _refresh_loop() -> None:
+    """Every 6 hours (persisted in job_state), refresh availability for today..today+27 only."""
+    purged = _purge_availability(_now())
+    print(f"[refresh] start-up purge removed {purged} past or archived rows", flush=True)
+    while True:
+        _wait_for_job("availability", AVAIL_REFRESH_SECS, JOB_RETRY_SECS)
         try:
-            conn = _db_connect()
-            try:
-                conn.execute("DELETE FROM stats_cache WHERE fetched_at < ?", (stats_cutoff,))
-                conn.commit()
-                print("[refresh] stats_cache stale entries evicted")
-            finally:
-                conn.close()
-        except sqlite3.Error as exc:
-            print(f"[refresh] stats_cache cleanup error: {exc}")
+            _availability_cycle()
+        except Exception as exc:
+            print(f"[refresh] cycle failed: {type(exc).__name__}: {exc}", flush=True)
+            time.sleep(JOB_RETRY_SECS)
 
 
 # ---------------------------------------------------------------------------
@@ -3021,7 +3380,7 @@ def _startup() -> None:
 
     refresh_thread = threading.Thread(target=_refresh_loop, daemon=True)
     refresh_thread.start()
-    print("[startup] availability refresh thread started (6h cycle)")
+    print("[startup] availability refresh thread started (6h cycle, persisted)")
 
     heatmap_thread = threading.Thread(target=_heatmap_refresh_loop, daemon=True)
     heatmap_thread.start()

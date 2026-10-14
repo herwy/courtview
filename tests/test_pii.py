@@ -321,6 +321,7 @@ class IngestTests(Base):
 
 class LeaderboardTests(Base):
     def test_leaderboard_anonymous_and_stable(self):
+        cv._sync_payments(CLUB, ms(2026, 9, 1), ms(2026, 9, 19, 23, 59))  # routes only read the table
         url = f"/api/payment-leaderboard?{self.window()}"
         a = self.client.get(url)
         b = self.client.get(url)
@@ -342,6 +343,7 @@ class HistoryTests(Base):
         recs = [pay_rec(f"p{i}", f"2026-09-10 {8 + i // 60:02d}:{i % 60:02d}:00") for i in range(130)]
         with mock.patch.object(Upstream, "__call__", lambda s, url, **kw: self._page(recs, url)):
             base = f"/api/payment-history?club_id={CLUB}&start={ms(2026, 9, 10)}&end={ms(2026, 9, 10, 23, 59)}"
+            cv._sync_payments(CLUB, ms(2026, 9, 10), ms(2026, 9, 10, 23, 59))  # routes only read the table
             r1 = self.client.get(base + "&limit=100&skip=0").get_json()
             r2 = self.client.get(base + "&limit=100&skip=100").get_json()
             big = self.client.get(base + "&limit=500&skip=0").get_json()
