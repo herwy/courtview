@@ -1687,77 +1687,158 @@ def _payments_sync_loop() -> None:
         time.sleep(PAYMENTS_LOOP_SECS)
 
 
-def _fetch_payment_leaderboard(club_id: str, start: str, end: str) -> list:
-    """Paginate online_payment_history for a club+window and sum successful payments per player.
+def _like_escape(q: str) -> str:
+    """Escape LIKE wildcards for use with ESCAPE '\\' (backslash first)."""
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
-    Upstream rejects limit>100 (422), so page count can't be cut by requesting bigger pages.
-    Fetches page 0 alone first (most clubs/windows fit in one page); only if that page is full
-    does it fan out the remaining candidate pages concurrently, still stopping accumulation at
-    the first short/empty page found (in skip order) to preserve pagination semantics."""
-    PAGE_SIZE = 100
-    MAX_PAGES = 20  # cap at 2000 payments/window to prevent runaway upstream
 
-    def fetch_page(skip: int) -> list:
-        url = f"{TARGET}/club/statistics/online_payment_history?" + urlencode(
-            {"club_id": club_id, "start_datetime": start, "end_datetime": end, "limit": PAGE_SIZE, "skip": skip})
-        r = cffi_requests.get(url, headers=APP_HEADERS, timeout=15, impersonate="chrome110")
-        if r.status_code != 200:
-            return []
-        page = r.json()
-        return page if isinstance(page, list) else []
+def _parse_window_args():
+    """Validate club_id/start/end. Returns (club_id, start_ms, end_ms) or (Response, status)."""
+    club_id = request.args.get("club_id", "").strip()
+    if not club_id:
+        return jsonify({"error": "club_id required"}), 400
+    try:
+        start_ms = int(request.args.get("start", ""))
+        end_ms = int(request.args.get("end", ""))
+    except (TypeError, ValueError):
+        return jsonify({"error": "start and end must be integer ms"}), 400
+    if end_ms < start_ms or end_ms - start_ms > PAYMENTS_MAX_WINDOW_MS:
+        return jsonify({"error": "invalid window"}), 400
+    return club_id, start_ms, end_ms
 
-    all_records = fetch_page(0)
-    if len(all_records) == PAGE_SIZE:
-        remaining_skips = [p * PAGE_SIZE for p in range(1, MAX_PAGES)]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-            for page in pool.map(fetch_page, remaining_skips):
-                all_records.extend(page)
-                if len(page) < PAGE_SIZE:
-                    break
 
-    return _aggregate_leaders(all_records)
+def _parse_search_args():
+    """Returns (club_id, start_ms, end_ms, q) or (Response, status) on a validation error."""
+    win = _parse_window_args()
+    if len(win) == 2:
+        return win
+    q = request.args.get("q", "").strip()
+    if not 2 <= len(q) <= 100:
+        return jsonify({"error": "q must be 2-100 characters"}), 400
+    return win + (q,)
+
+
+def _payment_row_to_record(row) -> dict:
+    (tid, created_at, name, email, phone, source, desc, amount, status, receipt) = row
+    return {
+        "transaction_id": tid, "createdAt": created_at, "player_name": name, "player_email": email,
+        "player_phone": phone, "source_type": source, "description": desc, "amount": amount,
+        "status": status, "receiptUrl": receipt,
+    }
+
+
+def _search_response(payments: list, total: int, complete: bool, via_query):
+    resp = Response(
+        json.dumps({"payments": payments, "total": total, "limit": PAYMENTS_SEARCH_LIMIT,
+                    "truncated": total > len(payments), "complete": complete}),
+        status=200, content_type="application/json")
+    if via_query:
+        _set_cookie(resp, via_query)
+    return resp
+
+
+@app.route("/api/payment-search", methods=["GET"])
+def api_payment_search():
+    """Search synced payments by player name or email within a window (<= 32 days)."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    args = _parse_search_args()
+    if len(args) == 2:
+        return args
+    club_id, start_ms, end_ms, q = args
+    if club_id not in PAYMENT_SYNC_CLUB_IDS:
+        return jsonify({"error": "club not synced"}), 400
+    sync = _sync_payments(club_id, start_ms, end_ms)
+    pat = "%" + _like_escape(q) + "%"
+    where = ("club_id=? AND created_utc BETWEEN ? AND ? "
+             "AND (player_name LIKE ? ESCAPE '\\' OR player_email LIKE ? ESCAPE '\\')")
+    params = (club_id, start_ms, end_ms, pat, pat)
+    try:
+        conn = _db_connect()
+        try:
+            total = conn.execute(f"SELECT COUNT(*) FROM payments WHERE {where}", params).fetchone()[0]
+            rows = conn.execute(
+                "SELECT transaction_id, created_at, player_name, player_email, player_phone, source_type, "
+                f"description, amount, status, receipt_url FROM payments WHERE {where} "
+                "ORDER BY created_utc DESC LIMIT ?", params + (PAYMENTS_SEARCH_LIMIT,)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+    return _search_response([_payment_row_to_record(r) for r in rows], total, sync["complete"], via_query)
+
+
+@app.route("/api/archive/payment-search", methods=["GET"])
+def api_archive_payment_search():
+    """Search archived Racketeer payment snapshots. Never contacts upstream."""
+    passed, via_query = _gate()
+    if not passed:
+        return _forbidden()
+    args = _parse_search_args()
+    if len(args) == 2:
+        return args
+    club_id, start_ms, end_ms, q = args
+    try:
+        conn = _db_connect()
+        try:
+            payloads = conn.execute(
+                "SELECT payload FROM archive_financial WHERE club_id=? AND endpoint='payment-history'",
+                (club_id,)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+    needle = q.casefold()
+    seen: dict = {}
+    for (payload,) in payloads:
+        try:
+            records = json.loads(payload).get("payments", [])
+        except (ValueError, AttributeError, TypeError):
+            continue
+        if not isinstance(records, list):
+            continue
+        for r in records:
+            if not isinstance(r, dict):
+                continue
+            created = _parse_created_utc(r.get("createdAt"))
+            if created is None or not start_ms <= created <= end_ms:
+                continue
+            if needle not in str(r.get("player_name") or "").casefold() and \
+                    needle not in str(r.get("player_email") or "").casefold():
+                continue
+            seen.setdefault(_payment_txn_id(r), r)
+    matches = sorted(seen.values(), key=lambda r: r.get("createdAt") or "", reverse=True)
+    return _search_response(matches[:PAYMENTS_SEARCH_LIMIT], len(matches), True, via_query)
 
 
 @app.route("/api/payment-leaderboard", methods=["GET"])
 def api_payment_leaderboard():
-    """Top spenders for a club+time window, aggregated server-side from payment history."""
+    """Top spenders for a club+window, aggregated from the local payments table."""
     passed, via_query = _gate()
     if not passed:
         return _forbidden()
-
-    club_id = request.args.get("club_id", "")
-    start   = request.args.get("start", "")
-    end     = request.args.get("end", "")
-    if not club_id or not start or not end:
-        return jsonify({"error": "club_id, start and end required"}), 400
-
-    ck = _stats_key("payment-leaderboard", club_id, start, end)
-    if ck:
-        cached = get_stats_cached(ck)
-        if cached:
-            resp = Response(cached, status=200, content_type="application/json")
-            if via_query: _set_cookie(resp, via_query)
-            return resp
-        with _STATS_FETCH_MUTEX:
-            lock = _STATS_FETCH_LOCKS.setdefault(ck, threading.Lock())
-        with lock:
-            cached = get_stats_cached(ck)
-            if cached:
-                resp = Response(cached, status=200, content_type="application/json")
-                if via_query: _set_cookie(resp, via_query)
-                return resp
-            try:
-                payload = json.dumps({"leaders": _fetch_payment_leaderboard(club_id, start, end)})
-            except Exception as exc:
-                return jsonify({"error": str(exc)}), 502
-            set_stats_cached(ck, payload)
-    else:
+    win = _parse_window_args()
+    if len(win) == 2:
+        return win
+    club_id, start_ms, end_ms = win
+    if club_id not in PAYMENT_SYNC_CLUB_IDS:
+        return jsonify({"error": "club not synced"}), 400
+    _sync_payments(club_id, start_ms, end_ms)
+    try:
+        conn = _db_connect()
         try:
-            payload = json.dumps({"leaders": _fetch_payment_leaderboard(club_id, start, end)})
-        except Exception as exc:
-            return jsonify({"error": str(exc)}), 502
-
-    resp = Response(payload, status=200, content_type="application/json")
+            rows = conn.execute(
+                "SELECT player_name, player_email, amount, status FROM payments "
+                "WHERE club_id=? AND created_utc BETWEEN ? AND ? AND status='PAYMENT_SUCCESS'",
+                (club_id, start_ms, end_ms)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return jsonify({"error": str(exc)}), 500
+    records = [{"player_name": r[0], "player_email": r[1], "amount": r[2], "status": r[3]} for r in rows]
+    resp = Response(json.dumps({"leaders": _aggregate_leaders(records)}), status=200,
+                    content_type="application/json")
     if via_query:
         _set_cookie(resp, via_query)
     return resp
