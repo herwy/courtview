@@ -727,8 +727,10 @@ class PaymentRouteTests(RouteBase):
         c.commit()
         res = cv._window_sync_status(CLUB, s, e)
         self.assertTrue(res["complete"])
-        self.assertEqual(res["synced_through"], cv._iso_z(close_0910 / 1000))
+        self.assertEqual(res["synced_through"], cv._iso_z(ms_utc(2026, 9, 11, 10) / 1000))  # the open day
         self.assertRegex(res["synced_through"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        done = cv._window_sync_status(CLUB, s, ms_utc(2026, 9, 10, 12))  # only the final day: window end
+        self.assertEqual(done["synced_through"], cv._iso_z(ms_utc(2026, 9, 10, 12) / 1000))
         c.execute("UPDATE payments_sync SET complete=0 WHERE local_day='2026-09-11'")
         c.commit()
         self.assertFalse(cv._window_sync_status(CLUB, s, e)["complete"])

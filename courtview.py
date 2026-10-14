@@ -2433,8 +2433,8 @@ def _window_sync_status(club_id: str, start_ms: int, end_ms: int) -> dict:
     """Read-only sync state of a window: {"complete", "synced_through"}.
 
     complete: every London day in the window (clamped to now) has complete=1.
-    synced_through: ISO 8601 Z of the oldest per-day freshness (a final day counts as its close,
-    otherwise its synced_at), clamped to min(end, now); None when any day has no sync row."""
+    synced_through: ISO 8601 Z of the oldest synced_at among non-final days (the window end when
+    every day is final), clamped to min(end, now); None when any day has no sync row."""
     days = _london_days(start_ms, end_ms)
     if not days:
         return {"complete": True, "synced_through": None}
@@ -2447,15 +2447,15 @@ def _window_sync_status(club_id: str, start_ms: int, end_ms: int) -> dict:
         conn.close()
     if any(d not in rows for d in days):
         return {"complete": False, "synced_through": None}
-    through = None
+    # Final days are complete for good; only a non-final day limits how fresh the window is.
+    open_days = []
     for d in days:
         synced_at, complete = rows[d]
         synced_ms = (synced_at or 0) * 1000
-        close_ms = _london_day_bounds(d)[1]
-        final = bool(complete) and synced_ms >= close_ms + PAYMENTS_FRESH_SECS * 1000
-        val = close_ms if final else synced_ms
-        through = val if through is None else min(through, val)
-    through = min(through, int(end_ms), int(_now() * 1000))
+        final = bool(complete) and synced_ms >= _london_day_bounds(d)[1] + PAYMENTS_FRESH_SECS * 1000
+        if not final:
+            open_days.append(synced_ms)
+    through = min(min(open_days) if open_days else int(end_ms), int(end_ms), int(_now() * 1000))
     return {"complete": all(rows[d][1] == 1 for d in days),
             "synced_through": _iso_z(through / 1000)}
 
