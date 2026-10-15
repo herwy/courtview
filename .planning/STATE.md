@@ -59,4 +59,4 @@ last_updated: "2026-10-14T00:00:00Z"
 |------|-----------|-------------|
 | ul6 | Session 2026-05-22: tooltip portal fix, payment 1-day window, Rocket activity fallback, club switch UX, activity type renames | None |
 | wfp | Session 2026-05-23: All fixes complete. Compare race fixed. HEATMAP_CLUBS courts corrected. Checklist clean. | None |
-| 0yr | Session 2026-10-14: Racketeer archive trimmed, supervision hardening + plain-English alerts (quick-28/29), deploy audit gate + werkzeug CVE fix (quick-30), GSD planning scaffold. Nothing open. | None |
+| 0yr | Session 2026-10-14/15: review Phases 1-5 shipped (quick 37-42), docs audited, backup key rotated to RSA (restore verified 2026-10-15). Open (user): send Padelmates disclosure; test password-manager key copy with courtview-restore.sh --key on another machine. | None |
